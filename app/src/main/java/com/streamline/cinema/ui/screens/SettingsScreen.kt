@@ -142,6 +142,7 @@ fun SettingsScreen(
     focusSignal: Int = 0
 ) {
     val settings by vm.settings.collectAsState()
+    val update by vm.update.collectAsState()
     val profile by vm.activeProfile.collectAsState()
     val kidsApproved by vm.kidsMode.approved.collectAsState()
     val test by vm.tmdbTest.collectAsState()
@@ -2272,6 +2273,90 @@ fun SettingsScreen(
                         }
                     }
                     SettingsSection.ABOUT -> {
+                        val release = update.release
+                        SettingsGroup(
+                            "Updates",
+                            hint = when {
+                                update.downloading -> "${(update.progress * 100).toInt()}%"
+                                release != null -> "v${release.tag.removePrefix("v")}"
+                                update.checking -> "CHECKING"
+                                update.upToDate -> "UP TO DATE"
+                                update.noRelease -> "NO RELEASE"
+                                update.error != null -> "OFFLINE"
+                                else -> "GITHUB"
+                            }
+                        ) {
+                            SettingsToggleRow(
+                                label = "Check GitHub releases",
+                                checked = settings.autoUpdateCheck,
+                                onChange = { vm.saveSettings { s -> s.copy(autoUpdateCheck = it) } },
+                                description = "Syncs with github.com/M3UCurator/StreamLine-Cinema at startup"
+                            )
+                            Text(
+                                when {
+                                    update.downloading ->
+                                        "Downloading v${release?.tag?.removePrefix("v")} · " +
+                                            "${(update.progress * 100).toInt()}%"
+                                    release != null ->
+                                        "v${release.tag.removePrefix("v")} is available · " +
+                                            formatCacheSize(release.asset?.size ?: 0)
+                                    update.checking -> "Checking the latest published release…"
+                                    update.upToDate -> "Up to date · v${BuildConfig.ITERATION}"
+                                    update.noRelease ->
+                                        "No release published yet · publish one at " +
+                                            "github.com/M3UCurator/StreamLine-Cinema/releases"
+                                    update.error != null -> update.error.orEmpty()
+                                    else -> "Check now to compare with the latest GitHub release."
+                                },
+                                color = if (update.error != null) Cinema.Offline else Cinema.TextSecondary,
+                                fontSize = 12.sp,
+                                lineHeight = 17.sp
+                            )
+                            if (update.installStarted) {
+                                Text(
+                                    "Installer opened · confirm the update in the system dialog",
+                                    color = Cinema.Online,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TvButton(
+                                    label = "CHECK NOW",
+                                    glyph = "↻",
+                                    style = TvButtonStyle.GHOST,
+                                    compact = true,
+                                    enabled = !update.checking && !update.downloading,
+                                    onClick = { vm.checkForUpdates() }
+                                )
+                                if (release != null && !update.downloading) {
+                                    TvButton(
+                                        label = "DOWNLOAD & INSTALL",
+                                        glyph = "↓",
+                                        style = TvButtonStyle.PRIMARY,
+                                        compact = true,
+                                        onClick = { vm.downloadAndInstallUpdate() }
+                                    )
+                                }
+                            }
+                            if (update.downloading) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 10.dp)
+                                        .height(3.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(Color.White.copy(alpha = 0.10f))
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth(update.progress.coerceIn(0f, 1f))
+                                            .height(3.dp)
+                                            .background(Cinema.Gold)
+                                    )
+                                }
+                            }
+                        }
                         SettingsGroup("Application", hint = "v${BuildConfig.VERSION_NAME}") {
                             Text(
                                 "StreamLine Cinema · a leanback TV client for TMDB discovery, " +

@@ -1,6 +1,7 @@
 package com.streamline.cinema
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.streamline.cinema.data.AddonSource
@@ -38,9 +39,13 @@ import com.streamline.cinema.data.StreamUrls
 import com.streamline.cinema.data.normalizeBadgeSource
 import com.streamline.cinema.data.SyncCadence
 import com.streamline.cinema.data.SyncTarget
+import com.streamline.cinema.data.NoPublishedReleaseException
+import com.streamline.cinema.data.UpdateChecker
+import com.streamline.cinema.data.UpdateUiState
 import com.streamline.cinema.data.WatchProgress
 import com.streamline.cinema.data.allowedFor
 import com.streamline.cinema.data.filterKnownOtherLanguages
+import com.streamline.cinema.data.isNewerVersion
 import com.streamline.cinema.data.rankByLanguage
 import com.streamline.cinema.data.rankingLanguage
 import com.streamline.cinema.data.todayStamp
@@ -310,6 +315,13 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private val syncGuard = Any()
     private val activeSyncs = mutableSetOf<SyncTarget>()
 
+    // GitHub release sync: the startup check only reads the latest release; the
+    // APK is downloaded and handed to PackageInstaller on explicit request.
+    private val updateChecker = UpdateChecker(application)
+    private val _update = MutableStateFlow(UpdateUiState())
+    val update: StateFlow<UpdateUiState> = _update.asStateFlow()
+    private var updateJob: Job? = null
+
     private var searchJob: Job? = null
     private var epgSearchJob: Job? = null
     private var genresJob: Job? = null
@@ -374,6 +386,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             delay(3_000)
             val target = settings.value.badgeSourceUrl.trim()
             if (target.isNotBlank()) container.badges.refresh(target)
+        }
+        viewModelScope.launch {
+            // Sync with the repository once the UI has settled. A release page
+            // with no published release yet is not an error the user must see.
+            delay(4_000)
+            if (settings.value.autoUpdateCheck) checkForUpdates()
         }
     }
 
@@ -1682,6 +1700,73 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun saveSettings(transform: (AppSettings) -> AppSettings) {
         container.settingsStore.update(transform)
+    }
+
+    /**
+     * Reads the latest GitHub release and keeps it only when its tag is newer
+     * than the installed iteration. Called at startup (when enabled) and by the
+     * About → Updates row.
+     */
+    fun checkForUpdates() {
+        if (_update.value.checking || _update.value.downloading) return
+        updateJob?.cancel()
+        updateJob = viewModelScope.launch {
+            _update.update { it.copy(checking = true, error = null, installStarted = false) }
+            runCatching { updateChecker.latest() }
+                .onSuccess { release ->
+                    val newer = release.asset != null &&
+                        isNewerVersion(release.tag, BuildConfig.ITERATION)
+                    Log.d(
+                        "StreamLine:update",
+                        "latest=${release.tag} current=${BuildConfig.ITERATION} newer=$newer"
+                    )
+                    _update.update {
+                        it.copy(
+                            checking = false,
+                            release = if (newer) release else null,
+                            latestTag = release.tag,
+                            upToDate = !newer,
+                            noRelease = false
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    Log.w("StreamLine:update", "check failed: ${error.message}")
+                    val missing = error is NoPublishedReleaseException
+                    _update.update {
+                        it.copy(
+                            checking = false,
+                            noRelease = missing,
+                            error = if (missing) null else
+                                error.message ?: "Could not reach GitHub"
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Downloads the release APK for this flavor and opens the system installer. */
+    fun downloadAndInstallUpdate() {
+        val asset = _update.value.release?.asset ?: return
+        if (_update.value.downloading) return
+        viewModelScope.launch {
+            _update.update {
+                it.copy(downloading = true, progress = 0f, error = null, installStarted = false)
+            }
+            runCatching {
+                val apk = updateChecker.download(asset) { fraction ->
+                    _update.update { it.copy(progress = fraction) }
+                }
+                updateChecker.install(apk)
+            }.onSuccess {
+                _update.update { it.copy(downloading = false, progress = 1f, installStarted = true) }
+            }.onFailure { error ->
+                Log.w("StreamLine:update", "download failed: ${error.message}")
+                _update.update {
+                    it.copy(downloading = false, error = error.message ?: "Download failed")
+                }
+            }
+        }
     }
 
     /**

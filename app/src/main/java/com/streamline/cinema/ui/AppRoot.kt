@@ -50,6 +50,7 @@ import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.LiveChannel
 import com.streamline.cinema.data.MediaType
 import com.streamline.cinema.data.PlaybackOption
+import com.streamline.cinema.data.UpdateRelease
 import com.streamline.cinema.data.WatchProgress
 import com.streamline.cinema.ui.screens.DetailScreen
 import com.streamline.cinema.ui.screens.FavoritesScreen
@@ -67,6 +68,7 @@ import com.streamline.cinema.ui.screens.SettingsScreen
 @Composable
 fun AppRoot(vm: CinemaViewModel) {
     val settings by vm.settings.collectAsState()
+    val updateState by vm.update.collectAsState()
     val profile by vm.activeProfile.collectAsState()
     val context = LocalContext.current
     val view = LocalView.current
@@ -83,6 +85,7 @@ fun AppRoot(vm: CinemaViewModel) {
     var kidsCurationOpen by remember { mutableStateOf(false) }
     var settingsFocusTick by remember { mutableIntStateOf(0) }
     var pendingPlay by remember { mutableStateOf<PlayRequest?>(null) }
+    var dismissedUpdateTag by rememberSaveable { mutableStateOf<String?>(null) }
     val focusMemory = remember { FocusMemory() }
     val screenState = remember { ScreenStateStore() }
     // Cancelling a PIN dialog must hand focus back to the bar control that opened it.
@@ -424,6 +427,28 @@ fun AppRoot(vm: CinemaViewModel) {
             }
         )
     }
+
+    val pendingUpdate = updateState.release
+    LaunchedEffect(updateState.installStarted) {
+        if (updateState.installStarted) dismissedUpdateTag = pendingUpdate?.tag
+    }
+    // Never cover the profile gate, a resume prompt or the kids curation flow;
+    // the offer waits until the main UI is interactive again.
+    if (pendingUpdate != null &&
+        pendingUpdate.tag != dismissedUpdateTag &&
+        !profileGateOpen &&
+        pendingPlay == null &&
+        !kidsCurationOpen
+    ) {
+        UpdatePromptDialog(
+            release = pendingUpdate,
+            downloading = updateState.downloading,
+            progress = updateState.progress,
+            error = updateState.error,
+            onInstall = { vm.downloadAndInstallUpdate() },
+            onLater = { dismissedUpdateTag = pendingUpdate.tag }
+        )
+    }
 }
 
 private data class PlayRequest(
@@ -515,4 +540,105 @@ private fun formatPromptTime(ms: Long): String {
     val seconds = totalSeconds % 60
     return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds)
     else "%d:%02d".format(minutes, seconds)
+}
+
+@Composable
+private fun UpdatePromptDialog(
+    release: UpdateRelease,
+    downloading: Boolean,
+    progress: Float,
+    error: String?,
+    onInstall: () -> Unit,
+    onLater: () -> Unit
+) {
+    val primaryFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(150)
+        runCatching { primaryFocus.requestFocus() }
+    }
+    Dialog(onDismissRequest = onLater) {
+        Column(
+            Modifier
+                .glassSurface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(CinemaDimens.CardRadius),
+                    base = Glass.Sheet
+                )
+                .padding(26.dp)
+        ) {
+            Text(
+                text = "Update available",
+                color = Cinema.TextPrimary,
+                style = CinemaType.SectionTitle
+            )
+            Text(
+                text = "${release.name.ifBlank { release.tag }} · " +
+                    formatUpdateSize(release.asset?.size ?: 0),
+                color = Cinema.TextMuted,
+                style = CinemaType.BodySmall,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            Text(
+                text = "Syncs from the StreamLine-Cinema GitHub release. Settings, library, " +
+                    "profiles and playlists are kept.",
+                color = Cinema.TextSecondary,
+                style = CinemaType.BodySmall,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+            if (downloading) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 14.dp)
+                        .height(3.dp)
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+                        .background(Color.White.copy(alpha = 0.10f))
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(progress.coerceIn(0f, 1f))
+                            .height(3.dp)
+                            .background(Cinema.Gold)
+                    )
+                }
+                Text(
+                    text = "${(progress * 100).toInt()}%",
+                    color = Cinema.TextSecondary,
+                    style = CinemaType.BodySmall,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+            error?.takeIf { it.isNotBlank() }?.let { message ->
+                Text(
+                    text = message,
+                    color = Cinema.Offline,
+                    style = CinemaType.BodySmall,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(top = 20.dp)
+            ) {
+                TvButton(
+                    label = if (downloading) "DOWNLOADING…" else "INSTALL UPDATE",
+                    glyph = "↓",
+                    style = TvButtonStyle.PRIMARY,
+                    enabled = !downloading,
+                    onClick = onInstall,
+                    focusRequester = primaryFocus
+                )
+                TvButton(
+                    label = "LATER",
+                    onClick = onLater,
+                    style = TvButtonStyle.GHOST
+                )
+            }
+        }
+    }
+}
+
+private fun formatUpdateSize(bytes: Long): String {
+    if (bytes <= 0) return "size unknown"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1) "%.1f MB".format(mb) else "${bytes / 1024} KB"
 }

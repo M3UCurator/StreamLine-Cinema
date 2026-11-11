@@ -5,10 +5,15 @@ import java.time.format.DateTimeFormatter
 // Release artifacts are named by build day and iteration (Cinema<ddMMyy>v<iteration>.apk)
 // so successive builds never overwrite each other. Bump -PcinemaIteration per release;
 // -PallAbis=true adds the emulator suffix and drops the 32-bit ABI filter for that build.
-val iteration = providers.gradleProperty("cinemaIteration").orElse("12.64").get()
+val iteration = providers.gradleProperty("cinemaIteration").orElse("12.77").get()
 val allAbis = providers.gradleProperty("allAbis").map(String::toBoolean).getOrElse(false)
 val buildDay = LocalDate.now().format(DateTimeFormatter.ofPattern("ddMMyy"))
 val artifactName = "Cinema${buildDay}v$iteration" + if (allAbis) "-allabis" else ""
+// Release tags are v<iteration>; keep versionCode monotonic so the installer
+// accepts an in-app update over the previous build.
+val versionCodeValue = iteration.split('.').mapNotNull(String::toIntOrNull).let { parts ->
+    if (parts.isEmpty()) 1 else parts[0] * 10_000 + (parts.getOrNull(1) ?: 0)
+}
 
 plugins {
     id("com.android.application")
@@ -23,8 +28,13 @@ android {
         applicationId = "com.streamline.cinema"
         minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = versionCodeValue
+        versionName = iteration
+
+        // The updater compares the installed iteration with the latest GitHub
+        // release tag and downloads the same ABI flavor that is installed.
+        buildConfigField("String", "ITERATION", "\"$iteration\"")
+        buildConfigField("boolean", "ALL_ABIS", allAbis.toString())
 
         if (!allAbis) {
             ndk {

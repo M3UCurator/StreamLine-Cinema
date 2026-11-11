@@ -481,7 +481,9 @@ data class AppSettings(
     val contentCountry: String = "",
     val languageRule: LanguageRule = LanguageRule.PREFER,
     /** Sort addon sources tagged with [contentLanguage] ahead of untagged ones. */
-    val preferLanguageSources: Boolean = true
+    val preferLanguageSources: Boolean = true,
+    /** Compare with the latest GitHub release at startup and offer the update. */
+    val autoUpdateCheck: Boolean = true
 ) {
     val hasTmdbAccess: Boolean get() = tmdbApiKey.isNotBlank() || proxyBaseUrl.isNotBlank()
 
@@ -591,6 +593,7 @@ data class AppSettings(
         put("contentCountry", contentCountry)
         put("languageRule", languageRule.name)
         put("preferLanguageSources", preferLanguageSources)
+        put("autoUpdateCheck", autoUpdateCheck)
     }
 
     companion object {
@@ -651,7 +654,8 @@ data class AppSettings(
                 contentLanguage = o.optString("contentLanguage"),
                 contentCountry = o.optString("contentCountry"),
                 languageRule = LanguageRule.from(o.stringOrNull("languageRule")),
-                preferLanguageSources = o.optBoolean("preferLanguageSources", true)
+                preferLanguageSources = o.optBoolean("preferLanguageSources", true),
+                autoUpdateCheck = o.optBoolean("autoUpdateCheck", true)
             ).normalized()
         }
     }

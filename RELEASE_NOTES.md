@@ -1,4 +1,53 @@
-# StreamLine Cinema v12.77
+# StreamLine Cinema v12.78
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.78 — Stream resilience when the provider goes quiet
+
+The recovery paths added earlier are now complete: a provider that drops a socket, starves a segment or sends junk is retried in place when that can work, and failed fast when it cannot.
+
+- **Fast-fail load policy** — a definitive 4xx (except 408 and 429), an unsupported manifest or container, and malformed manifest/container data no longer grind through the 0.5 / 1 / 2 / 4 / 8 s transport budget. Malformed data gets exactly one retry (usually a truncated transfer); everything else in that list fails on the spot, so failover or the error panel is not delayed by up to six pointless retries.
+- **Trickle-safe stall detection** — the 15 s watchdog now compares anchors for both the playhead and the buffered position and counts the stream as frozen only when neither has moved 250 ms across the whole window, while the player is not paused, scrubbing or audio-suppressed. A provider that trickles in a few dozen milliseconds per second keeps playing instead of being misread as dead; a seek in either direction re-baselines the anchors.
+- **Automatic on-demand resume** — a film that fails with a transient transport code reconnects the same source twice, after 3 s and 6 s, and re-seeks to the snapshotted playhead, so the retry costs no viewing position. Live keeps its three reconnects at 5 s, 10 s and 15 s.
+- **Stall recovery before the panel** — a stall first re-prepares the same source after 2 s (twice as long on each further attempt, capped at 8 s): three attempts on live, two on a film, on the budget shared with error reconnects. Only when that budget is spent does the panel read **Playback stalled** / **Channel stalled** and hand over to source failover. The reconnect notice shows `Playback stalled · reconnecting in Ns` / `Connection lost · reconnecting in Ns`.
+- **Re-armed after every reload** — the watchdog starts a fresh 15 s window on every re-prepare, so a reload is never mistaken for an immediate second stall.
+- **Observable decisions** — each automatic retry logs the reason, attempt and delay on `StreamLine:player` (`stall · re-preparing the same source in 2000 ms (attempt 1/2)`, `transient · ERROR_CODE_IO_NETWORK_CONNECTION_FAILED · re-preparing …`).
+
+## Verified on 12.78
+
+- The full unit suite passes: 211 tests, 0 failures. `StreamLoadPolicyTest` drives the load policy with real `ParserException` / `InvalidResponseCodeException` instances (definitive 4xx final, 408/429 retried, unsupported final, malformed one retry then final), and `PlaybackWatchdogTest` adds the trickle, backward-seek and shared-budget cases to the existing live/on-demand watchdog matrix.
+- **Stall path, end to end on the API 37 emulator:** a local HLS fixture that trickles a 188-byte TS packet every second without ever completing the segment produced `stall · re-preparing the same source in 2000 ms (attempt 1/2)` on logcat and the gold pill `Playback stalled · reconnecting in 2s` over the frozen frame; the player re-prepared the same URL automatically, the fixture served the next request in full, playback continued, and neither the `Playback failed` nor a second stall line appeared — recovery finished before the panel.
+- **On-demand transient path, end to end:** a fixture that cut the first six requests of the second segment produced `transient · ERROR_CODE_IO_NETWORK_CONNECTION_FAILED · re-preparing the same source in 3000 ms (attempt 1/2)`, the pill `Connection lost · reconnecting in 3s`, and the seventh request served the real segment; the saved playhead was restored and playback continued without the error panel.
+- `adb emu network delay` reported success but had no measurable effect on the guest (an HTTPS fetch still returned in 0.07 s), so both paths were exercised with a loopback fixture on `10.0.2.2:8099` instead of shaped networking.
+- The all-ABI release installs as `versionCode 120078` / `versionName 12.78`; **Settings → About** reads `v12.78` and the updater shows `NO RELEASE` while the repository has no published release, as on 12.77.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema111126v12.78.apk` | `armeabi-v7a` (TV boxes) | 76,253,699 bytes | `b0961cd2ab28e123611684e12ad0c836fe2f2c37cd75f0cf6a484ddc676c0fc3` |
+| `Cinema111126v12.78-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,452,330 bytes | `8c87cfec4bc56e43d0fa1866f18ec366080fe735c25c16c1be330065220cc6d7` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema111126v12.78.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.77 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

@@ -3,6 +3,7 @@ package com.streamline.cinema.ui.player
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.ParserException
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
@@ -76,24 +77,52 @@ internal class AdaptiveMediaSourceFactory(
 
 /**
  * Retries transport failures (timeouts, resets, truncated chunks) with an
- * exponential backoff, but lets a definitive HTTP 4xx fail immediately so the
- * player can fail over to another source instead of hammering a dead CDN.
+ * exponential backoff, but fails fast on outcomes a retry cannot cure: a
+ * definitive HTTP 4xx, or a manifest/container the demuxer does not support.
+ * Malformed bytes usually mean a truncated transfer, so they keep one retry
+ * before the source is declared dead; after that the panel/failover path owns
+ * it instead of grinding through the whole transport budget.
  */
 internal class StreamLoadErrorPolicy(minRetries: Int) :
     DefaultLoadErrorHandlingPolicy(minRetries) {
 
     override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
         val error = loadErrorInfo.exception
-        if (error is HttpDataSource.InvalidResponseCodeException) {
-            val code = error.responseCode
-            if (code in 400..499 && code != 408 && code != 429) return C.TIME_UNSET
-        }
-        val exponent = (loadErrorInfo.errorCount - 1).coerceIn(0, 4)
-        return (500L shl exponent).coerceAtMost(8_000L)
+        val status = (error as? HttpDataSource.InvalidResponseCodeException)?.responseCode
+        return streamRetryDelayMs(status, error as? ParserException, loadErrorInfo.errorCount)
     }
 
     override fun getMinimumLoadableRetryCount(dataType: Int): Int =
         if (dataType == C.DATA_TYPE_MEDIA) 4 else 6
+}
+
+/**
+ * The retry decision behind [StreamLoadErrorPolicy], kept pure so it can be
+ * unit tested: `C.TIME_UNSET` means the load is final, otherwise the delay
+ * before the next attempt.
+ */
+internal fun streamRetryDelayMs(
+    httpStatusCode: Int?,
+    parserError: ParserException?,
+    errorCount: Int
+): Long {
+    if (httpStatusCode != null &&
+        httpStatusCode in 400..499 &&
+        httpStatusCode != 408 &&
+        httpStatusCode != 429
+    ) {
+        return C.TIME_UNSET
+    }
+    if (parserError != null) {
+        // Legal syntax this demuxer does not implement (including an
+        // unrecognised container) cannot become readable on a retry.
+        if (!parserError.contentIsMalformed) return C.TIME_UNSET
+        // Malformed bytes are usually a truncated transfer: one retry is
+        // worth it, after that the source itself is broken.
+        if (errorCount > 1) return C.TIME_UNSET
+    }
+    val exponent = (errorCount - 1).coerceIn(0, 4)
+    return (500L shl exponent).coerceAtMost(8_000L)
 }
 
 internal fun adaptiveSourceFactories(

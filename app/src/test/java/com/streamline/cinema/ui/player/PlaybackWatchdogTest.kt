@@ -2,6 +2,7 @@ package com.streamline.cinema.ui.player
 
 import androidx.media3.common.Player
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -150,6 +151,82 @@ class PlaybackWatchdogTest {
     }
 
     @Test
+    fun slowPlayheadTrickleIsNotAStall() {
+        // A starved CDN can advance the playhead by a few dozen milliseconds per
+        // poll. No single tick reaches the threshold, but the accumulated
+        // movement proves the stream is alive.
+        val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
+        val player = FakePlayer(playbackState = Player.STATE_READY, currentPosition = 10_000L)
+        var now = 0L
+        var position = 10_000L
+        assertEquals(StallDecision.Progress, watchdog.tick(player, now, scrubbing = false))
+        repeat(300) {
+            now += 1_000L
+            position += 80L
+            player.currentPosition = position
+            assertNotEquals(StallDecision.Stalled, watchdog.tick(player, now, scrubbing = false))
+        }
+    }
+
+    @Test
+    fun bufferedTrickleDuringARefillIsNotAStall() {
+        // The playhead is parked while the player refills after a seek; a slow
+        // drip into the buffer must still keep the watchdog content.
+        val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
+        val player = FakePlayer(
+            playbackState = Player.STATE_READY,
+            currentPosition = 60_000L,
+            bufferedPosition = 75_000L
+        )
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 0L, scrubbing = false))
+        player.currentPosition = 120_000L
+        player.playbackState = Player.STATE_BUFFERING
+        player.bufferedPosition = 120_050L
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 1_000L, scrubbing = false))
+        var now = 1_000L
+        repeat(60) {
+            now += 1_000L
+            player.bufferedPosition += 80L
+            assertNotEquals(StallDecision.Stalled, watchdog.tick(player, now, scrubbing = false))
+        }
+    }
+
+    @Test
+    fun backwardSeekRebaselinesTheWindow() {
+        val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
+        val player = FakePlayer(playbackState = Player.STATE_READY, currentPosition = 120_000L)
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 0L, scrubbing = false))
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 10_000L, scrubbing = false))
+        // The user rewinds 90 s: the anchors drop, and the next frozen window
+        // is measured from the new spot instead of the old high-water mark.
+        player.currentPosition = 30_000L
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 11_000L, scrubbing = false))
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 25_999L, scrubbing = false))
+        assertEquals(StallDecision.Stalled, watchdog.tick(player, 26_000L, scrubbing = false))
+    }
+
+    @Test
+    fun backwardSeekInsideAFullBufferStaysAlive() {
+        val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
+        val player = FakePlayer(
+            playbackState = Player.STATE_READY,
+            currentPosition = 300_000L,
+            bufferedPosition = 600_000L
+        )
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 0L, scrubbing = false))
+        // Rewind 60 s: the buffer already covers the new spot, so only the
+        // playhead moves. Healthy playback must not be reported as frozen.
+        player.currentPosition = 240_000L
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 1_000L, scrubbing = false))
+        var now = 1_000L
+        repeat(30) {
+            now += 1_000L
+            player.currentPosition += 1_000L
+            assertEquals(StallDecision.Progress, watchdog.tick(player, now, scrubbing = false))
+        }
+    }
+
+    @Test
     fun pauseResetsTheStallWindow() {
         val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
         val player = FakePlayer(playbackState = Player.STATE_READY, currentPosition = 1_000L)
@@ -230,5 +307,21 @@ class PlaybackWatchdogTest {
         assertEquals(StallDecision.Progress, watchdog.tick(player, 1_000L, scrubbing = false))
         assertEquals(StallDecision.Idle, watchdog.tick(player, 15_999L, scrubbing = false))
         assertEquals(StallDecision.Stalled, watchdog.tick(player, 16_000L, scrubbing = false))
+    }
+
+    // --- recovery budget -------------------------------------------------
+
+    @Test
+    fun recoveryBudgetsFavourLiveAndStayBounded() {
+        assertTrue(stallRetryLimit(isLive = true) > stallRetryLimit(isLive = false))
+        assertTrue(errorRetryLimit(isLive = true) > errorRetryLimit(isLive = false))
+
+        // A film's first retry is quicker than a live one but its cap is lower.
+        assertTrue(transientReconnectDelayMs(1, isLive = false) <
+            transientReconnectDelayMs(1, isLive = true))
+        assertEquals(15_000L, transientReconnectDelayMs(9, isLive = true))
+        assertEquals(10_000L, transientReconnectDelayMs(9, isLive = false))
+        assertEquals(2_000L, stallRetryDelayMs(1))
+        assertEquals(8_000L, stallRetryDelayMs(100))
     }
 }

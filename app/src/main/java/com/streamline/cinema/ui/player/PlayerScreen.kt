@@ -820,6 +820,33 @@ fun PlayerScreen(
     }
 
     fun recoverStalledPlayback(title: String, detail: String) {
+        // Most stalls are the provider recycling a session, so re-prepare the
+        // same source before the panel (and its failover) takes over. The
+        // budget is shared with error reconnects: a source that keeps freezing
+        // escalates instead of retrying forever.
+        val target = playerOrNull
+        if (target != null && reconnectAttempt < stallRetryLimit(isLive)) {
+            reconnectAttempt += 1
+            pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 5_000 }
+            runCatching { target.stop() }
+            nativeError = null
+            failoverNote = null
+            val waitMs = stallRetryDelayMs(reconnectAttempt)
+            Log.i(
+                "StreamLine:player",
+                "stall · re-preparing the same source in $waitMs ms " +
+                    "(attempt $reconnectAttempt/${stallRetryLimit(isLive)})"
+            )
+            reconnectNotice = "Playback stalled · reconnecting in ${waitMs / 1000}s"
+            retryPlanMs = waitMs
+            return
+        }
+        if (reconnectAttempt > 0) {
+            Log.w(
+                "StreamLine:player",
+                "stall · retries exhausted after $reconnectAttempt attempt(s); opening the panel"
+            )
+        }
         nativeError = PlaybackFailure(
             kind = FailureKind.NETWORK,
             title = title,
@@ -1103,13 +1130,25 @@ fun PlayerScreen(
                 }
                 // A live edge that drops the socket (reset, DNS, timeout) is
                 // usually the provider recycling the session, not a dead
-                // channel. Reconnect inside the same player with a short
-                // backoff; after three tries the normal failover path owns it.
-                if (isLive && reconnectAttempt < 3 && error.isTransientTransportFailure()) {
+                // channel, and a film's socket drop is just as often a CDN
+                // hiccup. Retry the same source with a short backoff before
+                // spending a source slot on failover; the budget is shared
+                // with stall recovery, so a source that keeps failing still
+                // reaches the panel and the automatic source switch.
+                if (reconnectAttempt < errorRetryLimit(isLive) &&
+                    error.isTransientTransportFailure()
+                ) {
                     reconnectAttempt += 1
-                    val waitMs = minOf(5_000L * reconnectAttempt, 15_000L)
+                    val waitMs = transientReconnectDelayMs(reconnectAttempt, isLive)
+                    if (!isLive) pendingSeekMs = resumePosition().takeIf { it > 5_000 }
                     nativeError = null
                     failoverNote = null
+                    Log.i(
+                        "StreamLine:player",
+                        "transient · ${error.errorCodeName} · re-preparing the same " +
+                            "source in $waitMs ms " +
+                            "(attempt $reconnectAttempt/${errorRetryLimit(isLive)})"
+                    )
                     reconnectNotice =
                         "Connection lost · reconnecting in ${waitMs / 1000}s"
                     retryPlanMs = waitMs
@@ -1403,7 +1442,8 @@ fun PlayerScreen(
     // playhead instead of the buffering state. A dead connection or frozen
     // loader keeps Media3 retrying for over a minute; this catches it in 15 s
     // while still ignoring user pauses, scrubs and audio-focus suppression.
-    LaunchedEffect(playerOrNull, playbackUrl) {
+    // Reloads re-key the effect so a fresh prepare gets its own window.
+    LaunchedEffect(playerOrNull, playbackUrl, reloadToken) {
         val target = playerOrNull ?: return@LaunchedEffect
         val watchdog = StallWatchdog()
         val watched = target.asWatchdogPlayer()

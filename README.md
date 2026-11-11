@@ -49,6 +49,19 @@ adb shell am start -n com.streamline.cinema/.MainActivity
 
 ---
 
+## Releases & updates
+
+Releases are published at **https://github.com/M3UCurator/StreamLine-Cinema/releases**; the newest one is always marked **Latest**. Each release carries two APKs:
+
+- `Cinema<ddMMyy>v<iteration>.apk` — `armeabi-v7a`, for Android TV boxes
+- `Cinema<ddMMyy>v<iteration>-allabis.apk` — all ABIs, for emulators and 64-bit devices
+
+To update, download the newer APK from Releases and install it over the existing app (`adb install -r <apk>` or a file manager). Settings, library, profiles, IPTV sources and watch progress are preserved. All builds are signed with the same Android debug key; a different key cannot install over an existing install, so updates must come from this repository's releases.
+
+The app does not check for updates on its own yet — updating is a manual download from the Releases page. Per-release notes are kept in [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+
+---
+
 ## First run
 
 1. Open **Settings → Access**.

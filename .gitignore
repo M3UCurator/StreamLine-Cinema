@@ -1,0 +1,35 @@
+# Gradle & Android build output
+.gradle/
+.kotlin/
+build/
+app/build/
+captures/
+.cxx/
+local.properties
+
+# Release artifacts (built locally, published separately)
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Emulator verification artifacts
+.tmp/
+vibe_images/
+shot_*.png
+scr_*.png
+hs_err_pid*.log
+replay_pid*.log
+*.hprof
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Node
+server/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

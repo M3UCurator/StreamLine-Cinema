@@ -1,4 +1,49 @@
-# StreamLine Cinema v12.80
+# StreamLine Cinema v12.81
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.81 — Quieter Live header
+
+The Live tab keeps its diagnostics but stops putting them in the way of the channels.
+
+- **ADD ONS removed** — the button duplicated Settings → Addons and made the action row long for no gain, so it is gone from the Live header.
+- **DETAILS moved up** — the details button now sits in that top-right slot beside REFRESH and opens the same **Guide status** dialog. It stays disabled until a guide or playlist report exists, so it never opens an empty sheet.
+- **Inline status removed** — the `Guide adjusted · Playlist · 1 malformed` sentence that ran under the action row is no longer drawn. The catalog chips now occupy that row alone.
+- **Nothing lost** — every line the sentence summarised (the guide report, the `-1h` shift notice and the playlist parse report) is still listed in the DETAILS dialog.
+
+## Verified on 12.81
+
+- On the installed all-ABI release the Live header reads LIST · ARRANGE · GUIDE · REFRESH · DETAILS, with no ADD ONS button and no status text under the cards' header.
+- Opening DETAILS shows `GUIDE · 6 channels`, `◷ Test Provider: guide is -1h off — adjusted` and `PLAYLIST · Test Provider · 6 channels · 1 malformed`.
+- The all-ABI release installs as `versionCode 120081` / `versionName 12.81`.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema121126v12.81.apk` | `armeabi-v7a` (TV boxes) | 76,270,086 bytes | `e032e223778f9f733d461831f3d501654370c71b95e6d2097fda7f9ec295314a` |
+| `Cinema121126v12.81-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,739 bytes | `cf38d590c9a581ddaf31208859a62fd8eaf8439d6bdcb4fba1ea250260c2d915` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema121126v12.81.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.80 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

@@ -141,23 +141,6 @@ fun LiveScreen(
             emptyList()
         }
     }
-    val statusSummary = remember(epg, playlistProblems) {
-        buildList {
-            if (epg.shiftNotices.isNotEmpty()) {
-                add(
-                    if (epg.shiftNotices.size == 1) "Guide adjusted"
-                    else "Guide adjusted · ${epg.shiftNotices.size} feeds"
-                )
-            }
-            val guideTrimmed = reportTotals(listOfNotNull(epg.report))
-            if (guideTrimmed.isNotBlank()) {
-                add(if (epg.shiftNotices.isEmpty()) "Guide · $guideTrimmed" else guideTrimmed)
-            }
-            val playlistTrimmed = reportTotals(playlistProblems.map { it.lastReport })
-            if (playlistTrimmed.isNotBlank()) add("Playlist · $playlistTrimmed")
-            if (!epg.message.isNullOrBlank()) add("Guide update failed")
-        }.joinToString(" · ")
-    }
     val statusDetails = remember(epg, playlistProblems) {
         buildList {
             epg.message?.takeIf { it.isNotBlank() }?.let { add("EPG · $it") }
@@ -292,11 +275,12 @@ fun LiveScreen(
                             enabled = !live.loading
                         )
                         TvButton(
-                            "ADD ONS",
-                            onOpenSettings,
+                            "DETAILS",
+                            { showGuideStatus = true },
                             style = TvButtonStyle.GHOST,
                             compact = true,
-                            glyph = "⚙"
+                            glyph = "ⓘ",
+                            enabled = statusDetails.isNotEmpty()
                         )
                     }
                 }
@@ -312,69 +296,34 @@ fun LiveScreen(
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                if (live.catalogs.isNotEmpty() || statusSummary.isNotBlank()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                if (live.catalogs.isNotEmpty()) {
+                    LazyRow(
+                        state = rememberScreenListState("live.catalogs"),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        if (live.catalogs.isNotEmpty()) {
-                            LazyRow(
-                                state = rememberScreenListState("live.catalogs"),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                items(live.catalogs.size) { index ->
-                                    val catalog = live.catalogs[index]
-                                    Chip(
-                                        label = "${catalog.addonName} · ${catalog.name}",
-                                        selected = live.selected?.key == catalog.key,
-                                        onClick = { vm.selectLiveCatalog(catalog) },
-                                        modifier = if (arranging) {
-                                            Modifier.onKeyEvent { event ->
-                                                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                                                when (event.key) {
-                                                    Key.DirectionLeft -> {
-                                                        vm.moveLiveCatalog(catalog, -1); true
-                                                    }
-                                                    Key.DirectionRight -> {
-                                                        vm.moveLiveCatalog(catalog, 1); true
-                                                    }
-                                                    else -> false
-                                                }
+                        items(live.catalogs.size) { index ->
+                            val catalog = live.catalogs[index]
+                            Chip(
+                                label = "${catalog.addonName} · ${catalog.name}",
+                                selected = live.selected?.key == catalog.key,
+                                onClick = { vm.selectLiveCatalog(catalog) },
+                                modifier = if (arranging) {
+                                    Modifier.onKeyEvent { event ->
+                                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                                        when (event.key) {
+                                            Key.DirectionLeft -> {
+                                                vm.moveLiveCatalog(catalog, -1); true
                                             }
-                                        } else {
-                                            Modifier
+                                            Key.DirectionRight -> {
+                                                vm.moveLiveCatalog(catalog, 1); true
+                                            }
+                                            else -> false
                                         }
-                                    )
+                                    }
+                                } else {
+                                    Modifier
                                 }
-                            }
-                        } else {
-                            Spacer(Modifier.weight(1f))
-                        }
-                        if (statusSummary.isNotBlank()) {
-                            Spacer(Modifier.width(16.dp))
-                            Box(
-                                Modifier
-                                    .size(5.dp)
-                                    .clip(CircleShape)
-                                    .background(Cinema.Pinging)
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = statusSummary,
-                                color = Cinema.TextMuted,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 300.dp)
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            TvButton(
-                                "DETAILS",
-                                { showGuideStatus = true },
-                                style = TvButtonStyle.GHOST,
-                                compact = true,
-                                glyph = "ⓘ"
                             )
                         }
                     }
@@ -579,22 +528,6 @@ fun LiveScreen(
             )
         }
     }
-}
-
-/** Sums the "N skipped"/"N malformed" parts of one or more parse reports. */
-private fun reportTotals(reports: List<String>): String {
-    fun total(suffix: String) = reports.sumOf { report ->
-        report.split(" · ")
-            .firstOrNull { it.endsWith(" $suffix") }
-            ?.substringBefore(' ')
-            ?.toIntOrNull() ?: 0
-    }
-    val skipped = total("skipped")
-    val malformed = total("malformed")
-    return listOfNotNull(
-        skipped.takeIf { it > 0 }?.let { "$it skipped" },
-        malformed.takeIf { it > 0 }?.let { "$it malformed" }
-    ).joinToString(" · ")
 }
 
 @Composable

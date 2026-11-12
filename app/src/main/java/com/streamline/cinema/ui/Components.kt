@@ -441,6 +441,76 @@ fun PinPad(
     }
 }
 
+/**
+ * Captures physical-keyboard PIN digits without an IME: typing fills the dots
+ * directly and backspace deletes, while the on-screen keypad keeps working for
+ * pointer-only boxes. Key events are consumed so a focused keypad button does
+ * not also receive the digit.
+ */
+fun Modifier.pinKeyInput(
+    onDigit: (Char) -> Unit,
+    onBackspace: () -> Unit
+): Modifier = onPreviewKeyEvent { event ->
+    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+    val digit = when (event.key) {
+        Key.Zero, Key.NumPad0 -> '0'
+        Key.One, Key.NumPad1 -> '1'
+        Key.Two, Key.NumPad2 -> '2'
+        Key.Three, Key.NumPad3 -> '3'
+        Key.Four, Key.NumPad4 -> '4'
+        Key.Five, Key.NumPad5 -> '5'
+        Key.Six, Key.NumPad6 -> '6'
+        Key.Seven, Key.NumPad7 -> '7'
+        Key.Eight, Key.NumPad8 -> '8'
+        Key.Nine, Key.NumPad9 -> '9'
+        else -> null
+    }
+    when {
+        digit != null -> {
+            onDigit(digit)
+            true
+        }
+        event.key == Key.Backspace || event.key == Key.Delete -> {
+            onBackspace()
+            true
+        }
+        else -> false
+    }
+}
+
+/**
+ * Window-level PIN capture for surfaces that are not a dialog. The [pinKeyInput]
+ * modifier only sees keys on the focus path, so a pane that lost focus to the top
+ * bar would drop typed digits; the activity drains this sink instead. Compose
+ * attaches it while a PIN surface is on screen and detaches it on dispose.
+ */
+object PinKeyCapture {
+    private var digitSink: ((Char) -> Unit)? = null
+    private var backspaceSink: (() -> Unit)? = null
+
+    fun attach(onDigit: (Char) -> Unit, onBackspace: () -> Unit) {
+        digitSink = onDigit
+        backspaceSink = onBackspace
+    }
+
+    fun detach() {
+        digitSink = null
+        backspaceSink = null
+    }
+
+    fun consumeDigit(digit: Char): Boolean {
+        val sink = digitSink ?: return false
+        sink(digit)
+        return true
+    }
+
+    fun consumeBackspace(): Boolean {
+        val sink = backspaceSink ?: return false
+        sink()
+        return true
+    }
+}
+
 @Composable
 fun PosterImage(
     url: String?,

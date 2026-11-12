@@ -1,6 +1,51 @@
-# StreamLine Cinema v12.82
+# StreamLine Cinema v12.83
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.83 — Type the PIN
+
+The parental PIN can now be typed on a physical or remote keyboard, not only tapped on the keypad. Digits land as dots, so the PIN is never shown.
+
+- **Direct digits** — 0–9 on the number row or the numpad fill the active PIN field; DEL/Backspace removes the last digit.
+- **No IME** — the key events are captured as PIN input, so no soft keyboard or text field opens and nothing is echoed on screen.
+- **Every PIN surface** — the shared PIN dialog (Kids Mode lockout, leaving a Kids profile, 18+ gate) and Settings → Parental (current / new / confirm PIN and the adult gate) all take typed digits.
+- **Auto-advance** — in Settings the target moves current → new → confirm as each field fills, so changing the PIN is three groups of four digits and SAVE PIN.
+- **Focus-proof** — the Parental pane drains typed digits from the activity's key dispatch, so they land even while focus sits on the top bar, and the on-screen keypad keeps working for pointer-only boxes.
+- **Scoped** — capture only exists while a PIN surface is showing, so the TMDB key, playlist URL and other text fields keep their normal typing.
+
+## Verified on 12.83
+
+- On the installed all-ABI release, hardware digit key events filled Settings → Parental with dots, no soft keyboard appeared, DEL removed a digit, typing advanced current → new → confirm on its own, and SAVE PIN stored the change (`CUSTOM PIN`); the same digits landed with focus on the top bar.
+- The shared Kids lockout dialog (`Settings are locked`) took four typed digits, enabled UNLOCK and accepted the saved PIN; the typed current PIN also removed it afterwards (`Parental PIN removed · 18+ hidden`).
+- The all-ABI release installs as `versionCode 120083` / `versionName 12.83`.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema121126v12.83.apk` | `armeabi-v7a` (TV boxes) | 76,270,088 bytes | `69431491c691567475b0133229222ab5ba73d97f9e710925fdea79039deb5d23` |
+| `Cinema121126v12.83-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,730 bytes | `dc60a4fec81463c3df4f9d79f8169f6ccf3a1ef40dd5ea98b091bb9f991aa07e` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema121126v12.83.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.82 (previous)
 
 ## New in 12.82 — Accordion playlist rows
 

@@ -102,6 +102,7 @@ import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalScreenState
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PinDisplay
+import com.streamline.cinema.ui.PinKeyCapture
 import com.streamline.cinema.ui.PinPad
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
@@ -353,6 +354,56 @@ fun SettingsScreen(
         keyHidden = vm.settings.value.tmdbApiKey.isNotBlank()
         proxyDraft = vm.settings.value.proxyBaseUrl
         badgeDraft = vm.settings.value.badgeSourceUrl
+    }
+
+    // Digits typed on a physical keyboard fill the PIN fields directly, with no IME,
+    // and the on-screen keypad keeps working. The activity drains the sink so the
+    // digits land no matter where focus sits, and it is scoped to the Parental
+    // section so the other sections' text fields keep their normal typing.
+    DisposableEffect(section, settings.hasParentalPin) {
+        if (section != SettingsSection.PARENTAL) {
+            onDispose { }
+        } else {
+            PinKeyCapture.attach(
+                onDigit = { digit ->
+                    pinError = null
+                    val hasPin = settings.hasParentalPin
+                    val target = when {
+                        adultGateOpen || pinTarget == "adult" -> "adult"
+                        pinTarget == "current" && hasPin && currentPinDraft.length < 4 -> "current"
+                        pinTarget == "confirm" && confirmPinDraft.length < 4 -> "confirm"
+                        pinTarget == "new" && newPinDraft.length < 4 -> "new"
+                        hasPin && currentPinDraft.length < 4 -> "current"
+                        newPinDraft.length < 4 -> "new"
+                        else -> "confirm"
+                    }
+                    pinTarget = target
+                    when (target) {
+                        "current" -> if (currentPinDraft.length < 4) currentPinDraft += digit
+                        "confirm" -> if (confirmPinDraft.length < 4) confirmPinDraft += digit
+                        "adult" -> if (adultPinDraft.length < 4) adultPinDraft += digit
+                        else -> if (newPinDraft.length < 4) newPinDraft += digit
+                    }
+                },
+                onBackspace = {
+                    when {
+                        (adultGateOpen || pinTarget == "adult") && adultPinDraft.isNotEmpty() ->
+                            adultPinDraft = adultPinDraft.dropLast(1)
+                        pinTarget == "confirm" && confirmPinDraft.isNotEmpty() ->
+                            confirmPinDraft = confirmPinDraft.dropLast(1)
+                        pinTarget == "new" && newPinDraft.isNotEmpty() ->
+                            newPinDraft = newPinDraft.dropLast(1)
+                        pinTarget == "current" && currentPinDraft.isNotEmpty() ->
+                            currentPinDraft = currentPinDraft.dropLast(1)
+                        confirmPinDraft.isNotEmpty() -> confirmPinDraft = confirmPinDraft.dropLast(1)
+                        newPinDraft.isNotEmpty() -> newPinDraft = newPinDraft.dropLast(1)
+                        currentPinDraft.isNotEmpty() -> currentPinDraft = currentPinDraft.dropLast(1)
+                        else -> adultPinDraft = adultPinDraft.dropLast(1)
+                    }
+                }
+            )
+            onDispose { PinKeyCapture.detach() }
+        }
     }
 
     Row(

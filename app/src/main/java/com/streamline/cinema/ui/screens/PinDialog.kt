@@ -31,6 +31,7 @@ import com.streamline.cinema.ui.PinPad
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.glassSurface
+import com.streamline.cinema.ui.pinKeyInput
 import kotlinx.coroutines.delay
 
 /**
@@ -55,6 +56,13 @@ fun PinDialog(
         Column(
             Modifier
                 .width(420.dp)
+                .pinKeyInput(
+                    onDigit = {
+                        if (pin.length < 4) pin += it
+                        error = null
+                    },
+                    onBackspace = { pin = pin.dropLast(1) }
+                )
                 .glassSurface(
                     shape = RoundedCornerShape(CinemaDimens.CardRadius),
                     base = Glass.Sheet

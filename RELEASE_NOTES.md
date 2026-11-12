@@ -1,4 +1,50 @@
-# StreamLine Cinema v12.78
+# StreamLine Cinema v12.79
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.79 — Live artwork, a list view and a quieter header
+
+The Live tab keeps its premium cards, but the artwork now fits, a compact list joins the grid, and guide/playlist diagnostics no longer push the channel rows down.
+
+- **Fitted channel logos** — card artwork renders with `ContentScale.Fit` and a slim 14 dp / 10 dp inset over a panel background, so 16:9 channel logos sit whole inside the card instead of being zoomed and cropped. The bottom scrim was deepened so the NOW title and time span stay legible over bright artwork.
+- **LIST / GRID toggle** — a new toggle next to ARRANGE switches between the artwork grid and 76 dp compact rows: fitted logo thumb, channel name with category and release info, the current programme with `start – stop` and its progress bar, and tiny LIVE / TUNING / DEAD badges. Long-press OK stars a channel and, while arranging, Up/Down reorders channels in the list exactly as in the grid. The choice is persisted as `listView` in `live_prefs.json`, and the row list keeps its own focus/scroll memory when toggling.
+- **One-row status line** — catalog chips and the guide/playlist status share a single row: the chips scroll on the left, while a muted dot, one ellipsized sentence (`Guide adjusted · …`, `Playlist · N malformed`, `Guide update failed`) and a right-aligned **DETAILS** button sit on the right. **DETAILS** opens a wide (620 dp) **Guide status** dialog listing the EPG source, the guide line, the shift notice and the playlist report, with the platform width cap opted out so the text is no longer cramped.
+- **Aligned header** — the meta line reads `N channels · 1 catalog` / `N catalogs` (no more "1 catalogs"), and tighter top padding and spacers leave room for the full card captions at 1080p.
+
+## Verified on 12.79
+
+- On the installed all-ABI release, the Live grid shows every channel logo whole inside its card with the NOW overlay and caption visible on the first two rows.
+- The LIST toggle switches to compact rows (logo thumb, name/category, NOW title with `10:00 – 11:00` and a gold progress bar, LIVE badge) and back to the grid; `files/live_prefs.json` holds `"listView":true` while list mode is selected.
+- The catalog/status row and its **DETAILS** dialog render at the widened 620 dp width.
+- The all-ABI release installs as `versionCode 120079` / `versionName 12.79`; `testDebugUnitTest` passes with no failures.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema121126v12.79.apk` | `armeabi-v7a` (TV boxes) | 76,270,098 bytes | `1534300c8761b899e55afe554afdd3cb24ecc0cc724a830c4dd9e18f5ec65e18` |
+| `Cinema121126v12.79-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,743 bytes | `a947699a30650beb13ae01207a3acb029c835a7f9e058850e99e96a85149b88b` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema121126v12.79.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.78 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

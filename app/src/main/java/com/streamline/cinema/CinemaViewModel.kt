@@ -1599,6 +1599,8 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleLiveFavorite(channel: LiveChannel): Boolean =
         container.livePrefs.toggleFavorite(channel.key)
 
+    fun setLiveListView(listView: Boolean) = container.livePrefs.setListView(listView)
+
     fun moveLiveChannel(channel: LiveChannel, delta: Int) {
         val state = _live.value
         val catalog = state.selected ?: return

@@ -21,7 +21,9 @@ class LivePrefsStore(context: Context) {
         val catalogOrder: List<String> = emptyList(),
         val channelOrder: Map<String, List<String>> = emptyMap(),
         /** `"$catalogKey|$extraName"` → ordered group labels. */
-        val groupOrder: Map<String, List<String>> = emptyMap()
+        val groupOrder: Map<String, List<String>> = emptyMap(),
+        /** Channel browser layout: false = artwork grid, true = compact rows. */
+        val listView: Boolean = false
     )
 
     private val file = File(context.applicationContext.filesDir, "live_prefs.json")
@@ -82,6 +84,14 @@ class LivePrefsStore(context: Context) {
         }
     }
 
+    fun setListView(listView: Boolean) {
+        synchronized(lock) {
+            if (_prefs.value.listView == listView) return
+            _prefs.value = _prefs.value.copy(listView = listView)
+            persist()
+        }
+    }
+
     fun applyCatalogOrder(catalogs: List<LiveCatalog>): List<LiveCatalog> =
         applyOrder(catalogs, _prefs.value.catalogOrder) { it.key }
 
@@ -117,6 +127,7 @@ class LivePrefsStore(context: Context) {
                 put("groupOrder", JSONObject().apply {
                     prefs.groupOrder.forEach { (id, groups) -> put(id, JSONArray(groups)) }
                 })
+                put("listView", prefs.listView)
             }
             AtomicStore.write(file, root.toString(), "live preferences")
         }
@@ -142,7 +153,8 @@ class LivePrefsStore(context: Context) {
                 favorites = stringList(root.optJSONArray("favorites")).toSet(),
                 catalogOrder = stringList(root.optJSONArray("catalogOrder")),
                 channelOrder = orderMap(root.optJSONObject("channelOrder")),
-                groupOrder = orderMap(root.optJSONObject("groupOrder"))
+                groupOrder = orderMap(root.optJSONObject("groupOrder")),
+                listView = root.optBoolean("listView", false)
             )
         }
     }

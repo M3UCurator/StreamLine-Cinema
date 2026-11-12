@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -48,6 +49,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -63,6 +65,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.streamline.cinema.CinemaViewModel
 import com.streamline.cinema.data.CatalogExtra
 import com.streamline.cinema.data.DEAD_CHANNEL_FAILURES
@@ -74,6 +78,7 @@ import com.streamline.cinema.data.LiveSourceKind
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.Cinema
+import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.EmptyState
 import com.streamline.cinema.ui.ErrorBanner
@@ -111,6 +116,7 @@ fun LiveScreen(
     val profile by vm.activeProfile.collectAsState()
     val approvedIds by vm.kidsMode.approved.collectAsState()
     var showGuide by remember { mutableStateOf(false) }
+    var showGuideStatus by remember { mutableStateOf(false) }
     var favoritesOnly by remember { mutableStateOf(false) }
     var arranging by remember { mutableStateOf(false) }
 
@@ -122,6 +128,45 @@ fun LiveScreen(
     }
     val deadKeys = remember(channels, health) {
         channels.filter { health[it.key]?.dead == true }.map { it.key }.toSet()
+    }
+
+    // Only playlists that actually lost entries are worth surfacing; a clean
+    // "142 channels" report would just add another line of noise.
+    val playlistProblems = remember(iptvSources, live.selected) {
+        if (live.selected?.sourceKind == LiveSourceKind.IPTV) {
+            iptvSources.filter {
+                it.lastReport.contains(" skipped") || it.lastReport.contains(" malformed")
+            }.take(2)
+        } else {
+            emptyList()
+        }
+    }
+    val statusSummary = remember(epg, playlistProblems) {
+        buildList {
+            if (epg.shiftNotices.isNotEmpty()) {
+                add(
+                    if (epg.shiftNotices.size == 1) "Guide adjusted"
+                    else "Guide adjusted · ${epg.shiftNotices.size} feeds"
+                )
+            }
+            val guideTrimmed = reportTotals(listOfNotNull(epg.report))
+            if (guideTrimmed.isNotBlank()) {
+                add(if (epg.shiftNotices.isEmpty()) "Guide · $guideTrimmed" else guideTrimmed)
+            }
+            val playlistTrimmed = reportTotals(playlistProblems.map { it.lastReport })
+            if (playlistTrimmed.isNotBlank()) add("Playlist · $playlistTrimmed")
+            if (!epg.message.isNullOrBlank()) add("Guide update failed")
+        }.joinToString(" · ")
+    }
+    val statusDetails = remember(epg, playlistProblems) {
+        buildList {
+            epg.message?.takeIf { it.isNotBlank() }?.let { add("EPG · $it") }
+            epg.report?.takeIf { it.isNotBlank() }?.let { add("GUIDE · $it") }
+            epg.shiftNotices.forEach { add("◷ $it") }
+            playlistProblems.forEach { source ->
+                add("PLAYLIST · ${source.name.ifBlank { "IPTV" }} · ${source.lastReport}")
+            }
+        }
     }
 
     // now/next and the progress bars are evaluated against the device clock,
@@ -155,7 +200,7 @@ fun LiveScreen(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 20.dp)) {
+            Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 16.dp)) {
                 // At larger font scales the action strip is wider than the title
                 // column can spare, so it drops to its own line instead of clipping.
                 val stackActions = LocalDensity.current.fontScale > 1.15f
@@ -174,17 +219,19 @@ fun LiveScreen(
                         )
                         Text(
                             text = buildString {
-                                append("${live.catalogs.size} live catalogs · ")
-                                append("${channels.size} channels in view")
-                                if (favoritesOnly) append(" · saved only")
-                                if (livePrefs.favorites.isNotEmpty()) {
+                                append("${channels.size} channels")
+                                if (live.catalogs.size > 0) {
+                                    append(
+                                        if (live.catalogs.size == 1) " · 1 catalog"
+                                        else " · ${live.catalogs.size} catalogs"
+                                    )
+                                }
+                                if (favoritesOnly) {
+                                    append(" · saved only")
+                                } else if (livePrefs.favorites.isNotEmpty()) {
                                     append(" · ${livePrefs.favorites.size} saved")
                                 }
-                                when {
-                                    epg.loading -> append(" · guide loading")
-                                    epg.fromCache -> append(" · guide cached")
-                                    !epg.guide.isEmpty -> append(" · EPG ${epg.guide.channelCount} ch")
-                                }
+                                if (epg.loading && epg.guide.isEmpty) append(" · guide loading")
                             },
                             color = Cinema.TextMuted,
                             style = CinemaType.BodySmall
@@ -212,6 +259,13 @@ fun LiveScreen(
                             )
                         }
                         if (live.channels.isNotEmpty()) {
+                            TvButton(
+                                if (livePrefs.listView) "GRID" else "LIST",
+                                { vm.setLiveListView(!livePrefs.listView) },
+                                style = TvButtonStyle.GHOST,
+                                compact = true,
+                                glyph = if (livePrefs.listView) "▦" else "☰"
+                            )
                             TvButton(
                                 if (arranging) "DONE" else "ARRANGE",
                                 { arranging = !arranging },
@@ -257,42 +311,78 @@ fun LiveScreen(
                         actions()
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-                if (live.catalogs.isNotEmpty()) {
-                    LazyRow(
-                        state = rememberScreenListState("live.catalogs"),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                Spacer(Modifier.height(10.dp))
+                if (live.catalogs.isNotEmpty() || statusSummary.isNotBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        items(live.catalogs.size) { index ->
-                            val catalog = live.catalogs[index]
-                            Chip(
-                                label = "${catalog.addonName} · ${catalog.name}",
-                                selected = live.selected?.key == catalog.key,
-                                onClick = { vm.selectLiveCatalog(catalog) },
-                                modifier = if (arranging) {
-                                    Modifier.onKeyEvent { event ->
-                                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                                        when (event.key) {
-                                            Key.DirectionLeft -> {
-                                                vm.moveLiveCatalog(catalog, -1); true
+                        if (live.catalogs.isNotEmpty()) {
+                            LazyRow(
+                                state = rememberScreenListState("live.catalogs"),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                items(live.catalogs.size) { index ->
+                                    val catalog = live.catalogs[index]
+                                    Chip(
+                                        label = "${catalog.addonName} · ${catalog.name}",
+                                        selected = live.selected?.key == catalog.key,
+                                        onClick = { vm.selectLiveCatalog(catalog) },
+                                        modifier = if (arranging) {
+                                            Modifier.onKeyEvent { event ->
+                                                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                                                when (event.key) {
+                                                    Key.DirectionLeft -> {
+                                                        vm.moveLiveCatalog(catalog, -1); true
+                                                    }
+                                                    Key.DirectionRight -> {
+                                                        vm.moveLiveCatalog(catalog, 1); true
+                                                    }
+                                                    else -> false
+                                                }
                                             }
-                                            Key.DirectionRight -> {
-                                                vm.moveLiveCatalog(catalog, 1); true
-                                            }
-                                            else -> false
+                                        } else {
+                                            Modifier
                                         }
-                                    }
-                                } else {
-                                    Modifier
+                                    )
                                 }
+                            }
+                        } else {
+                            Spacer(Modifier.weight(1f))
+                        }
+                        if (statusSummary.isNotBlank()) {
+                            Spacer(Modifier.width(16.dp))
+                            Box(
+                                Modifier
+                                    .size(5.dp)
+                                    .clip(CircleShape)
+                                    .background(Cinema.Pinging)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = statusSummary,
+                                color = Cinema.TextMuted,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 300.dp)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            TvButton(
+                                "DETAILS",
+                                { showGuideStatus = true },
+                                style = TvButtonStyle.GHOST,
+                                compact = true,
+                                glyph = "ⓘ"
                             )
                         }
                     }
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(10.dp))
                 }
                 if (arranging) {
                     Text(
-                        "ARRANGE · ◀ ▶ moves the focused catalog, group or channel · hold OK stars a channel",
+                        "ARRANGE · ▶ ◀ catalogs and groups · ▲ ▼ channels in list · hold OK stars a channel",
                         color = Cinema.Gold,
                         fontSize = 10.sp,
                         letterSpacing = 0.3.sp
@@ -302,53 +392,6 @@ fun LiveScreen(
                 live.message?.let { message ->
                     ErrorBanner(message)
                     Spacer(Modifier.height(12.dp))
-                }
-                epg.message?.let { message ->
-                    Text(
-                        "EPG · $message",
-                        color = Cinema.TextMuted,
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                epg.report?.let { report ->
-                    val degraded = report.contains("skipped") || report.contains("malformed")
-                    Text(
-                        text = "GUIDE · $report",
-                        color = if (degraded) Cinema.Pinging else Cinema.TextMuted,
-                        fontSize = 10.sp,
-                        lineHeight = 14.sp
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                if (epg.shiftNotices.isNotEmpty()) {
-                    epg.shiftNotices.forEach { notice ->
-                        Text(
-                            text = "◷ $notice",
-                            color = Cinema.Pinging,
-                            fontSize = 10.sp,
-                            lineHeight = 14.sp
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-                if (live.selected?.sourceKind == LiveSourceKind.IPTV) {
-                    iptvSources.asSequence()
-                        .filter { it.lastReport.isNotBlank() }
-                        .take(2)
-                        .forEach { source ->
-                            Text(
-                                text = "PLAYLIST · ${source.name.ifBlank { "IPTV" }} · ${source.lastReport}",
-                                color = Cinema.TextMuted,
-                                fontSize = 9.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    if (iptvSources.any { it.lastReport.isNotBlank() }) {
-                        Spacer(Modifier.height(8.dp))
-                    }
                 }
                 val extras = live.selected?.selectableExtras.orEmpty()
                 if (extras.isNotEmpty()) {
@@ -416,7 +459,49 @@ fun LiveScreen(
                     actionLabel = "OPEN SETTINGS",
                     onAction = onOpenSettings
                 )
-                else -> LazyVerticalGrid(
+                else -> if (livePrefs.listView) {
+                    LazyColumn(
+                        state = rememberScreenListState("live.list"),
+                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, bottom = 48.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(channels, key = { it.key }) { channel ->
+                            LiveChannelRow(
+                                channel = channel,
+                                busy = live.resolving == channel.key,
+                                dead = channel.key in deadKeys,
+                                now = epg.guide.nowNext(channel.epgId, channel.name, nowMs)?.now,
+                                nowMs = nowMs,
+                                favorite = channel.key in livePrefs.favorites,
+                                arranging = arranging,
+                                onToggleFavorite = { vm.toggleLiveFavorite(channel) },
+                                onMove = { delta -> vm.moveLiveChannel(channel, delta) },
+                                onClick = {
+                                    vm.resolveLive(channel) { option ->
+                                        if (option != null) {
+                                            // Hand the whole list to the player so arrows can surf channels.
+                                            onPlay(
+                                                option,
+                                                channel.name,
+                                                channels,
+                                                channels.indexOf(channel)
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        item {
+                            Text(
+                                "Streams resolve through the addon or play straight from your playlist.",
+                                color = Cinema.TextMuted,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(top = 8.dp)
+                            )
+                        }
+                    }
+                } else LazyVerticalGrid(
                     state = rememberScreenGridState("live.grid"),
                     columns = GridCells.Adaptive(posterStyle.channelWidth + 16.dp),
                     contentPadding = PaddingValues(start = 48.dp, end = 48.dp, bottom = 48.dp),
@@ -452,12 +537,10 @@ fun LiveScreen(
                     }
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         Text(
-                            "Streams resolve through the addon, or play directly from your IPTV " +
-                                "playlist. Some feeds require the addon's premium tier or return an " +
-                                "external watch page instead of a direct URL.",
+                            "Streams resolve through the addon or play straight from your playlist.",
                             color = Cinema.TextMuted,
-                            fontSize = 11.sp,
-                            modifier = Modifier.padding(top = 10.dp)
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 8.dp)
                         )
                     }
                 }
@@ -488,7 +571,30 @@ fun LiveScreen(
                 onClose = closeGuide
             )
         }
+
+        if (showGuideStatus) {
+            GuideStatusDialog(
+                details = statusDetails,
+                onClose = { showGuideStatus = false }
+            )
+        }
     }
+}
+
+/** Sums the "N skipped"/"N malformed" parts of one or more parse reports. */
+private fun reportTotals(reports: List<String>): String {
+    fun total(suffix: String) = reports.sumOf { report ->
+        report.split(" · ")
+            .firstOrNull { it.endsWith(" $suffix") }
+            ?.substringBefore(' ')
+            ?.toIntOrNull() ?: 0
+    }
+    val skipped = total("skipped")
+    val malformed = total("malformed")
+    return listOfNotNull(
+        skipped.takeIf { it > 0 }?.let { "$it skipped" },
+        malformed.takeIf { it > 0 }?.let { "$it malformed" }
+    ).joinToString(" · ")
 }
 
 @Composable
@@ -597,7 +703,7 @@ private fun ChannelCard(
     val sounds = LocalUiSounds.current
     val cardFocus = remember { FocusRequester() }
     val posterStyle = LocalPosterStyle.current
-    val cardShape = RoundedCornerShape(10.dp)
+    val cardShape = RoundedCornerShape(12.dp)
     val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(130), label = "channelScale")
 
     LaunchedEffect(focusMemory.restoreTick("live.grid"), channel.key) {
@@ -655,19 +761,27 @@ private fun ChannelCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
+                .background(Cinema.Panel)
                 .glassFrame(cardShape, focused = focused)
         ) {
             PosterImage(
                 url = channel.poster,
                 title = channel.name,
                 description = null,
-                modifier = Modifier.fillMaxSize()
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
             )
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(0.45f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.72f))
+                        Brush.verticalGradient(
+                            0.24f to Color.Transparent,
+                            0.62f to Color.Black.copy(alpha = 0.38f),
+                            1f to Color.Black.copy(alpha = 0.96f)
+                        )
                     )
             )
             Text(
@@ -701,18 +815,6 @@ private fun ChannelCard(
                     )
                 }
             }
-            channel.releaseInfo?.let { info ->
-                Text(
-                    text = info,
-                    color = Cinema.TextPrimary,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(8.dp)
-                )
-            }
             if (dead) {
                 Text(
                     text = "DEAD · ${DEAD_CHANNEL_FAILURES}×",
@@ -728,37 +830,245 @@ private fun ChannelCard(
                         .padding(horizontal = 6.dp, vertical = 3.dp)
                 )
             }
+            now?.let { program ->
+                Column(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .padding(start = 10.dp, end = 10.dp, bottom = 12.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = program.title,
+                            color = Cinema.TextPrimary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${clock(program.startMs)} – ${clock(program.stopMs)}",
+                            color = Cinema.TextSecondary,
+                            fontSize = 9.sp
+                        )
+                    }
+                    Spacer(Modifier.height(5.dp))
+                    EpgProgress(program, nowMs)
+                }
+            }
         }
         Spacer(Modifier.height(7.dp))
-        Text(
-            text = channel.name,
-            color = if (focused) Cinema.Gold else Cinema.TextPrimary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            lineHeight = 17.sp
-        )
-        channel.category?.takeIf { it.isNotBlank() }?.let { category ->
-            Text(category, color = Cinema.TextMuted, fontSize = 10.sp, maxLines = 1)
-        }
-        now?.let { program ->
-            Spacer(Modifier.height(5.dp))
+        // One caption row stays aligned whether or not the guide knows the
+        // channel; the programme itself lives over the artwork.
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = program.title,
-                color = Cinema.TextSecondary,
-                fontSize = 10.sp,
+                text = channel.name,
+                color = if (focused) Cinema.Gold else Cinema.TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
-            Spacer(Modifier.height(4.dp))
-            EpgProgress(program, nowMs)
-            Spacer(Modifier.height(3.dp))
+            val meta = listOfNotNull(
+                channel.category?.takeIf { it.isNotBlank() },
+                channel.releaseInfo?.takeIf { it.isNotBlank() }
+            ).distinct().joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = meta,
+                    color = Cinema.TextMuted,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 104.dp)
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LiveChannelRow(
+    channel: LiveChannel,
+    busy: Boolean,
+    dead: Boolean,
+    now: EpgProgram?,
+    nowMs: Long,
+    favorite: Boolean,
+    arranging: Boolean,
+    onToggleFavorite: () -> Unit,
+    onMove: (Int) -> Unit,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val focusMemory = LocalFocusMemory.current
+    val sounds = LocalUiSounds.current
+    val rowFocus = remember { FocusRequester() }
+    val shape = RoundedCornerShape(10.dp)
+
+    LaunchedEffect(focusMemory.restoreTick("live.list"), channel.key) {
+        if (focusMemory.recall("live.list") == channel.key) {
+            delay(90)
+            runCatching { rowFocus.requestFocus() }
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(76.dp)
+            .focusRequester(rowFocus)
+            .onKeyEvent { event ->
+                if (!arranging || event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.DirectionUp -> {
+                        onMove(-1); true
+                    }
+                    Key.DirectionDown -> {
+                        onMove(1); true
+                    }
+                    else -> false
+                }
+            }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (it.isFocused) {
+                    focusMemory.record("live.list", channel.key)
+                    sounds.focus()
+                }
+            }
+            .semantics {
+                role = Role.Button
+                contentDescription = buildString {
+                    append(channel.name)
+                    if (favorite) append(", saved")
+                    if (dead) append(", marked dead")
+                    now?.let { append(", now ${it.title}") }
+                }
+            }
+            .combinedClickable(
+                onClick = {
+                    sounds.select()
+                    onClick()
+                },
+                onLongClick = {
+                    sounds.select()
+                    onToggleFavorite()
+                }
+            )
+            .background(
+                if (focused) Cinema.PanelRaised else Cinema.Panel.copy(alpha = 0.55f),
+                shape
+            )
+            .glassFrame(shape, focused = focused)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(104.dp)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Cinema.Ink)
+        ) {
+            PosterImage(
+                url = channel.poster,
+                title = channel.name,
+                description = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(4.dp)
+            )
             Text(
-                text = "${clock(program.startMs)} – ${clock(program.stopMs)}",
-                color = Cinema.TextMuted,
-                fontSize = 9.sp
+                text = if (busy) "TUNING…" else "LIVE",
+                color = if (busy) Cinema.Pinging else Cinema.Ink,
+                fontSize = 7.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.6.sp,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (busy) Cinema.Panel else Cinema.Offline)
+                    .padding(horizontal = 3.dp, vertical = 1.dp)
             )
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = channel.name,
+                    color = if (focused) Cinema.Gold else Cinema.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                val meta = listOfNotNull(
+                    channel.category?.takeIf { it.isNotBlank() },
+                    channel.releaseInfo?.takeIf { it.isNotBlank() }
+                ).distinct().joinToString(" · ")
+                if (meta.isNotBlank()) {
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = meta,
+                        color = Cinema.TextMuted,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 180.dp)
+                    )
+                }
+                if (dead) {
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "DEAD",
+                        color = Cinema.Offline,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp
+                    )
+                }
+                if (favorite) {
+                    Spacer(Modifier.width(8.dp))
+                    Text("★", color = Cinema.Gold, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            if (now != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = now.title,
+                        color = Cinema.TextSecondary,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        text = "${clock(now.startMs)} – ${clock(now.stopMs)}",
+                        color = Cinema.TextMuted,
+                        fontSize = 10.sp
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+                EpgProgress(now, nowMs)
+            } else {
+                Text(
+                    text = if (dead) "Tune failed · marked dead" else "No guide data",
+                    color = Cinema.TextMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1
+                )
+            }
         }
     }
 }
@@ -861,6 +1171,66 @@ private fun GuideOverlay(
                     nowMs = nowMs,
                     busy = resolving == channel.key,
                     onClick = { onTune(channel) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun GuideStatusDialog(
+    details: List<String>,
+    onClose: () -> Unit
+) {
+    BackHandler(onBack = onClose)
+    val closeFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(160)
+        runCatching { closeFocus.requestFocus() }
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .widthIn(max = 620.dp)
+                .fillMaxWidth(0.9f)
+                .glassSurface(
+                    shape = RoundedCornerShape(CinemaDimens.CardRadius),
+                    base = Glass.Sheet
+                )
+                .padding(26.dp)
+        ) {
+            Text(
+                "Guide status",
+                color = Cinema.TextPrimary,
+                style = CinemaType.SectionTitle
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "What the last sync kept, corrected or skipped.",
+                color = Cinema.TextMuted,
+                style = CinemaType.BodySmall
+            )
+            Spacer(Modifier.height(14.dp))
+            details.forEach { line ->
+                Text(
+                    "•  $line",
+                    color = Cinema.TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Spacer(Modifier.height(7.dp))
+            }
+            Row(Modifier.padding(top = 10.dp)) {
+                TvButton(
+                    "CLOSE",
+                    onClose,
+                    style = TvButtonStyle.SECONDARY,
+                    compact = true,
+                    glyph = "✕",
+                    focusRequester = closeFocus
                 )
             }
         }

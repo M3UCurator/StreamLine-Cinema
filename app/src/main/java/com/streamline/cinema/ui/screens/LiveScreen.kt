@@ -769,9 +769,7 @@ private fun ChannelCard(
                 title = channel.name,
                 description = null,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                modifier = Modifier.fillMaxSize()
             )
             Box(
                 modifier = Modifier
@@ -981,9 +979,7 @@ private fun LiveChannelRow(
                 title = channel.name,
                 description = null,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(4.dp)
+                modifier = Modifier.fillMaxSize()
             )
             Text(
                 text = if (busy) "TUNING…" else "LIVE",

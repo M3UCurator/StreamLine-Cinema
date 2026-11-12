@@ -1,4 +1,48 @@
-# StreamLine Cinema v12.79
+# StreamLine Cinema v12.80
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.80 — Edge-to-edge channel artwork
+
+The Live cards now treat the logo as their fill instead of a picture inside a frame, so the glass treatment carries the card rather than a visible inset.
+
+- **No more frame** — the 14 dp horizontal / 10 dp vertical artwork inset is gone. It exposed the card's panel fill as a band around every logo, which read as a border and cheapened the cards.
+- **Artwork as fill** — the 16:9 logo paints edge to edge inside the 12 dp glass clip, with `ContentScale.Fit` still keeping the whole logo visible (no zoom or crop). Letterboxing only appears for artwork whose aspect ratio differs from the card, and it sits directly under the image.
+- **Glass-only edge** — the card keeps just the glass vocabulary: a 1 px edge light and the gold focus underline; there is no solid frame, halo or inset.
+- **Consistent list rows** — the 76 dp list thumbnails drop their 4 dp inset and fill their rounded clip the same way.
+
+## Verified on 12.80
+
+- On the installed all-ABI release the Live grid renders every logo to the card edge in both the grid and the LIST rows; no 14 dp band or panel frame is visible, only the glass edge light and focus underline.
+- The all-ABI release installs as `versionCode 120080` / `versionName 12.80`.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema121126v12.80.apk` | `armeabi-v7a` (TV boxes) | 76,270,092 bytes | `f871a7da38482dc62e09b4476033c7ba0bf0d307e92aa5c4f36dde02d3a942fe` |
+| `Cinema121126v12.80-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,731 bytes | `047310adca78043d8f9905091e85933a2d16becd0e067d5d3b358d37184c4465` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema121126v12.80.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.79 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

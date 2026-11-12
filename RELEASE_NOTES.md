@@ -1,6 +1,50 @@
-# StreamLine Cinema v12.81
+# StreamLine Cinema v12.82
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.82 — Accordion playlist rows
+
+Settings → IPTV & EPG used to give every playlist a fully expanded card, so a second playlist pushed the rest (and its own EDIT button) below the pane. Each playlist is now a compact row that expands on demand.
+
+- **One row per playlist** — the header shows the name, `M3U / M3U8 · N channels · EPG linked / no EPG`, an ACTIVE or PAUSED pill and a ▾/▴ chevron. Every saved playlist stays visible and reachable no matter how many are loaded.
+- **Accordion, not a wall** — opening one row closes the other, so the pane never grows past a single open panel.
+- **Details on expand** — the panel holds the playlist address, the `Parsed · N channels · N malformed` report, the EPG SHIFT chips (`AUTO -1H`, `-1H`, `-30M`, `+30M`, `+1H`, plus `AUTO` when a manual shift is active) or `No EPG guide linked · add one with EDIT`, and the EDIT · RELOAD · PAUSE/RESUME · REMOVE actions.
+- **EDIT unchanged** — the same edit dialog (name, playlist URL, guide override) opens from the expanded row, and closing it returns focus to that row's EDIT button.
+
+## Verified on 12.82
+
+- On the installed all-ABI release, two host fixtures (`10.0.2.2:8099/playlist.m3u` and `/playlist2.m3u`) render as two compact rows: `SecondList · M3U / M3U8 · 3 channels · no EPG` and `Test Provider · M3U / M3U8 · 6 channels · EPG linked`, each with its ACTIVE pill and a ▾ chevron.
+- Expanding `SecondList` shows its URL, `Parsed · 3 channels`, `No EPG guide linked · add one with EDIT` and EDIT · RELOAD · PAUSE · REMOVE, while `Test Provider` collapses to its header.
+- Expanding `Test Provider` shows `Parsed · 6 channels · 1 malformed` and `EPG SHIFT AUTO -1H` with the stepper chips; EDIT opens the edit dialog with the name, URL and guide populated, and CANCEL restores focus to that row.
+- The all-ABI release installs as `versionCode 120082` / `versionName 12.82`.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema121126v12.82.apk` | `armeabi-v7a` (TV boxes) | 76,270,077 bytes | `6fdc74a8cbcfdac56a0306a4329c2554a4c1e029200ca40d11e5bb9c612c5a3e` |
+| `Cinema121126v12.82-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,725 bytes | `d8163c1fa4bf7ef55856f25547424042d74a0044eaea8b56899728381fa50048` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema121126v12.82.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.81 (previous)
 
 ## New in 12.81 — Quieter Live header
 

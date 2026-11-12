@@ -49,6 +49,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -179,6 +183,7 @@ fun SettingsScreen(
     var iptvNotice by remember { mutableStateOf<String?>(null) }
     var iptvBusy by remember { mutableStateOf(false) }
     var iptvBusyId by remember { mutableStateOf<String?>(null) }
+    var expandedIptvId by remember { mutableStateOf<String?>(null) }
     var iptvEditSource by remember { mutableStateOf<IptvSource?>(null) }
     var iptvEditName by remember { mutableStateOf("") }
     var iptvEditUrl by remember { mutableStateOf("") }
@@ -1845,169 +1850,58 @@ fun SettingsScreen(
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             iptvSources.forEach { source ->
                                 val guide = source.epgUrl.ifBlank { source.extractedEpgUrl }
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(Cinema.Panel.copy(alpha = 0.55f))
-                                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                                    ) {
-                                        Text(
-                                            source.name.ifBlank { "Unnamed playlist" },
-                                            color = Cinema.TextPrimary,
-                                            fontSize = 13.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        InfoPill(
-                                            if (source.enabled) "ACTIVE" else "PAUSED",
-                                            if (source.enabled) Cinema.Online else Cinema.Pinging,
-                                            Cinema.InkSoft
-                                        )
-                                    }
-                                    Text(
-                                        "${source.kind.label} · ${source.channelCount} channels · " +
-                                            if (guide.isBlank()) "no EPG" else "EPG linked",
-                                        color = Cinema.TextSecondary,
-                                        fontSize = 10.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        source.cleanLocation,
-                                        color = Cinema.TextMuted,
-                                        fontSize = 9.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (source.lastReport.isNotBlank()) {
-                                        Text(
-                                            "Parsed · ${source.lastReport}",
-                                            color = if (source.lastReport.contains("malformed")) {
-                                                Cinema.Pinging
-                                            } else {
-                                                Cinema.TextMuted
-                                            },
-                                            fontSize = 9.sp,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    if (guide.isNotBlank()) {
-                                        Spacer(Modifier.height(6.dp))
-                                        val autoShift = epgState.autoShifts[source.id]
-                                        val effectiveShift =
-                                            if (source.epgShiftAuto) autoShift ?: 0 else source.epgShiftMinutes
-                                        val shiftLabel = if (source.epgShiftAuto) {
-                                            if (effectiveShift == 0) "AUTO" else "AUTO ${epgShiftLabel(effectiveShift)}"
+                                IptvSourceCard(
+                                    source = source,
+                                    guide = guide,
+                                    expanded = expandedIptvId == source.id,
+                                    autoShift = epgState.autoShifts[source.id],
+                                    iptvBusy = iptvBusy,
+                                    iptvBusyId = iptvBusyId,
+                                    editFocus = iptvEditFocus.getOrPut(source.id) {
+                                        FocusRequester()
+                                    },
+                                    onToggle = {
+                                        expandedIptvId =
+                                            if (expandedIptvId == source.id) null else source.id
+                                    },
+                                    onShift = { step ->
+                                        val effective = if (source.epgShiftAuto) {
+                                            epgState.autoShifts[source.id] ?: 0
                                         } else {
-                                            epgShiftLabel(effectiveShift)
+                                            source.epgShiftMinutes
                                         }
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                        ) {
-                                            Text(
-                                                "EPG SHIFT $shiftLabel",
-                                                color = if (effectiveShift == 0) Cinema.TextMuted else Cinema.Gold,
-                                                fontSize = 9.sp,
-                                                letterSpacing = 0.6.sp,
-                                                fontWeight = FontWeight.SemiBold
-                                            )
-                                            listOf(-60 to "-1H", -30 to "-30M", 30 to "+30M", 60 to "+1H")
-                                                .forEach { (step, label) ->
-                                                    TvButton(
-                                                        label = label,
-                                                        style = TvButtonStyle.GHOST,
-                                                        compact = true,
-                                                        onClick = {
-                                                            vm.setIptvEpgShift(
-                                                                source.id,
-                                                                effectiveShift + step
-                                                            )
-                                                        }
-                                                    )
-                                                }
-                                            if (!source.epgShiftAuto) {
-                                                TvButton(
-                                                    label = "AUTO",
-                                                    style = TvButtonStyle.GHOST,
-                                                    compact = true,
-                                                    onClick = { vm.resetIptvEpgShift(source.id) }
-                                                )
+                                        vm.setIptvEpgShift(source.id, effective + step)
+                                    },
+                                    onResetShift = { vm.resetIptvEpgShift(source.id) },
+                                    onEdit = {
+                                        iptvEditSource = source
+                                        iptvFocusReturnId = source.id
+                                        railReturnOffset = railScroll.value
+                                        paneReturnOffset = sectionScroll.value
+                                        iptvEditName = source.name
+                                        iptvEditUrl = source.location
+                                        iptvEditEpgUrl = source.epgUrl
+                                        iptvEditError = null
+                                    },
+                                    onReload = {
+                                        iptvBusyId = source.id
+                                        iptvError = null
+                                        iptvNotice = null
+                                        scope.launch {
+                                            val error = vm.refreshIptvSourceNow(source.id)
+                                            iptvBusyId = null
+                                            if (error == null) {
+                                                iptvNotice = "${source.name} reloaded"
+                                            } else {
+                                                iptvError = error
                                             }
                                         }
-                                    }
-                                    Spacer(Modifier.height(8.dp))
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        TvButton(
-                                            label = "EDIT",
-                                            glyph = "✎",
-                                            style = TvButtonStyle.GHOST,
-                                            compact = true,
-                                            enabled = iptvBusyId == null && !iptvBusy,
-                                            focusRequester = iptvEditFocus.getOrPut(source.id) {
-                                                FocusRequester()
-                                            },
-                                            onClick = {
-                                                iptvEditSource = source
-                                                iptvFocusReturnId = source.id
-                                                railReturnOffset = railScroll.value
-                                                paneReturnOffset = sectionScroll.value
-                                                iptvEditName = source.name
-                                                iptvEditUrl = source.location
-                                                iptvEditEpgUrl = source.epgUrl
-                                                iptvEditError = null
-                                            }
-                                        )
-                                        TvButton(
-                                            label = if (iptvBusyId == source.id) "LOADING…" else "RELOAD",
-                                            glyph = "↻",
-                                            style = TvButtonStyle.GHOST,
-                                            compact = true,
-                                            enabled = iptvBusyId == null && !iptvBusy,
-                                            onClick = {
-                                                iptvBusyId = source.id
-                                                iptvError = null
-                                                iptvNotice = null
-                                                scope.launch {
-                                                    val error = vm.refreshIptvSourceNow(source.id)
-                                                    iptvBusyId = null
-                                                    if (error == null) {
-                                                        iptvNotice = "${source.name} reloaded"
-                                                    } else {
-                                                        iptvError = error
-                                                    }
-                                                }
-                                            }
-                                        )
-                                        Spacer(Modifier.weight(1f))
-                                        TvButton(
-                                            label = if (source.enabled) "PAUSE" else "RESUME",
-                                            glyph = if (source.enabled) "❙❙" else "▶",
-                                            style = TvButtonStyle.GHOST,
-                                            compact = true,
-                                            onClick = { vm.setIptvEnabled(source.id, !source.enabled) }
-                                        )
-                                        TvButton(
-                                            label = "REMOVE",
-                                            glyph = "✕",
-                                            style = TvButtonStyle.GHOST,
-                                            compact = true,
-                                            onClick = { vm.removeIptvSource(source.id) }
-                                        )
-                                    }
-                                }
+                                    },
+                                    onToggleEnabled = {
+                                        vm.setIptvEnabled(source.id, !source.enabled)
+                                    },
+                                    onRemove = { vm.removeIptvSource(source.id) }
+                                )
                             }
                         }
                         }
@@ -2828,6 +2722,193 @@ private fun SettingsToggleRow(
             }
         }
         SettingsSwitch(checked)
+    }
+}
+
+@Composable
+private fun IptvSourceCard(
+    source: IptvSource,
+    guide: String,
+    expanded: Boolean,
+    autoShift: Int?,
+    iptvBusy: Boolean,
+    iptvBusyId: String?,
+    editFocus: FocusRequester,
+    onToggle: () -> Unit,
+    onShift: (Int) -> Unit,
+    onResetShift: () -> Unit,
+    onEdit: () -> Unit,
+    onReload: () -> Unit,
+    onToggleEnabled: () -> Unit,
+    onRemove: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val sounds = LocalUiSounds.current
+    val effectiveShift = if (source.epgShiftAuto) autoShift ?: 0 else source.epgShiftMinutes
+    val shiftLabel = if (source.epgShiftAuto) {
+        if (effectiveShift == 0) "AUTO" else "AUTO ${epgShiftLabel(effectiveShift)}"
+    } else {
+        epgShiftLabel(effectiveShift)
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        SettingsRowFrame(
+            focused = focused,
+            modifier = Modifier
+                .onFocusChanged {
+                    focused = it.isFocused
+                    if (it.isFocused) sounds.focus()
+                }
+                .semantics {
+                    role = Role.Button
+                    stateDescription = if (expanded) "Expanded" else "Collapsed"
+                    contentDescription = buildString {
+                        append(source.name.ifBlank { "Unnamed playlist" })
+                        append(if (source.enabled) ", active" else ", paused")
+                        append(", ${source.kind.label}, ${source.channelCount} channels")
+                        append(if (guide.isBlank()) ", no EPG" else ", EPG linked")
+                        append(if (expanded) ", expanded" else ", collapsed")
+                    }
+                }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ) {
+                    sounds.select()
+                    onToggle()
+                }
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    source.name.ifBlank { "Unnamed playlist" },
+                    color = Cinema.TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${source.kind.label} · ${source.channelCount} channels · " +
+                        if (guide.isBlank()) "no EPG" else "EPG linked",
+                    color = Cinema.TextMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            InfoPill(
+                if (source.enabled) "ACTIVE" else "PAUSED",
+                if (source.enabled) Cinema.Online else Cinema.Pinging,
+                Cinema.InkSoft
+            )
+            Text(
+                if (expanded) "▴" else "▾",
+                color = Cinema.TextMuted,
+                fontSize = 10.sp
+            )
+        }
+        if (expanded) {
+            Column(
+                Modifier.padding(start = 14.dp, end = 14.dp, top = 4.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    source.cleanLocation,
+                    color = Cinema.TextMuted,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (source.lastReport.isNotBlank()) {
+                    Text(
+                        "Parsed · ${source.lastReport}",
+                        color = if (source.lastReport.contains("malformed")) {
+                            Cinema.Pinging
+                        } else {
+                            Cinema.TextMuted
+                        },
+                        fontSize = 9.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (guide.isBlank()) {
+                    Text(
+                        "No EPG guide linked · add one with EDIT",
+                        color = Cinema.TextMuted,
+                        fontSize = 10.sp
+                    )
+                } else {
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "EPG SHIFT $shiftLabel",
+                            color = if (effectiveShift == 0) Cinema.TextMuted else Cinema.Gold,
+                            fontSize = 9.sp,
+                            letterSpacing = 0.6.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        listOf(-60 to "-1H", -30 to "-30M", 30 to "+30M", 60 to "+1H")
+                            .forEach { (step, label) ->
+                                TvButton(
+                                    label = label,
+                                    style = TvButtonStyle.GHOST,
+                                    compact = true,
+                                    onClick = { onShift(step) }
+                                )
+                            }
+                        if (!source.epgShiftAuto) {
+                            TvButton(
+                                label = "AUTO",
+                                style = TvButtonStyle.GHOST,
+                                compact = true,
+                                onClick = onResetShift
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TvButton(
+                        label = "EDIT",
+                        glyph = "✎",
+                        style = TvButtonStyle.GHOST,
+                        compact = true,
+                        enabled = iptvBusyId == null && !iptvBusy,
+                        focusRequester = editFocus,
+                        onClick = onEdit
+                    )
+                    TvButton(
+                        label = if (iptvBusyId == source.id) "LOADING…" else "RELOAD",
+                        glyph = "↻",
+                        style = TvButtonStyle.GHOST,
+                        compact = true,
+                        enabled = iptvBusyId == null && !iptvBusy,
+                        onClick = onReload
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TvButton(
+                        label = if (source.enabled) "PAUSE" else "RESUME",
+                        glyph = if (source.enabled) "❙❙" else "▶",
+                        style = TvButtonStyle.GHOST,
+                        compact = true,
+                        onClick = onToggleEnabled
+                    )
+                    TvButton(
+                        label = "REMOVE",
+                        glyph = "✕",
+                        style = TvButtonStyle.GHOST,
+                        compact = true,
+                        onClick = onRemove
+                    )
+                }
+            }
+        }
     }
 }
 

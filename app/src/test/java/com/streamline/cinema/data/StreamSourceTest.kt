@@ -157,6 +157,75 @@ class StreamSourceTest {
         assertEquals("video/*", ExternalIntents.mimeFor("https://cdn/play/abc123", null))
     }
 
+    @Test
+    fun pipeHeadersAcceptPipeAndAmpersandSeparators() {
+        val parsed = StreamUrls.parse(
+            "https://cdn/live.m3u8|User-Agent=VLC/3.0|Referer=https%3A%2F%2Fsite%2F&Origin=https://site"
+        )
+        assertEquals("https://cdn/live.m3u8", parsed.url)
+        assertEquals("VLC/3.0", parsed.headers["User-Agent"])
+        assertEquals("https://site/", parsed.headers["referer"])
+        assertEquals("https://site", parsed.headers["Origin"])
+    }
+
+    @Test
+    fun pipeHeaderValuesKeepPlusAndDecodePercentRuns() {
+        val parsed = StreamUrls.parse(
+            "https://cdn/a.mkv|X-Token=abc+def==&Cookie=sid%3D1%26v%3D2"
+        )
+        assertEquals("abc+def==", parsed.headers["X-Token"])
+        assertEquals("sid=1&v=2", parsed.headers["Cookie"])
+    }
+
+    @Test
+    fun pipeHeadersIgnoreJunkReservedAndInvalidNames() {
+        val parsed = StreamUrls.parse(
+            "https://cdn/a.m3u8|junk&Host=evil.example&Bad Name=x&Referer=\"https://site/\""
+        )
+        assertEquals("https://cdn/a.m3u8", parsed.url)
+        assertEquals(1, parsed.headers.size)
+        assertNull(parsed.headers["Host"])
+        assertEquals("https://site/", parsed.headers["Referer"])
+    }
+
+    @Test
+    fun pipeHeaderNamesAreCaseInsensitive() {
+        val parsed = StreamUrls.parse("https://cdn/a.m3u8|user-agent=One&User-Agent=Two")
+        assertEquals(1, parsed.headers.size)
+        assertEquals("Two", parsed.headers["USER-AGENT"])
+    }
+
+    @Test
+    fun pipeSuffixWithoutHeadersLeavesTheUrlIntact() {
+        val literalPipe = StreamUrls.parse("https://cdn/a|b")
+        assertEquals("https://cdn/a|b", literalPipe.url)
+        assertTrue(literalPipe.headers.isEmpty())
+        assertEquals("https://cdn/a", StreamUrls.parse("https://cdn/a|").url)
+        assertEquals("https://cdn/a", StreamUrls.parse("  https://cdn/a  ").url)
+    }
+
+    @Test
+    fun mergedHeadersDropWhatTheDataSourceCannotSend() {
+        val merged = StreamUrls.mergeHeaders(
+            mapOf("User-Agent" to "Default"),
+            mapOf("user-agent" to "Addon", "Connection" to "keep-alive", "Bad Name" to "x")
+        )
+        assertEquals(1, merged.size)
+        assertEquals("Addon", merged["user-agent"])
+    }
+
+    @Test
+    fun reassembledPipeHeadersRoundTrip() {
+        val raw = StreamUrls.withHeaders(
+            "https://cdn/a.m3u8",
+            mapOf("Referer" to "https://site/with space", "X-Token" to "a+b==")
+        )
+        val parsed = StreamUrls.parse(raw)
+        assertEquals("https://cdn/a.m3u8", parsed.url)
+        assertEquals("https://site/with space", parsed.headers["Referer"])
+        assertEquals("a+b==", parsed.headers["X-Token"])
+    }
+
     private fun valueOf(pairs: Array<String>, name: String): String? =
         pairs.toList().chunked(2).firstOrNull { it[0].equals(name, true) }?.get(1)
 

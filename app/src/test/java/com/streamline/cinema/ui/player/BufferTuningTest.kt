@@ -122,4 +122,52 @@ class BufferTuningTest {
         assertTrue(!weak.copy(bandwidthCap = BandwidthCap.MBPS5).weakNetworkPreset)
         assertTrue(!weak.copy(lowLatency = true).weakNetworkPreset)
     }
+
+    /** The high-capacity switch owns the progressive window, whatever the tier says. */
+    @Test
+    fun highCapacityPinsTheProgressiveWindow() {
+        BufferTier.entries.forEach { tier ->
+            val window = bufferWindow(
+                tier,
+                adaptive = false,
+                lowLatency = true,
+                lowRam = false,
+                highCapacityVod = true
+            )
+            assertEquals(HIGH_CAPACITY_VOD_WINDOW, window)
+        }
+        assertEquals(15_000, HIGH_CAPACITY_VOD_WINDOW.minBufferMs)
+        assertEquals(50_000, HIGH_CAPACITY_VOD_WINDOW.maxBufferMs)
+        assertEquals(2_500, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackMs)
+        assertEquals(5_000, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackAfterRebufferMs)
+
+        // Adaptive streams keep their own windows.
+        val adaptive = bufferWindow(
+            BufferTier.LEAN,
+            adaptive = true,
+            lowLatency = true,
+            lowRam = false,
+            highCapacityVod = true
+        )
+        assertEquals(2_000, adaptive.minBufferMs)
+
+        // Low-RAM boxes take the pin too; their byte budget still caps memory.
+        val lowRam = bufferWindow(
+            BufferTier.BALANCED,
+            adaptive = false,
+            lowLatency = true,
+            lowRam = true,
+            highCapacityVod = true
+        )
+        assertEquals(HIGH_CAPACITY_VOD_WINDOW, lowRam)
+    }
+
+    @Test
+    fun highCapacityDeepensTheNativeCaches() {
+        val cache = nativeCache(BufferTier.LEAN, highCapacityVod = true)
+        assertEquals(30, cache.mpvCacheSeconds)
+        assertEquals(5_000, cache.vlcCachingMs)
+        // Without the switch the tier still owns the caches.
+        assertEquals(4, nativeCache(BufferTier.LEAN).mpvCacheSeconds)
+    }
 }

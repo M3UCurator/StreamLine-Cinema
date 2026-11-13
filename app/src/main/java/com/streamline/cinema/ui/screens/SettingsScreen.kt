@@ -1120,8 +1120,11 @@ fun SettingsScreen(
                         }
                         SettingsGroup(
                             "Bandwidth & buffering",
-                            hint = if (settings.weakNetworkPreset) "WEAK NETWORK"
-                            else settings.bandwidthCap.display
+                            hint = when {
+                                settings.weakNetworkPreset -> "WEAK NETWORK"
+                                settings.highCapacityBuffer -> "HIGH CAPACITY"
+                                else -> settings.bandwidthCap.display
+                            }
                         ) {
                         SettingsToggleRow(
                             label = "Weak network",
@@ -1165,13 +1168,21 @@ fun SettingsScreen(
                                 vm.saveSettings { it.copy(bufferTier = tier) }
                             }
                         )
+                        SettingsToggleRow(
+                            label = "High-capacity buffering (MP4 / MKV)",
+                            checked = settings.highCapacityBuffer,
+                            onChange = { vm.saveSettings { s -> s.copy(highCapacityBuffer = it) } },
+                            description = "15 s fill · 50 s forward · 2.5 s start · 5 s re-buffer; " +
+                                "wins over the buffer tier for MP4/MKV, low-RAM boxes still cap memory by bytes"
+                        )
                         SettingsInfoRow(
                             title = "MP4 / MKV load control",
                             value = describeBuffer(
                                 settings.bufferTier,
                                 adaptive = false,
                                 lowLatency = settings.lowLatency,
-                                lowRam = lowRamDevice
+                                lowRam = lowRamDevice,
+                                highCapacityVod = settings.highCapacityBuffer
                             )
                         )
                         SettingsInfoRow(
@@ -1185,7 +1196,10 @@ fun SettingsScreen(
                         )
                         SettingsInfoRow(
                             title = "VLC / MPV cache",
-                            value = describeNativeCache(settings.bufferTier)
+                            value = describeNativeCache(
+                                settings.bufferTier,
+                                highCapacityVod = settings.highCapacityBuffer
+                            )
                         )
                         SettingsToggleRow(
                             label = "Next up follows furthest watched",

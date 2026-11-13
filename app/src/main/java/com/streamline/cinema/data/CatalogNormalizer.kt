@@ -232,26 +232,40 @@ object StreamUrls {
     }
 
     /**
-     * Splits `http://host/live.m3u8|User-Agent=...&Referer=...` into a clean URL and
-     * the request headers it carries. Values are URL-decoded, so tokens that need
-     * `%26` or spaces survive the pipe form.
+     * Splits `http://host/live.m3u8|User-Agent=...&Referer=...` into a clean URL
+     * and the request headers it carries.
+     *
+     * The suffix is parsed defensively because it comes from playlists and
+     * addons the app does not control:
+     *  - fields may be separated by `&` or a second `|`, and only a chunk that
+     *    starts like `Name=` starts a new field, so an `&` followed by plain
+     *    text stays part of the value (`&` inside a token must be written as
+     *    `%26`, as with any URL);
+     *  - names and values are trimmed, surrounding quotes are removed and
+     *    `%XX` runs are decoded (a literal `+` stays a `+`, as base64 tokens
+     *    require);
+     *  - anything OkHttp would reject — a non-token name, non-printable value,
+     *    or a restricted header such as `Host`/`Connection` — is dropped
+     *    instead of turning the whole request into an exception;
+     *  - duplicate names differing only in case collapse to the last value.
+     *
+     * A pipe that yields no usable header is left in the URL, so a playlist
+     * entry whose path contains `|` is not silently truncated. Never throws.
      */
     fun parse(raw: String): ParsedStream {
         val trimmed = raw.trim()
-        val pipe = trimmed.indexOf('|')
-        if (pipe <= 0) return ParsedStream(trimmed)
-        val url = trimmed.substring(0, pipe).trim()
-        val headers = LinkedHashMap<String, String>()
-        trimmed.substring(pipe + 1)
-            .split('&')
-            .forEach { chunk ->
-                val eq = chunk.indexOf('=')
-                if (eq <= 0) return@forEach
-                val name = decode(chunk.substring(0, eq).trim())
-                val value = decode(chunk.substring(eq + 1).trim())
-                if (name.isNotBlank() && value.isNotBlank()) headers[name] = value
+        val first = trimmed.indexOf('|')
+        if (first <= 0) return ParsedStream(trimmed)
+        var index = first
+        while (index > 0) {
+            val headers = headerFields(trimmed.substring(index + 1))
+            if (headers.isNotEmpty()) {
+                return ParsedStream(trimmed.substring(0, index).trim(), headers)
             }
-        return ParsedStream(url, headers)
+            index = trimmed.indexOf('|', index + 1)
+        }
+        val rest = trimmed.substring(first + 1)
+        return ParsedStream(if (rest.isBlank()) trimmed.substring(0, first).trim() else trimmed)
     }
 
     /** Stream URL without the pipe suffix — safe to show, log or hand to another app. */
@@ -259,9 +273,11 @@ object StreamUrls {
 
     /** Re-attaches pipe headers to a URL that was resolved elsewhere (redirects). */
     fun withHeaders(url: String, headers: Map<String, String>): String {
-        if (headers.isEmpty()) return url
-        val suffix = headers.entries.joinToString("&") { (name, value) ->
-            name + "=" + java.net.URLEncoder.encode(value, "UTF-8")
+        val clean = sanitize(headers)
+        if (clean.isEmpty()) return url
+        val suffix = clean.entries.joinToString("&") { (name, value) ->
+            // %20 rather than '+' so parse()/decode() can keep '+' literal.
+            name + "=" + java.net.URLEncoder.encode(value, "UTF-8").replace("+", "%20")
         }
         return "$url|$suffix"
     }
@@ -273,14 +289,90 @@ object StreamUrls {
             clean.endsWith(".avi") || clean.endsWith(".flv") || clean.endsWith(".ts")
     }
 
-    /** Case-insensitive header merge: explicit (pipe/addon) values win over defaults. */
+    /**
+     * Case-insensitive header merge: explicit (pipe/addon) values win over
+     * defaults. Both sides are sanitised, so an addon-supplied map cannot hand
+     * the player a header OkHttp would throw on either.
+     */
     fun mergeHeaders(first: Map<String, String>, second: Map<String, String>): Map<String, String> {
         val merged = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER)
-        merged.putAll(first)
-        merged.putAll(second)
+        merged.putAll(sanitize(first))
+        merged.putAll(sanitize(second))
         return merged
     }
 
-    private fun decode(value: String): String =
-        runCatching { java.net.URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
+    /** Drops headers the data source cannot send and repairs the rest. */
+    fun sanitize(headers: Map<String, String>): Map<String, String> {
+        val clean = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER)
+        headers.forEach { (rawName, rawValue) ->
+            val name = headerName(rawName) ?: return@forEach
+            val value = headerValue(rawValue) ?: return@forEach
+            clean[name] = value
+        }
+        return clean
+    }
+
+    private fun headerFields(raw: String): Map<String, String> =
+        sanitize(
+            buildMap {
+                FIELD_BREAK.split(raw).forEach { chunk ->
+                    val separator = chunk.indexOfFirst { it == '=' || it == ':' }
+                    if (separator > 0) {
+                        put(decode(chunk.substring(0, separator)), decode(chunk.substring(separator + 1)))
+                    }
+                }
+            }
+        )
+
+    /** RFC 7230 token, i.e. what OkHttp accepts as a header name. */
+    private fun headerName(raw: String): String? {
+        val name = raw.trim()
+        if (name.isEmpty() || !HEADER_TOKEN.matches(name)) return null
+        if (name.lowercase(java.util.Locale.US) in RESERVED_HEADERS) return null
+        return name
+    }
+
+    /**
+     * OkHttp only allows printable ASCII in a header value; control characters
+     * and anything above 0x7E are stripped rather than failing the request.
+     */
+    private fun headerValue(raw: String): String? =
+        raw.trim()
+            .removeSurrounding("\"")
+            .removeSurrounding("'")
+            .filter { it in '\u0020'..'\u007e' }
+            .trim()
+            .ifEmpty { null }
+
+    /**
+     * Percent-decodes `%XX` runs and leaves a literal `+` alone — unlike
+     * URLDecoder, which would turn base64 padding into spaces.
+     */
+    private fun decode(raw: String): String {
+        if ('%' !in raw) return raw
+        return runCatching {
+            java.net.URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")
+        }.getOrDefault(raw)
+    }
+
+    /**
+     * A field boundary is `&` or a second `|`, but only where the next chunk
+     * starts like `Name=`; `&` inside an unencoded query keeps its place.
+     */
+    private val FIELD_BREAK = Regex("[&|]\\s*(?=[A-Za-z0-9!#$%'*+.^_~-]+\\s*[=:])")
+
+    private val HEADER_TOKEN = Regex("[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+
+    /** DefaultHttpDataSource throws on these; OkHttp refuses some of them too. */
+    private val RESERVED_HEADERS = setOf(
+        "host",
+        "connection",
+        "proxy-connection",
+        "upgrade",
+        "keep-alive",
+        "content-length",
+        "transfer-encoding",
+        "trailer",
+        "te"
+    )
 }

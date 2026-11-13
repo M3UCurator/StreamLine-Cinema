@@ -21,16 +21,37 @@ private const val START_MS = 2_500
 private const val REBUFFER_MS = 5_000
 
 /**
+ * The window the "High-capacity buffering" switch pins on MP4/MKV: a 15 s
+ * fill before playback may start, 50 s of forward buffer to ride out a line
+ * that dips, and the default 2.5 s / 5 s start and re-buffer gates.
+ */
+internal val HIGH_CAPACITY_VOD_WINDOW = BufferWindow(
+    minBufferMs = 15_000,
+    maxBufferMs = 50_000,
+    bufferForPlaybackMs = START_MS,
+    bufferForPlaybackAfterRebufferMs = REBUFFER_MS,
+    backBufferMs = 120_000
+)
+
+/**
  * BALANCED must stay byte-for-byte the pre-tier behaviour so existing installs
  * keep their tuned window; LEAN and GENEROUS only move the forward window and
  * the rewind retention around it.
+ *
+ * [highCapacityVod] pins the progressive MP4/MKV window to
+ * [HIGH_CAPACITY_VOD_WINDOW] whatever the tier says, including on the low-RAM
+ * profile: those boxes still enforce their byte budget through
+ * `setTargetBufferBytes`, so the pin widens the time window without letting the
+ * loader grow past the RAM the device reports.
  */
 internal fun bufferWindow(
     tier: BufferTier,
     adaptive: Boolean,
     lowLatency: Boolean,
-    lowRam: Boolean
+    lowRam: Boolean,
+    highCapacityVod: Boolean = false
 ): BufferWindow {
+    if (!adaptive && highCapacityVod) return HIGH_CAPACITY_VOD_WINDOW
     if (lowRam) {
         val fixed = when {
             adaptive -> when (tier) {
@@ -83,21 +104,27 @@ internal fun bufferWindow(
  * the tier has to be mapped onto them as well: MPV holds `cache-secs`, libVLC
  * its network/live pre-roll. BALANCED keeps the values both engines shipped
  * with before the tier existed, so existing installs play exactly as before.
+ * The high-capacity switch deepens both caches for progressive VOD too.
  */
 internal data class NativeCache(
     val mpvCacheSeconds: Int,
     val vlcCachingMs: Int
 )
 
-internal fun nativeCache(tier: BufferTier): NativeCache = when (tier) {
-    BufferTier.LEAN -> NativeCache(mpvCacheSeconds = 4, vlcCachingMs = 800)
-    BufferTier.BALANCED -> NativeCache(mpvCacheSeconds = 10, vlcCachingMs = 1_500)
-    BufferTier.GENEROUS -> NativeCache(mpvCacheSeconds = 20, vlcCachingMs = 4_000)
-}
+internal fun nativeCache(tier: BufferTier, highCapacityVod: Boolean = false): NativeCache =
+    if (highCapacityVod) {
+        NativeCache(mpvCacheSeconds = 30, vlcCachingMs = 5_000)
+    } else {
+        when (tier) {
+            BufferTier.LEAN -> NativeCache(mpvCacheSeconds = 4, vlcCachingMs = 800)
+            BufferTier.BALANCED -> NativeCache(mpvCacheSeconds = 10, vlcCachingMs = 1_500)
+            BufferTier.GENEROUS -> NativeCache(mpvCacheSeconds = 20, vlcCachingMs = 4_000)
+        }
+    }
 
 /** One-line summary for Settings, e.g. "10 s MPV · 1.5 s VLC". */
-internal fun describeNativeCache(tier: BufferTier): String {
-    val cache = nativeCache(tier)
+internal fun describeNativeCache(tier: BufferTier, highCapacityVod: Boolean = false): String {
+    val cache = nativeCache(tier, highCapacityVod)
     return "${cache.mpvCacheSeconds} s MPV · ${seconds(cache.vlcCachingMs)} s VLC"
 }
 
@@ -106,9 +133,10 @@ internal fun describeBuffer(
     tier: BufferTier,
     adaptive: Boolean,
     lowLatency: Boolean,
-    lowRam: Boolean
+    lowRam: Boolean,
+    highCapacityVod: Boolean = false
 ): String {
-    val window = bufferWindow(tier, adaptive, lowLatency, lowRam)
+    val window = bufferWindow(tier, adaptive, lowLatency, lowRam, highCapacityVod)
     val forward = if (window.minBufferMs == window.maxBufferMs) {
         "window ${seconds(window.minBufferMs)} s"
     } else {

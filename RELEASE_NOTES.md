@@ -1,6 +1,51 @@
-# StreamLine Cinema v12.85
+# StreamLine Cinema v12.86
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.86 — Pipe headers that never fail, deep buffers on demand
+
+Header injection now survives the malformed suffixes real playlists contain, and a film or episode can be told to buffer 50 s ahead instead of the tuned default.
+
+- **Fail-free pipe parser** — `https://cdn/stream.m3u8|User-Agent=…&Referer=…` is parsed without throwing and without ever failing the request. `&` and `|` both separate fields (whitespace allowed around separators and `=`), values may be quoted, `%XX` runs are decoded while a literal `+` is preserved, and names are matched case-insensitively so `User-Agent`/`user-agent` collapse to one header. Invalid names, non-printable values and HTTP framing headers (`Host`, `Connection`, `Keep-Alive`, `Content-Length`, `Transfer-Encoding`, `Trailer`, `TE`, …) are dropped instead of reaching OkHttp, where one bad name fails the whole load. A pipe that yields no valid header stays part of the URL, so a URL that legitimately contains `|` still works.
+- **One parser for every surface** — live channel tuning, film and episode playback, IPTV playlist and guide downloads, Stremio addon sources, the native HLS proxy, the source probe and the external `ACTION_VIEW` hand-off all go through the same `parse`/`mergeHeaders`, so a header that works on one path works on all of them. `withHeaders` rebuilds the syntax for persisted sources and round-trips through `parse`.
+- **High-capacity buffering (MP4 / MKV)** — Settings → Playback → **Bandwidth & buffering** gains a toggle that pins the progressive video window to **15 s fill · 50 s forward · 2.5 s start · 5 s re-buffer**, the deep profile meant to absorb a line that dips mid-film. It wins over the video buffer tier for MP4/MKV only: adaptive HLS/DASH keeps its segment-sized window (ABR gains nothing from a 50 s queue), and low-RAM boxes keep enforcing their byte budget, so the wider window can never grow past the RAM the device reports. Turning it on also deepens the VLC/MPV caches to 5 s / 30 s.
+- **Visible state, persisted choice** — the group hint reads `HIGH CAPACITY`, the **MP4 / MKV load control** row prints the resolved `min 15 s · max 50 s · start 2.5 s · re-buffer 5 s`, the flag rides along in the settings backup (`highCapacityBuffer`), and the player logs the active profile on every tune.
+
+## Verified on 12.86
+
+- A loopback fixture (port 8099) logged the headers it actually received. A progressive MP4 played from `http://10.0.2.2:8099/oceans.mp4|User-Agent=PipeTest/9.9&Referer=https://pipe.test/` arrived as `ua=PipeTest/9.9 referer=https://pipe.test/`, and an HLS master at `…/live.m3u8|User-Agent=LivePipe/1.0&Referer=https://live.test/` arrived as `ua=LivePipe/1.0 referer=https://live.test/`, with playback continuing through the remote variant.
+- The tolerant syntax `…oceans.mp4| User-Agent = %22Quoted%20UA/3.0%22 & Host = evil.test & Referer=https://pct.test/a+b` reached the server as `ua=Quoted UA/3.0 referer=https://pct.test/a+b`: quoting and `%XX` decoded, `+` kept literal, the reserved `Host` header dropped, and the request succeeded.
+- With the toggle on, an MP4 tuned with `Load control · progressive · 15000/50000 ms · start 2500 ms · re-buffer 5000 ms · back 120000 ms · high capacity`, and Settings showed **MP4 / MKV load control: min 15 s · max 50 s · start 2.5 s · re-buffer 5 s** with **VLC / MPV cache: 30 s MPV · 5 s VLC**. Turning it off returned the progressive row to the device's tier window, and an HLS tune stayed `Load control · adaptive · 8000/8000 ms …` with no high-capacity suffix.
+- `StreamSourceTest` (16 tests, seven new: separators, quoted and percent-encoded values, invalid/reserved names, case-insensitive names, headerless suffixes, merge sanitising, round-trip) and `BufferTuningTest` (8 tests, including the pinned window on every tier and low-RAM, plus the deepened native caches) pass with the rest of the unit suite.
+- The all-ABI release installs as `versionCode 120086` / `versionName 12.86` and boots to the profile picker.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.86.apk` | `armeabi-v7a` (TV boxes) | 76,270,101 bytes | `f580d5aec02ed63640c4956b9555edb7b5784a8aa3c2a664537a50715e84225e` |
+| `Cinema131126v12.86-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,743 bytes | `7d1c37f116054b287bf66efbdd44d2c5e41c89d6de7a1d9edd6439f848439ae8` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.86.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.85 (previous)
 
 ## New in 12.85 — See the buffer, start with captions off
 

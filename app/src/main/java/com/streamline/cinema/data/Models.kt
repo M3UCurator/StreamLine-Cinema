@@ -436,6 +436,12 @@ data class AppSettings(
     val abrEnabled: Boolean = true,
     val bandwidthCap: BandwidthCap = BandwidthCap.AUTO,
     val bufferTier: BufferTier = BufferTier.BALANCED,
+    /**
+     * Pins Media3's progressive MP4/MKV window to 15 s fill / 50 s forward
+     * buffer (2.5 s start, 5 s re-buffer) whatever the tier says. Adaptive
+     * streams and low-RAM devices keep their own windows.
+     */
+    val highCapacityBuffer: Boolean = false,
     val sortMode: SortMode = SortMode.RECENT,
     val posterOrientation: PosterOrientation = PosterOrientation.PORTRAIT,
     val posterSize: PosterSize = PosterSize.MEDIUM,
@@ -566,6 +572,7 @@ data class AppSettings(
         put("abrEnabled", abrEnabled)
         put("bandwidthCap", bandwidthCap.name)
         put("bufferTier", bufferTier.name)
+        put("highCapacityBuffer", highCapacityBuffer)
         put("sortMode", sortMode.name)
         put("posterOrientation", posterOrientation.name)
         put("posterSize", posterSize.name)
@@ -619,6 +626,7 @@ data class AppSettings(
                 abrEnabled = o.optBoolean("abrEnabled", true),
                 bandwidthCap = BandwidthCap.from(o.stringOrNull("bandwidthCap")),
                 bufferTier = BufferTier.from(o.stringOrNull("bufferTier")),
+                highCapacityBuffer = o.optBoolean("highCapacityBuffer", false),
                 sortMode = SortMode.from(o.stringOrNull("sortMode")),
                 posterOrientation = PosterOrientation.from(o.stringOrNull("posterOrientation")),
                 posterSize = PosterSize.from(o.stringOrNull("posterSize")),

@@ -3592,7 +3592,12 @@ private fun buildPlayer(
 ): Player {
     // The native engines hold their own caches, so the tier has to reach them
     // too; without this LEAN/GENEROUS only moved the Media3 window.
-    val engineCache = nativeCache(settings.bufferTier)
+    // The high-capacity switch targets progressive files only, so the native
+    // engines get the deeper cache only when they are playing one.
+    val engineCache = nativeCache(
+        settings.bufferTier,
+        highCapacityVod = settings.highCapacityBuffer && !adaptive
+    )
     val native = if (forceBuiltIn) {
         null
     } else {
@@ -3728,12 +3733,23 @@ private fun buildExoPlayer(
     val lowRamDevice = DeviceProfile.isLowRam(context)
 
     // The tier picks the forward window and the rewind retention; BALANCED is
-    // the pre-tier profile, so existing installs keep their tuning.
+    // the pre-tier profile, so existing installs keep their tuning. The
+    // high-capacity switch pins the MP4/MKV window to 15 s / 50 s.
     val window = bufferWindow(
         tier = settings.bufferTier,
         adaptive = adaptive,
         lowLatency = settings.lowLatency,
-        lowRam = lowRamDevice
+        lowRam = lowRamDevice,
+        highCapacityVod = settings.highCapacityBuffer
+    )
+    Log.i(
+        "StreamLine:player",
+        "Load control · ${if (adaptive) "adaptive" else "progressive"} · " +
+            "${window.minBufferMs}/${window.maxBufferMs} ms · " +
+            "start ${window.bufferForPlaybackMs} ms · " +
+            "re-buffer ${window.bufferForPlaybackAfterRebufferMs} ms · " +
+            "back ${window.backBufferMs} ms" +
+            if (settings.highCapacityBuffer && !adaptive) " · high capacity" else ""
     )
 
     val loadControlBuilder = DefaultLoadControl.Builder()

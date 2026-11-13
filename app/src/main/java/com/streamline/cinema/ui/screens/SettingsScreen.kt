@@ -1421,10 +1421,12 @@ fun SettingsScreen(
                         Text(
                             if (players.isEmpty()) {
                                 "No external video players detected. Install any video player " +
-                                    "(Just Player, VLC, MPV, MX Player, …); it will appear in the system chooser."
+                                    "(Just Player, VLC, MPV, MX Player, …); the system chooser still opens from " +
+                                    "OPEN WITH inside the player."
                             } else {
-                                "Hand-off always opens the system chooser, so any installed player can be " +
-                                    "picked: " + players.joinToString { it.label } + "."
+                                "OPEN WITH inside the player lists the system chooser first, then " +
+                                    players.joinToString { it.label } +
+                                    ". The app player stays paused until the hand-off completes."
                             },
                             color = Cinema.TextMuted,
                             fontSize = 11.sp,

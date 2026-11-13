@@ -5,7 +5,7 @@ import java.time.format.DateTimeFormatter
 // Release artifacts are named by build day and iteration (Cinema<ddMMyy>v<iteration>.apk)
 // so successive builds never overwrite each other. Bump -PcinemaIteration per release;
 // -PallAbis=true adds the emulator suffix and drops the 32-bit ABI filter for that build.
-val iteration = providers.gradleProperty("cinemaIteration").orElse("12.87").get()
+val iteration = providers.gradleProperty("cinemaIteration").orElse("12.88").get()
 val allAbis = providers.gradleProperty("allAbis").map(String::toBoolean).getOrElse(false)
 val buildDay = LocalDate.now().format(DateTimeFormatter.ofPattern("ddMMyy"))
 val artifactName = "Cinema${buildDay}v$iteration" + if (allAbis) "-allabis" else ""

@@ -1653,9 +1653,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             if (option == null && result?.externalOnly == true) {
                 result.externalUrl?.takeIf { it.isNotBlank() }?.let { externalUrl ->
                     val parsed = StreamUrls.parse(externalUrl)
-                    val launched = ExternalIntents.launch(
-                        getApplication<Application>(),
-                        parsed.url,
+                    val launched = ExternalIntents.launchIn(
+                        context = getApplication<Application>(),
+                        packageName = null,
+                        url = parsed.url,
                         headers = parsed.headers,
                         userAgent = settings.value.userAgentString
                     )

@@ -1,4 +1,51 @@
-# StreamLine Cinema v12.87
+# StreamLine Cinema v12.88
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.88 — One OPEN WITH window, one player at a time
+
+Handing a stream to an external player no longer closes the app player before the transfer happens. **OPEN WITH** now opens a focused window that lists the ways out of the app, and the app player stays alive — paused at the same position — until a chosen player is actually on screen.
+
+- **The window** — titled *OPEN WITH ANDROID PLAYER* with the stream name in the subtitle, it opens on the system program chooser (`ACTION_VIEW` badge, the default row) followed by every detected player on the device: JustPlayer (*Pure ExoPlayer v2 / Media3*), VLC (*LibVLC hardware decoder*), MX Player (*HW+ codec engine*), mpv (*GPU-accelerated libmpv*) and any other package the system reports, each with its package id and a monogram tile. A read-only **Raw stream URL** field with **COPY** serves players that take a pasted link, and **DONE (BACK TO PLAYER)** leaves the window without launching anything.
+- **The player is not torn down** — opening the window pauses playback and keeps the same `Player` instance; no second instance is created, so the decoder, buffered queue and playhead all survive. **DONE**, BACK and ✕ resume exactly where the film was if it was playing before.
+- **Only one player persists after the transfer** — picking a named player launches it with `ACTION_VIEW` (package-targeted, stream URL, `headers` extra) and keeps the app player alive until that app has actually covered the screen (`ON_STOP`); the app player then finishes, leaving the external player as the only instance running. The system chooser is not a player: choosing it never finishes the app player.
+- **Switching back is a first-class option** — if the hand-off does not stick (the chosen app declines, or you come straight back), returning to the app resumes the same paused instance and the player shows *Back in the app player*. Before launching, **DONE (BACK TO PLAYER)** is the same escape. A launch that no app accepts reports *Nothing on this device accepted the stream. Install a video player or copy the URL.* inside the window, and a hand-off that never reaches the foreground reports *Hand-off to … did not start · still in the app player* after six seconds.
+- **Headers and UA are unchanged** — the hand-off still carries the browser UA preset, addon proxy headers and pipe-syntax headers as an alternating key/value `headers` String[] extra.
+
+## Verified on 12.88
+
+- `./gradlew assembleRelease -PallAbis=true -PcinemaIteration=12.88` and `./gradlew assembleRelease -PcinemaIteration=12.88` — both BUILD SUCCESSFUL; the all-ABI release installs as `versionCode 120088` / `versionName 12.88` over 12.87 with app data kept.
+- On emulator-5554, **⋮ → Play in external player** opens the *OPEN WITH ANDROID PLAYER* window over the paused app player: the system chooser row is highlighted with its `ACTION_VIEW` badge, Just Player and Photos are listed with package ids, the raw URL field copies to the clipboard via **COPY** (label flips to *COPIED*), and **DONE (BACK TO PLAYER)** is fully on screen at 411 dp tall — only the row list scrolls.
+- **DONE** returns to the same paused player and resumes where it was. Choosing Just Player launches `act=VIEW … pkg=com.brouken.player` from `launchedFromPackage=com.streamline.cinema`, the app player finishes only after Just Player covers the screen, and only the Just Player task remains — BACK then lands on the app's Settings pane, never a second player.
+- Choosing the default system chooser opens `com.android.intentresolver/.ChooserActivityLauncher` over the still-paused app player; BACK returns to the same `PlayerActivity` and the film keeps playing — one player instance throughout.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.88.apk` | `armeabi-v7a` (TV boxes) | 76,302,852 bytes | `a41b7d49b205768ec85f5fc30fc5c3af7112d4761f6368ecd918b00ab2a1c64a` |
+| `Cinema131126v12.88-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,501,496 bytes | `44e1b2882820fb856f08129e7d89aa9ecc2d4eef585ba4201ac904f3b26cc6f8` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.88.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.87 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

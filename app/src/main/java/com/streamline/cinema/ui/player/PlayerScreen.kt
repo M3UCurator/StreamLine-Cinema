@@ -129,6 +129,7 @@ import com.streamline.cinema.data.DeviceProfile
 import com.streamline.cinema.data.DrmConfig
 import com.streamline.cinema.data.EpgGuide
 import com.streamline.cinema.data.ExternalIntents
+import com.streamline.cinema.data.ExternalPlayerInfo
 import com.streamline.cinema.data.Http
 import com.streamline.cinema.data.LiveChannel
 import com.streamline.cinema.data.NativeStreamProxy
@@ -205,6 +206,11 @@ private const val FOCUS_ATTEMPTS = 4
 private const val FOCUS_RETRY_MS = 90L
 
 private const val RECOVERY_COOLDOWN_MS = 20_000L
+// Ignore a resume that lands inside the launch's own settle window, when the
+// activity is bouncing through PAUSE/START around the target app.
+private const val HANDOFF_SETTLE_MS = 700L
+// A hand-off that never covers this screen is treated as failed after this long.
+private const val HANDOFF_TIMEOUT_MS = 6_000L
 // A credits-time next-up countdown aims at the real end, stopping this many
 // seconds short so the hand-off lands before the final frame.
 private const val CREDITS_END_MARGIN_S = 2
@@ -412,6 +418,19 @@ fun PlayerScreen(
     }
     var externalMessage by remember { mutableStateOf<String?>(null) }
     var autoHandoff by remember { mutableStateOf(false) }
+    // Hand-off window. The local player is paused, never torn down, while this
+    // is open; a launched app is only considered in charge once it actually
+    // covers this activity.
+    var openWithOpen by remember { mutableStateOf(false) }
+    var openWithPlayers by remember { mutableStateOf<List<ExternalPlayerInfo>>(emptyList()) }
+    var openWithError by remember { mutableStateOf<String?>(null) }
+    var openWithTarget by remember { mutableStateOf<PlaybackOption?>(null) }
+    var handoffLabel by remember { mutableStateOf<String?>(null) }
+    var handoffAtMs by remember { mutableLongStateOf(0L) }
+    // True only for a named player; the chooser is a menu, not a player, so it
+    // may not be mistaken for a completed transfer.
+    var handoffDirect by remember { mutableStateOf(false) }
+    var resumeAfterOpenWith by remember { mutableStateOf(false) }
 
     var osdVisible by remember { mutableStateOf(true) }
     var interaction by remember { mutableIntStateOf(0) }
@@ -639,13 +658,16 @@ fun PlayerScreen(
         val repo = repository ?: return@LaunchedEffect
         if (!autoHandoff && settings.playbackEngine == PlaybackEngine.EXTERNAL) {
             autoHandoff = true
+            // Closing waits for the chosen app to actually cover this screen;
+            // a launch that never lands leaves the built-in player intact.
             if (repo.openExternally(
                     url = target.url,
                     headers = target.headers,
                     kind = target.streamKind ?: StreamUrls.kindOf(target.url)
                 )
             ) {
-                onExit()
+                handoffLabel = "the system chooser"
+                handoffAtMs = SystemClock.elapsedRealtime()
             } else {
                 externalMessage = "External hand-off unavailable · using built-in player"
             }
@@ -1252,6 +1274,10 @@ fun PlayerScreen(
     // back-buffer, and the next prepare starts from the live edge again.
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumeOnStart by remember { mutableStateOf(false) }
+    val handoffInFlight by rememberUpdatedState(handoffLabel)
+    val handoffStartedAt by rememberUpdatedState(handoffAtMs)
+    val handoffResume by rememberUpdatedState(resumeAfterOpenWith)
+    val handoffIsDirect by rememberUpdatedState(handoffDirect)
     DisposableEffect(lifecycleOwner, playerOrNull) {
         val observer = LifecycleEventObserver { _, event ->
             val target = playerOrNull ?: return@LifecycleEventObserver
@@ -1263,6 +1289,11 @@ fun PlayerScreen(
                     } else {
                         target.pause()
                     }
+                    // A named player now owns the screen, so the transfer has
+                    // landed: only at this point may the built-in player close,
+                    // which leaves exactly one player running. The system
+                    // chooser is not a player, so it never triggers this.
+                    if (handoffInFlight != null && handoffIsDirect) onExit()
                 }
                 Lifecycle.Event.ON_START -> {
                     if (resumeOnStart) {
@@ -1271,12 +1302,41 @@ fun PlayerScreen(
                         }
                         target.playWhenReady = true
                     }
+                    // Back in the app with the hand-off still in flight: the
+                    // external player is gone, so this is the switch-back — the
+                    // same instance picks up where it was paused.
+                    val label = handoffInFlight
+                    if (label != null &&
+                        SystemClock.elapsedRealtime() - handoffStartedAt > HANDOFF_SETTLE_MS
+                    ) {
+                        handoffLabel = null
+                        handoffDirect = false
+                        externalMessage = "Back in the app player"
+                        if (handoffResume) target.play()
+                    }
                 }
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // A target that opens a floating window instead of covering this activity
+    // never raises ON_STOP; the local player must not stay paused forever. Only
+    // act while this activity is in front — in the background it is the
+    // external player that owns playback.
+    LaunchedEffect(handoffLabel) {
+        val label = handoffLabel ?: return@LaunchedEffect
+        delay(HANDOFF_TIMEOUT_MS)
+        if (handoffLabel == label &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        ) {
+            handoffLabel = null
+            handoffDirect = false
+            externalMessage = "Hand-off to $label did not start · still in the app player"
+            if (resumeAfterOpenWith) playerOrNull?.play()
+        }
     }
 
     // Live back-buffer flush: a live stream left paused keeps growing its buffer.
@@ -1842,7 +1902,7 @@ fun PlayerScreen(
         positionMs
     }
 
-    val anyDialog = panel != null || showPicker
+    val anyDialog = panel != null || showPicker || openWithOpen
     LaunchedEffect(osdVisible, interaction, locked, anyDialog, isScrubbing) {
         if (!osdVisible || locked || anyDialog || isScrubbing) return@LaunchedEffect
         delay(4_000)
@@ -2004,20 +2064,62 @@ fun PlayerScreen(
         interaction++
     }
 
-    fun launchExternal() {
+    // The window pauses the one player instance instead of closing it, so the
+    // frame and position it holds survive whatever the viewer picks there.
+    fun openOpenWith() {
         val target = current ?: return
-        val ok = ExternalIntents.launch(
+        openWithPlayers = repository?.installedExternalPlayers().orEmpty()
+        openWithTarget = target
+        openWithError = null
+        resumeAfterOpenWith = playerOrNull?.playWhenReady == true
+        playerOrNull?.pause()
+        hideOsd()
+        openWithOpen = true
+        interaction++
+    }
+
+    fun closeOpenWith(resume: Boolean) {
+        openWithOpen = false
+        openWithError = null
+        if (resume && handoffLabel == null && resumeAfterOpenWith) playerOrNull?.play()
+        // The window hid the OSD on the way in; bring it back so the resumed (or
+        // still paused) frame has its controls and status line.
+        wake(OsdFocus.PLAY)
+    }
+
+    /**
+     * Hands [target] to one app (or the chooser). The local player stays paused
+     * but alive; a named app that comes to the front then closes it (ON_STOP),
+     * and anything else drops back into the same paused instance.
+     */
+    fun handOffTo(target: PlaybackOption, packageName: String?) {
+        val label = if (packageName == null) {
+            "the system chooser"
+        } else {
+            openWithPlayers.firstOrNull { it.packageName == packageName }
+                ?.label?.takeIf { it.isNotBlank() } ?: packageName
+        }
+        val ok = ExternalIntents.launchIn(
             context = context,
+            packageName = packageName,
             url = target.url,
             headers = target.headers,
             userAgent = settings.userAgentString,
-            kind = playbackKind
+            kind = target.streamKind ?: StreamUrls.kindOf(target.url)
         )
-        if (ok) {
-            onExit()
-        } else {
-            externalMessage = "No video player found for this stream"
+        if (!ok) {
+            openWithError =
+                "Nothing on this device accepted the stream. Install a video player or copy the URL."
+            return
         }
+        openWithOpen = false
+        openWithError = null
+        handoffLabel = label
+        handoffAtMs = SystemClock.elapsedRealtime()
+        handoffDirect = packageName != null
+        playerOrNull?.pause()
+        externalMessage = "Handing off to $label…"
+        interaction++
     }
 
     fun enterPip() {
@@ -2453,7 +2555,7 @@ fun PlayerScreen(
                                 label = "OPEN WITH",
                                 glyph = "⤴",
                                 style = TvButtonStyle.SECONDARY,
-                                onClick = { launchExternal() }
+                                onClick = { openOpenWith() }
                             )
                         }
                     }
@@ -2852,7 +2954,7 @@ fun PlayerScreen(
                         label = "Play in external player",
                         onClick = {
                             panel = null
-                            launchExternal()
+                            openOpenWith()
                         }
                     )
                     OsdMenuRow(
@@ -3310,6 +3412,19 @@ fun PlayerScreen(
                 showPicker = false
                 awaitingPick = false
                 if (wasAwaiting || index != optionIndex) chooseOption(index, resume = false)
+            }
+        )
+    }
+
+    if (openWithOpen) {
+        OpenWithDialog(
+            title = headerTitleText,
+            streamUrl = openWithTarget?.url ?: current?.url.orEmpty(),
+            players = openWithPlayers,
+            error = openWithError,
+            onDismiss = { closeOpenWith(resume = true) },
+            onLaunch = { packageName ->
+                openWithTarget?.let { handOffTo(it, packageName) }
             }
         )
     }

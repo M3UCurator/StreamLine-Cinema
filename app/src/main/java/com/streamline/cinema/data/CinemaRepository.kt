@@ -1359,23 +1359,15 @@ class CinemaRepository(
         kind: StreamKind? = null
     ): Boolean {
         val settings = settingsStore.settings.value
-        val intent = ExternalIntents.intent(
+        return ExternalIntents.launchIn(
+            context = appContext,
+            packageName = null,
             url = url,
             referer = referer,
             headers = headers,
             userAgent = settings.userAgentString,
             kind = kind ?: StreamUrls.kindOf(url)
         )
-        val manager = appContext.packageManager
-        val target = if (intent.resolveActivity(manager) != null) {
-            intent
-        } else {
-            Intent(intent).setDataAndType(Uri.parse(url), "video/*")
-        }
-        return runCatching {
-            appContext.startActivity(ExternalIntents.chooser(target))
-            true
-        }.getOrDefault(false)
     }
 
     fun openInBrowser(url: String): Boolean {

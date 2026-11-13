@@ -75,11 +75,15 @@ object ExternalIntents {
         }
 
     /**
-     * Opens the chooser for [url] and reports whether a target activity took it.
-     * Falls back to a generic video type when nothing resolves the exact MIME.
+     * Opens [url] in one named player, or in the system chooser when
+     * [packageName] is null, and reports whether a target activity took it.
+     * The type falls back to a generic video MIME when nothing resolves the
+     * exact one, and a named player that is installed but does not advertise
+     * the MIME is still reachable through its package.
      */
-    fun launch(
+    fun launchIn(
         context: Context,
+        packageName: String?,
         url: String,
         referer: String? = null,
         headers: Map<String, String> = emptyMap(),
@@ -87,16 +91,27 @@ object ExternalIntents {
         kind: StreamKind? = null
     ): Boolean {
         if (url.isBlank()) return false
-        val base = intent(url = url, referer = referer, headers = headers, userAgent = userAgent, kind = kind)
-        val target = if (base.resolveActivity(context.packageManager) != null) {
-            base
+        val manager = context.packageManager
+        val typed = intent(url = url, referer = referer, headers = headers, userAgent = userAgent, kind = kind)
+        val video = Intent(typed).setDataAndType(Uri.parse(url), "video/*").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        // A package takes precedence over the MIME: some builds declare only
+        // video/* even though they open HLS, so the typed attempt is skipped
+        // for them rather than letting resolveActivity veto the hand-off.
+        val target = if (packageName == null) {
+            if (typed.resolveActivity(manager) != null) typed else video
         } else {
-            Intent(base).setDataAndType(Uri.parse(url), "video/*").apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val named = Intent(typed).setPackage(packageName)
+            when {
+                named.resolveActivity(manager) != null -> named
+                Intent(video).setPackage(packageName).resolveActivity(manager) != null ->
+                    Intent(video).setPackage(packageName)
+                else -> return false
             }
         }
         return runCatching {
-            context.startActivity(chooser(target))
+            context.startActivity(if (packageName == null) chooser(target) else target)
             true
         }.getOrDefault(false)
     }

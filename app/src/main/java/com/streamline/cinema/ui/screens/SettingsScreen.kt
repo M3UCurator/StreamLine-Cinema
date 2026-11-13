@@ -851,7 +851,7 @@ fun SettingsScreen(
                         ) {
                             Text(
                                 if (kidsApproved.isEmpty()) "No titles approved yet"
-                                else "Clearing hides every approved title",
+                                else "Clearing moves every approved title back to the adult library",
                                 color = Cinema.TextMuted,
                                 fontSize = 11.sp,
                                 maxLines = 1,

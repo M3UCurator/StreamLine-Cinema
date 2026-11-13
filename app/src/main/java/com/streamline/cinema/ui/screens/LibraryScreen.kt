@@ -56,6 +56,7 @@ fun LibraryScreen(
     onImport: () -> Unit
 ) {
     val library by vm.library.collectAsState()
+    val profile by vm.activeProfile.collectAsState()
     val settings by vm.settings.collectAsState()
     val home by vm.home.collectAsState()
     val progress by vm.progress.collectAsState()
@@ -116,7 +117,11 @@ fun LibraryScreen(
                             onClick = { managing = !managing }
                         )
                     }
-                    TvButton("IMPORT", onImport, style = TvButtonStyle.SECONDARY, compact = true, glyph = "↧")
+                    // Kids have no Playroom or Import route: the parent curates
+                    // their library, so there is nothing for them to add here.
+                    if (!profile.isKids) {
+                        TvButton("IMPORT", onImport, style = TvButtonStyle.SECONDARY, compact = true, glyph = "↧")
+                    }
                 }
             }
             Spacer(Modifier.height(14.dp))
@@ -168,10 +173,14 @@ fun LibraryScreen(
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     EmptyState(
                         title = if (isMoviePage) "No movies yet" else "No series yet",
-                        message = "Import a TMDB discover feed or an MDBList collection. Every TV import is " +
-                            "split into seasons and episodes with stills, titles and air dates.",
-                        actionLabel = "OPEN IMPORT TERMINAL",
-                        onAction = onImport
+                        message = if (profile.isKids) {
+                            "A parent can add approved movies and series to this profile."
+                        } else {
+                            "Import a TMDB discover feed or an MDBList collection. Every TV import is " +
+                                "split into seasons and episodes with stills, titles and air dates."
+                        },
+                        actionLabel = if (profile.isKids) null else "OPEN IMPORT TERMINAL",
+                        onAction = if (profile.isKids) null else onImport
                     )
                 }
                 if (discover.isNotEmpty()) {

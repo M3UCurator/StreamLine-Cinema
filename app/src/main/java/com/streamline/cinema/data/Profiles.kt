@@ -38,6 +38,15 @@ fun CatalogItem.allowedFor(level: MaturityLevel): Boolean {
     return rank <= level.maxRank
 }
 
+/**
+ * Library visibility. The parent-approved set is the Kids library: Kids
+ * profiles see exactly those keys, and adult profiles keep the rest of the
+ * catalog. A title approved for Kids therefore never shows up in an adult
+ * library, its favorites or its local discovery rails.
+ */
+fun CatalogItem.visibleTo(profile: CinemaProfile, approved: Set<String>): Boolean =
+    if (profile.isKids) key in approved else key !in approved && allowedFor(profile.maturity)
+
 enum class AudioLanguage(val label: String, val code: String) {
     AUTO("Automatic", ""),
     ENGLISH("English", "en"),

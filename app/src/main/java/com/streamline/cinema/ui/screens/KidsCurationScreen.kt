@@ -159,7 +159,7 @@ private fun KidsCurationContent(
                     style = CinemaType.PageTitle
                 )
                 Text(
-                    "${approved.size} approved · only these titles and channels appear in Kids profiles",
+                    "${approved.size} approved · these titles and channels live only in Kids profiles",
                     color = Cinema.TextMuted,
                     style = CinemaType.BodySmall
                 )

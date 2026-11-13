@@ -49,6 +49,7 @@ import com.streamline.cinema.data.isNewerVersion
 import com.streamline.cinema.data.rankByLanguage
 import com.streamline.cinema.data.rankingLanguage
 import com.streamline.cinema.data.todayStamp
+import com.streamline.cinema.data.visibleTo
 import com.streamline.cinema.data.watchedEpisodesFor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -207,24 +208,19 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     val kidsMode = container.kidsMode
 
     // Visibility is resolved once here so every screen sees the same catalog.
-    // Kids profiles see only parent-approved keys; other profiles keep the
-    // maturity filter. The store itself always keeps the full library.
+    // Kids profiles see the parent-approved keys; adult profiles see the rest
+    // of the catalog. The store itself always keeps both libraries.
     val library: StateFlow<List<CatalogItem>> = combine(
         container.libraryStore.items,
         container.profileStore.active,
         container.kidsMode.approved
     ) { items, profile, approved ->
-        items.filter { if (profile.isKids) it.key in approved else it.allowedFor(profile.maturity) }
+        items.filter { it.visibleTo(profile, approved) }
     }.stateIn(
         viewModelScope,
         SharingStarted.Eagerly,
         container.libraryStore.items.value.filter {
-            val profile = container.profileStore.active.value
-            if (profile.isKids) {
-                it.key in container.kidsMode.approved.value
-            } else {
-                it.allowedFor(profile.maturity)
-            }
+            it.visibleTo(container.profileStore.active.value, container.kidsMode.approved.value)
         }
     )
     /** Unfiltered store contents, used by the parental curation screen. */
@@ -236,17 +232,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         container.profileStore.active,
         container.kidsMode.approved
     ) { favorites, profile, approved ->
-        favorites.filter { if (profile.isKids) it.key in approved else it.allowedFor(profile.maturity) }
+        favorites.filter { it.visibleTo(profile, approved) }
     }.stateIn(
         viewModelScope,
         SharingStarted.Eagerly,
         container.libraryStore.favorites.value.filter {
-            val profile = container.profileStore.active.value
-            if (profile.isKids) {
-                it.key in container.kidsMode.approved.value
-            } else {
-                it.allowedFor(profile.maturity)
-            }
+            it.visibleTo(container.profileStore.active.value, container.kidsMode.approved.value)
         }
     )
     val watchedEpisodes: StateFlow<Set<String>> = container.libraryStore.watchedEpisodes
@@ -442,8 +433,14 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun refreshRecommendations(force: Boolean = false) {
         val profile = activeProfile.value
-        val storeItems = container.libraryStore.items.value.filter { kidsMode.allows(it, profile) }
-        val trending = _home.value.trending.filter { kidsMode.allows(it, profile) }
+        // The rails use the same visibility as the library, so a title owned by
+        // the Kids library never reaches adult discovery. The raw store is
+        // filtered here instead of reading [library] so a profile switch cannot
+        // rebuild the rails from the previous profile's catalog.
+        val storeItems = container.libraryStore.items.value
+            .filter { it.visibleTo(profile, kidsMode.approved.value) }
+        val trending = _home.value.trending
+            .filter { it.visibleTo(profile, kidsMode.approved.value) }
         val top10 = trending.distinctBy { it.key }.take(10)
         val newReleases = (storeItems + trending)
             .distinctBy { it.key }
@@ -484,7 +481,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             runCatching { repository.recommendations(anchor.tmdbId, anchor.type) }
                 .onSuccess { remote ->
                     val filtered = rankByLanguage(remote, settings.value.rankingLanguage())
-                        .filter { kidsMode.allows(it, profile) }
+                        .filter { it.visibleTo(profile, kidsMode.approved.value) }
                         .take(14)
                     _home.update {
                         it.copy(
@@ -991,7 +988,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         runCatching { repository.recommendations(item.tmdbId, item.type) }
             .getOrDefault(emptyList())
             .let { rankByLanguage(it, settings.value.rankingLanguage()) }
-            .filter { it.key != item.key && kidsMode.allows(it, activeProfile.value) }
+            .filter { it.key != item.key && it.visibleTo(activeProfile.value, kidsMode.approved.value) }
             .take(14)
 
     fun importUrl(url: String) {

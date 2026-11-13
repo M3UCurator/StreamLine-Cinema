@@ -584,7 +584,7 @@ fun DetailScreen(
                                 dense = true,
                                 onClick = { vm.toggleFavorite(item) }
                             )
-                            if (savedItem == null) {
+                            if (savedItem == null && item.key !in kidsApproved) {
                                 TvButton(
                                     label = if (importingItem) "IMPORTING…" else "ADD TO LIBRARY",
                                     glyph = "＋",
@@ -596,6 +596,7 @@ fun DetailScreen(
                             }
                             // Only titles in the hall can appear in a Kids profile, so the
                             // approval lives next to them, and only adults can change it.
+                            // Approving moves the title out of the adult library.
                             if (!profile.isKids) {
                                 val inKids = item.key in kidsApproved
                                 TvButton(

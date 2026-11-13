@@ -1,4 +1,51 @@
-# StreamLine Cinema v12.86
+# StreamLine Cinema v12.87
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.87 — Kids and adult libraries are separate catalogs
+
+A title approved for Kids no longer exists in the adult library, its favorites, Continue Watching or its discovery rails. Approval is the split.
+
+- **Approval means ownership** — `CatalogItem.visibleTo(profile, approved)` decides every list: a Kids profile sees exactly the parent-approved keys, and every other profile sees the rest of the hall (still filtered by its maturity rank). Approving a title — from **Settings → Parental → MANAGE KIDS LIBRARY** or **ADD TO KIDS** on a detail page — moves it out of the adult Movies / TV Shows libraries, Favorites and Continue Watching and into the kids library in the same moment. Revoking it moves it back.
+- **Discovery is split too** — Home's hero, Top 10, Because-you-watched, New Releases and genre rails, the local Playroom fallback, the trending mix, `loadRelated` and the remote "because" results all run through the same predicate. An approved kids title can never appear in, or fuel, an adult recommendation, so letting a child watch something no longer skews the grown-ups' home page.
+- **Kids have no acquisition surface** — the top-bar **SEARCH** was already hidden for Kids; the Movies / TV Shows toolbars now stop rendering **IMPORT** for them as well. An empty kids library explains *A parent can add approved movies and series to this profile.* with no action button. Playroom and Import stay hidden routes, PIN-gated behind the adult side.
+- **Approval only where it can work** — **ADD TO LIBRARY** is hidden for a title that is already approved for Kids (approval already owns it), and **ADD TO KIDS** appears only for adults and only for hall titles; approving a TMDB result imports it first, as before. The curated title disappearing from the adult page is the immediate feedback.
+- **Curation still sees everything** — **MANAGE KIDS LIBRARY** lists the unfiltered hall, so a parent can revoke an approval; the header now reads *N approved · these titles and channels live only in Kids profiles*, and **CLEAR APPROVED** explains that it moves every approved title back to the adult library.
+- **No migration** — the split is derived from the persisted approved set, so titles approved before this build leave the adult surfaces on first launch with no library rewrite.
+
+## Verified on 12.87
+
+- `./gradlew testDebugUnitTest assembleRelease -PallAbis=true` — BUILD SUCCESSFUL. New `LibrarySplitTest` (5 tests): an approved movie is visible to Kids and hidden from adult and teen profiles; an unapproved movie stays out of the Kids library but remains in the adult one; un-approving returns a title to the adult library; a Teen profile still filters an R rating; catalog keys stay stable through a metadata refresh so approval survives re-enrichment.
+- On emulator-5554 the all-ABI release installs as `versionCode 120087` / `versionName 12.87` over 12.86 with app data kept. A Kids profile created from the gate shows **Kids Mode** with *No approved titles yet…*, the top bar has no **SEARCH**, and the Movies tab shows *A parent can add approved movies and series to this profile.* with no **IMPORT** button; the adult Movies toolbar still shows **IMPORT**, and the profile gate reports `PROFILES LOCKED · rating lock uses your parental PIN` while Kids is active.
+- The emulator had no seeded catalog at verification time, so the adult-side exclusion was exercised through the unit suite rather than a live poster grid.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.87.apk` | `armeabi-v7a` (TV boxes) | 76,286,467 bytes | `0c45f0a6d1e31d474d0800de29b7d9217045b16526dcf4fe3172422563a6dcab` |
+| `Cinema131126v12.87-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,724 bytes | `506ea9e3d7669e1b33514fb34a03bb7799b75e775270883d58c17618746ab2f9` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.87.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.86 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

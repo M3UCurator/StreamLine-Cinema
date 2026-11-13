@@ -25,14 +25,6 @@ class KidsModeManager(
     /** True while the active profile is a Kids profile. */
     fun isActive(): Boolean = profileStore.active.value.isKids
 
-    /**
-     * Kids profiles use the parent-approved whitelist instead of the rating
-     * rank, so parents can curate exactly what a child sees. Other profiles
-     * keep the existing maturity filter.
-     */
-    fun allows(item: CatalogItem, profile: CinemaProfile): Boolean =
-        if (profile.isKids) item.key in _approved.value else item.allowedFor(profile.maturity)
-
     fun isApproved(key: String): Boolean = key in _approved.value
 
     fun setApproved(key: String, approved: Boolean) {

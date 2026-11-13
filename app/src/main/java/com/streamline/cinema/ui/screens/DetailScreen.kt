@@ -257,7 +257,7 @@ fun DetailScreen(
         }
         loading = false
         if (detailRetry == 0) {
-            delay(220)
+            delay(150)
             runCatching { playFocus.requestFocus() }
         }
     }

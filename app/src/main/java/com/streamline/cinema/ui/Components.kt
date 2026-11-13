@@ -135,8 +135,8 @@ fun TvButton(
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
     val scale by animateFloatAsState(
-        targetValue = if (focused && enabled) 1.04f else 1f,
-        animationSpec = tween(120),
+        targetValue = if (focused && enabled) 1.02f else 1f,
+        animationSpec = tween(110),
         label = "buttonScale"
     )
     val shape = RoundedCornerShape(CinemaDimens.ControlRadius)
@@ -610,8 +610,8 @@ fun PosterCard(
         }
     }
     val scale by animateFloatAsState(
-        targetValue = if (focused) 1.06f else 1f,
-        animationSpec = tween(130),
+        targetValue = if (focused) 1.03f else 1f,
+        animationSpec = tween(120),
         label = "posterScale"
     )
     val spoken = buildString {
@@ -847,7 +847,7 @@ fun ContinueCard(
     val cardFocus = remember { FocusRequester() }
     val style = LocalPosterStyle.current
     val cardShape = RoundedCornerShape(CinemaDimens.CardRadius)
-    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(130), label = "continueScale")
+    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "continueScale")
     val spoken = buildString {
         append(item.title)
         if (progress.season != null && progress.episode != null) {
@@ -1699,7 +1699,7 @@ fun ShimmerBox(modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1_500, easing = LinearEasing),
+            animation = tween(2_200, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "shimmerProgress"

@@ -637,7 +637,7 @@ private fun ChannelCard(
     val cardFocus = remember { FocusRequester() }
     val posterStyle = LocalPosterStyle.current
     val cardShape = RoundedCornerShape(12.dp)
-    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(130), label = "channelScale")
+    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "channelScale")
 
     LaunchedEffect(focusMemory.restoreTick("live.grid"), channel.key) {
         if (focusMemory.recall("live.grid") == channel.key) {

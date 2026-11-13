@@ -2586,8 +2586,8 @@ fun PlayerScreen(
             // With no source loaded the search/empty overlay owns the screen;
             // a disabled transport dock only covers its explanation.
             visible = osdVisible && !locked && current != null,
-            enter = fadeIn(tween(160)),
-            exit = fadeOut(tween(220)),
+            enter = fadeIn(tween(140)),
+            exit = fadeOut(tween(160)),
             modifier = Modifier.fillMaxSize()
         ) {
             Box(Modifier.fillMaxSize()) {

@@ -1,4 +1,51 @@
-# StreamLine Cinema v12.88
+# StreamLine Cinema v12.89
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.89 — No black backdrop, calmer motion
+
+The **OPEN WITH** window no longer paints a full-screen black scrim over the video, and the app's motion vocabulary is shorter and quieter so navigation settles instantly instead of animating through it.
+
+- **No black block** — the picker is a glass card floating directly over the paused frame; the video behind it stays visible around the card at all times. Nothing is drawn across the rest of the screen, so the window reads as an overlay rather than a blacked-out page.
+- **Tabs fade, they do not slide** — tab changes are a 150 ms fade-in over a 120 ms fade-out with no horizontal slide, and the detail theater enters and leaves on the same short fade with no scale. The incoming screen settles in a fraction of a second, which also shortens the window where two full screens are composed at once on a low-RAM box.
+- **Focus lands sooner** — Home, detail and Playroom reclaim D-pad focus 150–160 ms after they appear (previously 220–260 ms), so the first key press after a navigation step is not swallowed.
+- **Smaller focus lift** — cards scale to 1.03× and buttons to 1.02× (previously 1.04–1.06×) over 110–120 ms, so focus still reads without the grid visibly bouncing.
+- **Quieter background motion** — the hero backdrop crossfades in 320 ms (was 700 ms) and no longer pans; loading shimmer sweeps on a 2.2 s cycle (was 1.5 s); the player OSD fades in 140 ms and out in 160 ms.
+
+## Verified on 12.89
+
+- `./gradlew assembleRelease -PallAbis=true -PcinemaIteration=12.89` and `./gradlew assembleRelease -PcinemaIteration=12.89` — both BUILD SUCCESSFUL; the all-ABI release installs as `versionCode 120089` / `versionName 12.89` over 12.88 with app data kept.
+- On emulator-5554, **⋮ → Play in external player** now paints only the card: the glass picker sits over the visibly paused frame, sky and trees visible around every edge, with the system chooser row, Just Player, the raw URL field and **DONE (BACK TO PLAYER)** all on screen. No full-screen black backdrop remains.
+- **DONE** returns to the same player instance and resumes from the same playhead (00:12, playing); BACK from the player exits to the app. One player task throughout.
+- Tab switches (Home → Movies → Settings) settle on the 150 ms fade with no slide or scale, and Home, detail and Playroom show the focused card within ~150 ms of appearing.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.89.apk` | `armeabi-v7a` (TV boxes) | 76,302,851 bytes | `630a12d2bf70e6ce80a063da03be5726ced0e4674c9acbc534c48ccf3782fdc0` |
+| `Cinema131126v12.89-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,501,493 bytes | `1367d68716fd3bfc5cbcd2ae70c4e3cddc6dd30dbd5becf6decfa38da0cc0d25` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.89.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.88 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

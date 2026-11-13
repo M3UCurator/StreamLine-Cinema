@@ -143,9 +143,7 @@ internal fun OpenWithDialog(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
-            Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.86f)),
+            Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
             Column(

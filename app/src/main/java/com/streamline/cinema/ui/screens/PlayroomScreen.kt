@@ -109,7 +109,7 @@ fun PlayroomScreen(
         if (search.query.isBlank() && search.results.isEmpty() && !search.loading && search.error == null) {
             vm.loadPlayroomDefault()
         }
-        delay(260)
+        delay(160)
         if (focusMemory.lastSurface?.startsWith("playroom.") == true) {
             // Coming back from a detail page: re-claim the poster the viewer left.
             focusMemory.requestRestore("playroom.grid")

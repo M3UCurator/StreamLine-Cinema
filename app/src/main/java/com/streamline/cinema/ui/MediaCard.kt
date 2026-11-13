@@ -69,8 +69,8 @@ fun MediaCard(
         }
     }
     val scale by animateFloatAsState(
-        targetValue = if (focused) 1.045f else 1f,
-        animationSpec = tween(130),
+        targetValue = if (focused) 1.03f else 1f,
+        animationSpec = tween(120),
         label = "mediaCardScale"
     )
     val genreLabel = tmdbGenresMap[media.genreIds.firstOrNull()]

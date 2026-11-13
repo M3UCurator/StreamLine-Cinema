@@ -348,7 +348,7 @@ private fun CurationCard(
     val sounds = LocalUiSounds.current
     val style = LocalPosterStyle.current
     val titleBlock = with(LocalDensity.current) { (style.titleLineHeight * 2).toDp() }
-    val scale by animateFloatAsState(if (focused) 1.04f else 1f, tween(130), label = "curationScale")
+    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "curationScale")
     val shape = RoundedCornerShape(CinemaDimens.CardRadius)
 
     Column(

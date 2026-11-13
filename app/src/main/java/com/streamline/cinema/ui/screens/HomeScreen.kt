@@ -2,7 +2,6 @@ package com.streamline.cinema.ui.screens
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -145,9 +144,6 @@ fun HomeScreen(
         }
     }
     val focusMemory = LocalFocusMemory.current
-    // The backdrop pans a few points as the carousel advances, so the canvas
-    // behind the rails feels alive rather than swapping static images.
-    val heroShift by animateFloatAsState(heroIndex.toFloat(), tween(900), label = "heroShift")
 
     val continueWatching = remember(progress, library, profile.isKids) {
         progress.values
@@ -206,7 +202,7 @@ fun HomeScreen(
             focusMemory.requestRestore(returningSurface)
             return@LaunchedEffect
         }
-        delay(220)
+        delay(150)
         val granted = runCatching { playFocus.requestFocus() }.getOrNull() == true
         if (!granted && !hostView.hasFocus()) {
             // Touch mode leaves the window without view focus, so Compose cannot
@@ -226,7 +222,7 @@ fun HomeScreen(
     Box(Modifier.fillMaxSize().background(Cinema.Ink)) {
         Crossfade(
             targetState = heroFeatured,
-            animationSpec = tween(700),
+            animationSpec = tween(320),
             label = "heroBackdrop",
             modifier = Modifier.fillMaxSize()
         ) { featured ->
@@ -251,11 +247,9 @@ fun HomeScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            // Overscan plus a gentle pan keeps the parallax from
-                            // exposing the edges of the artwork.
+                            // Overscan keeps the crop from exposing the artwork edges.
                             scaleX = 1.06f
                             scaleY = 1.06f
-                            translationX = -((heroShift % 3f) * 12f)
                         },
                     contentScale = ContentScale.Crop
                 )

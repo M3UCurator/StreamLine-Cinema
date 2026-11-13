@@ -8,9 +8,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -223,8 +220,7 @@ fun AppRoot(vm: CinemaViewModel) {
             AnimatedContent(
                 targetState = tab,
                 transitionSpec = {
-                    (fadeIn(tween(240)) + slideInHorizontally(tween(240)) { it / 28 }) togetherWith
-                        fadeOut(tween(140))
+                    fadeIn(tween(150)) togetherWith fadeOut(tween(120))
                 },
                 label = "tabContent",
                 modifier = Modifier.fillMaxSize()
@@ -325,8 +321,8 @@ fun AppRoot(vm: CinemaViewModel) {
 
             AnimatedVisibility(
                 visible = detail != null,
-                enter = fadeIn(tween(220)) + scaleIn(tween(240), initialScale = 0.985f),
-                exit = fadeOut(tween(160)) + scaleOut(tween(160), targetScale = 0.99f)
+                enter = fadeIn(tween(150)),
+                exit = fadeOut(tween(120))
             ) {
                 displayedDetail.value?.let { item ->
                     Box(Modifier.fillMaxSize().background(Cinema.Ink)) {

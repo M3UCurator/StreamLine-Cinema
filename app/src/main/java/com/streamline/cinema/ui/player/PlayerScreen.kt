@@ -453,11 +453,11 @@ fun PlayerScreen(
     var volumePercent by remember { mutableIntStateOf(100) }
     var nightMode by remember { mutableStateOf(false) }
     var eqPreset by remember { mutableIntStateOf(0) }
-    // A profile with no subtitle language means subtitles stay off: Media3
-    // otherwise auto-selects the first embedded text track and burns it in.
-    var dropSubtitles by remember {
-        mutableStateOf(activeProfile.subtitleLanguage.isBlank())
-    }
+    // Captions start off for every title: Media3 otherwise auto-selects the
+    // first embedded text track and burns it over the opening frame. The
+    // profile's subtitle language only biases which track a later caption
+    // switch picks (see preferredSubtitleLanguage).
+    var dropSubtitles by remember { mutableStateOf(true) }
     var gesturesEnabled by remember { mutableStateOf(true) }
     var subtitleScale by remember { mutableFloatStateOf(settings.subtitleScale) }
     var subtitleBackground by remember { mutableIntStateOf(settings.subtitleBackdrop) }
@@ -698,7 +698,8 @@ fun PlayerScreen(
                 headers = playbackHeaders,
                 drm = playbackDrm,
                 forceBuiltIn = nativeFallback,
-                subtitlesDisabled = dropSubtitles
+                subtitlesDisabled = dropSubtitles,
+                subtitleLanguage = preferredSubtitleLanguage(activeProfile)
             )
         } else {
             null
@@ -996,6 +997,7 @@ fun PlayerScreen(
     var isPlaying by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(false) }
     var positionMs by remember { mutableStateOf(0L) }
+    var bufferedMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
 
     // Credits start minutes before the file ends, so that marker — not EOF —
@@ -1193,23 +1195,11 @@ fun PlayerScreen(
                     val audio = trackOverride(
                         tracksSnapshot, C.TRACK_TYPE_AUDIO, activeProfile.audioLanguage
                     )
-                    val subtitleCode = when (activeProfile.subtitleLanguage) {
-                        "" -> null
-                        "auto" -> activeProfile.audioLanguage.ifBlank { null }
-                        else -> activeProfile.subtitleLanguage
-                    }
-                    val text = subtitleCode?.let {
-                        trackOverride(tracksSnapshot, C.TRACK_TYPE_TEXT, it)
-                    }
-                    if (audio != null || text != null) {
-                        val params = target.trackSelectionParameters.buildUpon()
-                        audio?.let { params.setOverrideForType(it) }
-                        text?.let {
-                            params.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-                                .setOverrideForType(it)
-                            dropSubtitles = false
-                        }
-                        target.trackSelectionParameters = params.build()
+                    if (audio != null) {
+                        target.trackSelectionParameters = target.trackSelectionParameters
+                            .buildUpon()
+                            .setOverrideForType(audio)
+                            .build()
                     }
                 }
                 val audit = AudioAuditProbe.inspect(
@@ -1562,6 +1552,7 @@ fun PlayerScreen(
                 val live = target.currentPosition.coerceAtLeast(0)
                 positionMs = live
                 if (live > 0) lastKnownPositionMs = live
+                bufferedMs = target.bufferedPosition.coerceAtLeast(0)
             }
             val duration = target.duration
             if (duration > 0) durationMs = duration
@@ -2539,6 +2530,7 @@ fun PlayerScreen(
 
                 PlayerDock(
                     positionMs = displayPosition,
+                    bufferedMs = bufferedMs,
                     durationMs = durationMs,
                     isPlaying = isPlaying,
                     controlsEnabled = playerOrNull != null,
@@ -3595,7 +3587,8 @@ private fun buildPlayer(
     headers: Map<String, String> = emptyMap(),
     drm: DrmConfig? = null,
     forceBuiltIn: Boolean = false,
-    subtitlesDisabled: Boolean = false
+    subtitlesDisabled: Boolean = false,
+    subtitleLanguage: String? = null
 ): Player {
     // The native engines hold their own caches, so the tier has to reach them
     // too; without this LEAN/GENEROUS only moved the Media3 window.
@@ -3640,7 +3633,8 @@ private fun buildPlayer(
         userAgent = userAgent,
         headers = headers,
         drm = drm,
-        subtitlesDisabled = subtitlesDisabled
+        subtitlesDisabled = subtitlesDisabled,
+        subtitleLanguage = subtitleLanguage
     )
 }
 
@@ -3699,7 +3693,8 @@ private fun buildExoPlayer(
     userAgent: String,
     headers: Map<String, String> = emptyMap(),
     drm: DrmConfig? = null,
-    subtitlesDisabled: Boolean = false
+    subtitlesDisabled: Boolean = false,
+    subtitleLanguage: String? = null
 ): ExoPlayer {
     CinemaRenderersFactory.logFfmpegAvailability()
     Log.i(
@@ -3843,9 +3838,12 @@ private fun buildExoPlayer(
         .build()
     player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
         .setForceHighestSupportedBitrate(!settings.abrEnabled)
-        // Media3 selects the first text track by default; a profile that never
-        // asked for subtitles should open on a clean frame instead.
+        // Media3 selects the first text track by default; captions stay off
+        // until the viewer asks, and the profile's language only biases which
+        // track that switch lands on.
         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subtitlesDisabled)
+        .setPreferredTextLanguage(subtitleLanguage)
+        .setSelectUndeterminedTextLanguage(false)
         .build()
     return player
 }
@@ -4197,6 +4195,17 @@ private fun NextUpCard(
         )
     }
 }
+
+/**
+ * Caption language the viewer prefers for a title. Captions themselves still
+ * start off; this only decides which track the first manual "on" lands on.
+ */
+private fun preferredSubtitleLanguage(profile: CinemaProfile): String? =
+    when (val code = profile.subtitleLanguage) {
+        "" -> null
+        "auto" -> profile.audioLanguage.ifBlank { null }
+        else -> code
+    }
 
 private fun trackOverride(tracks: Tracks, type: Int, languageCode: String): TrackSelectionOverride? {
     if (languageCode.isBlank()) return null

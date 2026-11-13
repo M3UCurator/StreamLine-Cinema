@@ -175,6 +175,7 @@ internal data class LiveProgramInfo(
 @Composable
 internal fun PlayerDock(
     positionMs: Long,
+    bufferedMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
     controlsEnabled: Boolean,
@@ -283,6 +284,7 @@ internal fun PlayerDock(
                     Spacer(Modifier.width(16.dp))
                     PlayerSeekBar(
                         positionMs = positionMs,
+                        bufferedMs = bufferedMs,
                         durationMs = durationMs,
                         enabled = seekEnabled,
                         focusRequester = seekFocus,
@@ -653,10 +655,18 @@ internal fun PlayerSeekBar(
     onScrub: (Float) -> Unit,
     onScrubEnd: (Float) -> Unit,
     onSeekRelative: (Long) -> Unit,
+    bufferedMs: Long = 0L,
     modifier: Modifier = Modifier
 ) {
     val progressFraction = if (durationMs > 0) {
         (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    // The buffer can never lag the playhead: engines that only publish a
+    // playhead (VLC/MPV report buffered = position) then draw no band.
+    val bufferedFraction = if (durationMs > 0) {
+        (bufferedMs.toFloat() / durationMs).coerceIn(progressFraction, 1f)
     } else {
         0f
     }
@@ -727,6 +737,16 @@ internal fun PlayerSeekBar(
             cornerRadius = radius
         )
         if (durationMs > 0) {
+            // Loaded-but-unwatched span: a solid grey band that starts where the
+            // gold playhead ends, so buffer headroom is readable at a glance.
+            if (bufferedFraction > progressFraction) {
+                drawRoundRect(
+                    color = Color.White.copy(alpha = if (enabled) 0.55f else 0.14f),
+                    topLeft = Offset(0f, centerY - barHeight / 2f),
+                    size = Size(size.width * bufferedFraction, barHeight),
+                    cornerRadius = radius
+                )
+            }
             drawRoundRect(
                 color = Cinema.Gold,
                 topLeft = Offset(0f, centerY - barHeight / 2f),

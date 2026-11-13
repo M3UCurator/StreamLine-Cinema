@@ -1,6 +1,51 @@
-# StreamLine Cinema v12.84
+# StreamLine Cinema v12.85
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.85 — See the buffer, start with captions off
+
+The player's timeline now shows what has actually been downloaded, and captions no longer switch themselves on for a profile that asked for a subtitle language.
+
+- **Buffer band on the seek bar** — the track now carries three layers: the dim rail, a solid grey band for the span the player has already loaded, and the gold playhead on top. `Player.bufferedPosition` is read on the same 1 s tick as the playhead, so the band grows and shrinks with the real download and shows how much headroom is left before a slow source stalls; it is clamped to start no earlier than the playhead, so it can never paint behind the gold. On a fully loaded file the band reaches the right edge while the gold stays with the viewer.
+- **Native engines draw no band** — VLC and MPV publish only a playhead (buffered = position), so the band simply has no width there and the bar looks exactly as before. Live is untouched: it keeps the guide-based programme timeline, where a download buffer has no meaning.
+- **Captions start off everywhere** — the text track type is disabled (`setTrackTypeDisabled(TRACK_TYPE_TEXT, true)`) from the first frame for every title, whatever the profile, so Media3 no longer auto-selects the first embedded track and burns it over the opening shot. The dock control reads `Subtitles · Off` until a track is chosen, and enabling captions later still works from the same panel.
+- **The profile still decides the language** — a profile's subtitle language is applied as `setPreferredTextLanguage` with `setSelectUndeterminedTextLanguage(false)`, so the first manual caption switch lands on the chosen language (or the audio language for "auto") instead of the first track in the file. "Off" in the profile no longer has to fight the player's own default.
+- **One less race in track setup** — the per-track callback now only re-applies the audio override; it no longer flips the text track on when a profile names a language, which is what used to re-enable captions after the player was built.
+
+## Verified on 12.85
+
+- On the installed build, a 10:34 HLS title paused at 00:59 showed a solid grey band running from the gold playhead to the loaded edge, with the dim rail continuing past it to the right; the band tracked `bufferedPosition` across the 1 s tick and disappeared when the playhead reached the end of the loaded span.
+- The same session's dock showed the captions button focused with the hint `Subtitles · Off` and no burned-in text over the opening frames, while the rest of the OSD (transport, display `Fit`, sources, `AUTO` decoder, `2.0`, more) stayed unchanged.
+- No band is drawn without a duration (live), and the seek bar's scrub, ±10 s and focus behaviour are untouched.
+- `compileDebugKotlin` and `assembleDebug -PallAbis=true` pass, and the release build installs as `versionCode 120085` / `versionName 12.85` (`x86_64` on the emulator).
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.85.apk` | `armeabi-v7a` (TV boxes) | 76,270,090 bytes | `649ec829720d48e082b388ef3fae796f10c2fb5935b172dd328467e46e8644a2` |
+| `Cinema131126v12.85-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,723 bytes | `e77155fe43dd7a0928db561c0975560c41d46132b5d5fe9e0d83bb70552a17d1` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.85.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.84 (previous)
 
 ## New in 12.84 — Every source reaches the right extractor
 

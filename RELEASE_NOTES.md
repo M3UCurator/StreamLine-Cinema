@@ -1,6 +1,52 @@
-# StreamLine Cinema v12.83
+# StreamLine Cinema v12.84
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.84 — Every source reaches the right extractor
+
+Three ways an addon stream used to die before its first frame are fixed in one pass: headers that never reached the player, short links handed over unresolved, and manifests with no file extension left to progressive extraction.
+
+- **One header merge for every path** — pipe headers (`url|Referer=…&User-Agent=…`), `behaviorHints.proxyHeaders.request` and the settings UA merge through a case-insensitive map, so the same set is used by Media3 (`OkHttpDataSource`), the native HLS proxy and the external `ACTION_VIEW` `headers` extra. A source can no longer put both `User-Agent` and `user-agent` on the wire — the duplicate pair is what makes CDNs answer 400 — and an addon-supplied UA wins over the app default.
+- **Short links unwrapped before playback** — an addon URL without a media extension walks its 301/302/303/307/308 chain while the source list is built (four sources per addon, so a slow redirect cannot stall the search) and the player gets the final absolute manifest URL. That is what lets a playlist's relative `segment.ts` resolve at the CDN instead of at the shortener, and credentials are still stripped when a hop changes host or drops HTTPS.
+- **Explicit stream kind, not a guess** — `StreamUrls.kindOf` classifies each source from its extension, then the response `Content-Type`, then the first 4 KB of the body (`#EXTM3U`, `<MPD`, `<SmoothStreamingMedia`), and the result becomes `MediaItem.setMimeType(APPLICATION_M3U8 / APPLICATION_MPD / APPLICATION_SS)`. A token endpoint with no `.m3u8` suffix now gets the HLS extractor instead of `UnrecognizedInputFormatException`, and the same kind picks the HLS proxy and the external intent's MIME.
+- **Live and bare links too** — live channels and direct URLs that skipped the source search run the same resolution at load time, so the fix is not limited to addon VOD results.
+
+## Verified on 12.84
+
+- On the installed build, a fixture addon short link (`/short/hls` → 302 → `/api/token/abc123`) whose token endpoint answers 403 unless the Referer, UA and hint header all arrive loaded through the HLS extractor with no 403. The fixture logged one resolver hit on `/short/hls`, then only `/api/token/abc123` requests, and logcat showed `HlsMediaPeriod` / `HlsSampleStreamWrapper` — the explicit `application/x-mpegURL` and not progressive extraction.
+- **OPEN WITH** on the same source opened the chooser with `dat=http://10.0.2.2:8099/api/token/abc123 typ=application/x-mpegURL headers=Referer,https://fixture.test/,User-Agent,FixturePlayer/1.0,X-Fixture-Token,abc` — one UA, pipe and behaviour-hint headers merged, and the resolved URL rather than the short link.
+- A pipe-only source (`…|Referer=https://pipe.test/&User-Agent=PipePlayer/2.0`, no behaviour hints) cleared its own header gate on Media3 and handed off with `headers=Referer,https://pipe.test/,User-Agent,PipePlayer/2.0`.
+- The fixture serves placeholder TS bytes, so preparation ends with `Stream data is malformed`; that error itself confirms the HLS extractor was selected and the playlist was read with the forwarded headers.
+- `StreamSourceTest` (9 tests: kind precedence, prefix sniffing, `needsKindDiscovery`, redirect resolution over a loopback server, pipe-header precedence, unique header pairs, `mimeFor`) and the full unit suite pass.
+- The all-ABI release installs as `versionCode 120084` / `versionName 12.84`.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema131126v12.84.apk` | `armeabi-v7a` (TV boxes) | 76,270,082 bytes | `6f80d6547bd9a44044b4e016fb1c9f96ade61b2acfb090e9c232b91a743d9a13` |
+| `Cinema131126v12.84-allabis.apk` | all ABIs (arm64-v8a, x86, x86_64) | 329,468,726 bytes | `78b60416868e726f9ee4da498389147bd2d93b64104c04c588a232c9061df1b1` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema131126v12.84.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.83 (previous)
 
 ## New in 12.83 — Type the PIN
 

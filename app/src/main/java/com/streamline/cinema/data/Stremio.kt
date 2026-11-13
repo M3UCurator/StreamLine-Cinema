@@ -431,13 +431,26 @@ data class StreamProbe(
     val error: String? = null,
     val status: Int? = null,
     /** Manifest body when the probe fetched one; DRM detection reuses it. */
-    val manifest: String? = null
+    val manifest: String? = null,
+    /** HLS/DASH/Smooth detected from the redirect target or its Content-Type. */
+    val kind: StreamKind? = null
 ) {
     val playable: Boolean get() = error == null
 
     /** 404/410 name a link that is gone; every other failure may be the probe's own session. */
     val linkGone: Boolean get() = status == 404 || status == 410
 }
+
+/**
+ * Where a source really points after its redirect chain, and what it serves.
+ * [kind] is null when neither the final path nor the response identifies the
+ * container (a plain progressive file, or an endpoint that hides everything).
+ */
+data class SourceResolution(
+    val url: String,
+    val kind: StreamKind? = null,
+    val contentType: String? = null
+)
 
 /**
  * Addon stream as a playable source. Entries that only carry `externalUrl`
@@ -463,6 +476,7 @@ internal fun StreamItem.toPlaybackOption(label: String, logo: String = ""): Play
         name = displayName,
         url = parsed.url,
         headers = StreamUrls.mergeHeaders(requestHeaders(), parsed.headers),
+        streamKind = StreamUrls.kindOf(parsed.url),
         subtitles = subtitles,
         meta = meta
     )
@@ -937,10 +951,13 @@ object StremioAddons {
                 ?: return@withContext StreamProbe(url, "invalid stream URL")
             // The probe must look like the player: providers that whitelist an
             // app UA answer 403 to a browser UA, which used to read as a dead
-            // link and blocked the tune before playback could even try.
-            val requestHeaders = mapOf(
-                "User-Agent" to userAgent.ifBlank { Http.BROWSER_USER_AGENT }
-            ) + headers
+            // link and blocked the tune before playback could even try. The
+            // merge keeps the UA to a single header when the addon supplies one
+            // in different casing (`user-agent`).
+            val requestHeaders = StreamUrls.mergeHeaders(
+                mapOf("User-Agent" to userAgent.ifBlank { Http.BROWSER_USER_AGENT }),
+                headers
+            )
             fun request(target: okhttp3.HttpUrl): Request = Request.Builder()
                 .url(target)
                 .header("Accept", "*/*")
@@ -959,42 +976,43 @@ object StremioAddons {
                     val finalUrl = resolved.finalUrl
                     val finalHttp = finalUrl.toHttpUrlOrNull()
                         ?: return@withContext StreamProbe(url, "invalid redirect target")
-                    val finalPath = finalHttp.encodedPath
                     val contentType = resolved.contentType.orEmpty()
-                    val isHls = finalPath.endsWith(".m3u8", true) ||
-                        contentType.contains("mpegurl", ignoreCase = true)
-                    val isDash = finalPath.endsWith(".mpd", true) ||
-                        contentType.contains("dash+xml", ignoreCase = true)
-                    if (!isHls && !isDash) return@withContext StreamProbe(finalUrl)
+                    val kind = StreamUrls.kindOf(finalUrl, contentType)
+                    if (kind == null || kind == StreamKind.SMOOTH) {
+                        return@withContext StreamProbe(finalUrl, kind = kind)
+                    }
+                    val isDash = kind == StreamKind.DASH
                     val body = response.bodyStringCapped(512 * 1024)
                     if (isDash) {
                         // The manifest body carries <ContentProtection>/<ms:laurl>,
                         // which Media3 ignores; the caller parses it for DRM.
                         return@withContext if (body.isBlank()) {
-                            StreamProbe(finalUrl, "empty manifest")
+                            StreamProbe(finalUrl, "empty manifest", kind = kind)
                         } else {
-                            StreamProbe(finalUrl, manifest = body)
+                            StreamProbe(finalUrl, manifest = body, kind = kind)
                         }
                     }
-                    if (body.isBlank()) return@withContext StreamProbe(finalUrl, "empty playlist")
+                    if (body.isBlank()) {
+                        return@withContext StreamProbe(finalUrl, "empty playlist", kind = kind)
+                    }
                     // Some CDNs answer with a header-only master (no variants) that
                     // would leave the player spinning forever.
                     if (!body.contains("#EXT-X-STREAM-INF") && !body.contains("#EXTINF")) {
-                        return@withContext StreamProbe(finalUrl, "empty playlist")
+                        return@withContext StreamProbe(finalUrl, "empty playlist", kind = kind)
                     }
                     // Media playlists point straight at segments; only masters list variants.
                     if (!body.contains("#EXT-X-STREAM-INF")) {
-                        return@withContext StreamProbe(finalUrl, manifest = body)
+                        return@withContext StreamProbe(finalUrl, manifest = body, kind = kind)
                     }
                     val variant = body.lineSequence()
                         .map(String::trim)
                         .firstOrNull { it.startsWith("http") || (it.isNotBlank() && !it.startsWith("#")) }
-                        ?: return@withContext StreamProbe(finalUrl, manifest = body)
+                        ?: return@withContext StreamProbe(finalUrl, manifest = body, kind = kind)
                     val variantUrl = finalHttp.resolve(variant)
-                        ?: return@withContext StreamProbe(finalUrl, manifest = body)
+                        ?: return@withContext StreamProbe(finalUrl, manifest = body, kind = kind)
                     probeClient.awaitRedirects(request(variantUrl)).use { copy ->
                         if (copy.code !in 200..299) {
-                            StreamProbe(url, "link expired (HTTP ${copy.code})", copy.code)
+                            StreamProbe(url, "link expired (HTTP ${copy.code})", copy.code, kind = kind)
                         } else {
                             // Some packagers put SAMPLE-AES KEY tags only in the
                             // media playlist, not in the master.
@@ -1004,7 +1022,7 @@ object StremioAddons {
                             } else {
                                 body
                             }
-                            StreamProbe(finalUrl, manifest = combined)
+                            StreamProbe(finalUrl, manifest = combined, kind = kind)
                         }
                     }
                 }
@@ -1020,20 +1038,49 @@ object StremioAddons {
         url: String,
         headers: Map<String, String>,
         userAgent: String = Http.BROWSER_USER_AGENT
-    ): String =
+    ): String = resolveSource(url, headers, userAgent).url
+
+    /**
+     * Direct destination of a source plus the container it serves. Addon links
+     * are frequently a short link (`jmp2.uk/…`) or a token endpoint
+     * (`/play/<id>`, `.php`) with no media extension; Media3 resolves HLS/DASH
+     * relative URIs against the URL it is handed, so the redirect target has to
+     * be walked and the response type remembered before the player opens it.
+     *
+     * When the chain or the response cannot be read, the original URL is
+     * returned so playback still gets a chance.
+     */
+    suspend fun resolveSource(
+        url: String,
+        headers: Map<String, String>,
+        userAgent: String = Http.BROWSER_USER_AGENT
+    ): SourceResolution =
         withContext(Dispatchers.IO) {
-            val httpUrl = url.toHttpUrlOrNull() ?: return@withContext url
+            val httpUrl = url.toHttpUrlOrNull()
+                ?: return@withContext SourceResolution(url)
+            val requestHeaders = StreamUrls.mergeHeaders(
+                mapOf("User-Agent" to userAgent.ifBlank { Http.BROWSER_USER_AGENT }),
+                headers
+            )
             val request = Request.Builder()
                 .url(httpUrl)
                 .header("Accept", "*/*")
-                .apply {
-                    (mapOf("User-Agent" to userAgent.ifBlank { Http.BROWSER_USER_AGENT }) + headers)
-                        .forEach { (k, v) -> if (k.isNotBlank()) header(k, v) }
-                }
+                .apply { requestHeaders.forEach { (k, v) -> if (k.isNotBlank()) header(k, v) } }
                 .build()
             runCatching {
-                probeClient.awaitRedirects(request).use { it.finalUrl }
-            }.getOrDefault(url)
+                probeClient.awaitRedirects(request).use { resolved ->
+                    val contentType = resolved.contentType
+                    var kind = StreamUrls.kindOf(resolved.finalUrl, contentType)
+                    if (kind == null && resolved.code in 200..299) {
+                        // A token endpoint may answer octet-stream; the manifest
+                        // prefix is then the only honest evidence of the format.
+                        val prefix = runCatching { resolved.response.bodyStringCapped(4096) }
+                            .getOrDefault("")
+                        kind = StreamUrls.kindOf(resolved.finalUrl, contentType, prefix)
+                    }
+                    SourceResolution(resolved.finalUrl, kind, contentType)
+                }
+            }.getOrDefault(SourceResolution(url))
         }
 
     /**

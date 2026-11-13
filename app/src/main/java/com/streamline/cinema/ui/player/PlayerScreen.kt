@@ -139,10 +139,13 @@ import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.SkipKind
 import com.streamline.cinema.data.SkipSegments
 import com.streamline.cinema.data.StreamBadgeCatalog
+import com.streamline.cinema.data.StreamKind
 import com.streamline.cinema.data.StreamMeta
 import com.streamline.cinema.data.StreamSearchEvent
 import com.streamline.cinema.data.StreamSearchPhase
 import com.streamline.cinema.data.StreamSearchStep
+import com.streamline.cinema.data.StreamUrls
+import com.streamline.cinema.data.StremioAddons
 import com.streamline.cinema.data.WatchProgress
 import com.streamline.cinema.data.await
 import com.streamline.cinema.data.rankSources
@@ -636,7 +639,12 @@ fun PlayerScreen(
         val repo = repository ?: return@LaunchedEffect
         if (!autoHandoff && settings.playbackEngine == PlaybackEngine.EXTERNAL) {
             autoHandoff = true
-            if (repo.openExternally(url = target.url, headers = target.headers)) {
+            if (repo.openExternally(
+                    url = target.url,
+                    headers = target.headers,
+                    kind = target.streamKind ?: StreamUrls.kindOf(target.url)
+                )
+            ) {
                 onExit()
             } else {
                 externalMessage = "External hand-off unavailable · using built-in player"
@@ -647,6 +655,11 @@ fun PlayerScreen(
     val nativeRequired = current != null
     val playbackHeaders = remember(current) { current?.headers.orEmpty() }
     val playbackDrm = remember(current) { current?.drm }
+    // Short links and token endpoints have no extension; the repository fills
+    // this in when it can, and the load path discovers it otherwise.
+    val playbackKind = remember(current) {
+        current?.streamKind ?: StreamUrls.kindOf(current?.url)
+    }
     // HLS plays through the loopback proxy so playlists, keys and segments all
     // carry the configured UA/Referer and survive redirects and mixed schemes.
     // If the proxied URL fails, playback is retried once directly.
@@ -671,6 +684,7 @@ fun PlayerScreen(
         settings.userAgentString,
         playbackHeaders,
         playbackDrm,
+        playbackKind,
         nativeFallback
     ) {
         if (nativeRequired) {
@@ -678,7 +692,7 @@ fun PlayerScreen(
                 context = context,
                 settings = settings,
                 decoderMode = decoderMode,
-                adaptive = isAdaptiveUrl(playbackUrl),
+                adaptive = isAdaptiveUrl(playbackUrl, playbackKind),
                 isLive = isLive,
                 userAgent = settings.userAgentString,
                 headers = playbackHeaders,
@@ -1166,7 +1180,7 @@ fun PlayerScreen(
                 // Keep the panel up: a silent reload here only hides the failure
                 // and delays the next verdict by another loader timeout. RELOAD
                 // (or the next tune) then runs without the proxy.
-                if (!proxyBypassed && isHlsUrl(playbackUrl) && target.canBypassProxy()) {
+                if (!proxyBypassed && isHlsUrl(playbackUrl, playbackKind) && target.canBypassProxy()) {
                     proxyBypassed = true
                 }
             }
@@ -1297,12 +1311,26 @@ fun PlayerScreen(
         val target = playerOrNull ?: return@LaunchedEffect
         val media = current ?: return@LaunchedEffect
         val directUrl = playbackUrl ?: media.url
+        // A short link or token endpoint has no extension and the addon reply
+        // reported no type. Walk it once: Media3 resolves HLS/DASH relative
+        // URIs against the URL it is handed, and the final response names the
+        // extractor, which otherwise defaults to progressive and throws
+        // UnrecognizedInputFormatException on a playlist.
+        val discovered = if (playbackKind == null && StreamUrls.needsKindDiscovery(directUrl)) {
+            StremioAddons.resolveSource(directUrl, playbackHeaders, settings.userAgentString)
+        } else {
+            null
+        }
+        val resolvedUrl = discovered?.url ?: directUrl
+        val resolvedKind = discovered?.kind ?: playbackKind
         // Proxy bypass is a per-attempt decision: it must not restart this
         // effect on its own (it is always paired with a reload token bump),
         // otherwise a restored proxy would interrupt healthy playback.
-        val proxied = if (!proxyBypassed && isHlsUrl(directUrl)) {
+        val proxied = if (!proxyBypassed &&
+            (resolvedKind == StreamKind.HLS || isHlsUrl(resolvedUrl))
+        ) {
             NativeStreamProxy.proxyHls(
-                url = directUrl,
+                url = resolvedUrl,
                 userAgent = settings.userAgentString,
                 headers = playbackHeaders
             )
@@ -1310,10 +1338,11 @@ fun PlayerScreen(
             null
         }
         proxyStreamId = proxied?.streamId
-        val sourceUrl = proxied?.url ?: directUrl
+        val sourceUrl = proxied?.url ?: resolvedUrl
         runCatching {
             val builder = MediaItem.Builder().setUri(sourceUrl)
-            adaptiveMimeType(sourceUrl)?.let { builder.setMimeType(it) }
+            val mime = resolvedKind?.media3Mime() ?: adaptiveMimeType(sourceUrl)
+            mime?.let { builder.setMimeType(it) }
             val subtitleConfigs = buildList {
                 val seen = mutableSetOf<String>()
                 media.subtitles.forEach { subtitle ->
@@ -1410,7 +1439,7 @@ fun PlayerScreen(
                 SystemClock.elapsedRealtime(),
                 nativeError != null,
                 proxyBypassed,
-                isHlsUrl(playbackUrl) && target.canBypassProxy()
+                isHlsUrl(playbackUrl, playbackKind) && target.canBypassProxy()
             )
             when (decision) {
                 TuneDecision.Ready, TuneDecision.Aborted -> return@LaunchedEffect
@@ -1990,7 +2019,8 @@ fun PlayerScreen(
             context = context,
             url = target.url,
             headers = target.headers,
-            userAgent = settings.userAgentString
+            userAgent = settings.userAgentString,
+            kind = playbackKind
         )
         if (ok) {
             onExit()
@@ -3683,8 +3713,14 @@ private fun buildExoPlayer(
         // Some CDNs (Google DAI among them) answer 404 to OkHttp's default UA
         // even when the factory-level UA is set, so pin it on every request as
         // well. Addon streams also frequently need the emitting page's Referer;
-        // the CDN answers 403 otherwise.
-        baseFactory.setDefaultRequestProperties(mapOf("User-Agent" to userAgent) + headers)
+        // the CDN answers 403 otherwise. Merging case-insensitively keeps one
+        // UA header when the addon spells it `user-agent`, since two UA values
+        // are rejected by several CDNs.
+        val requestHeaders = StreamUrls.mergeHeaders(
+            mapOf("User-Agent" to userAgent),
+            headers
+        )
+        baseFactory.setDefaultRequestProperties(requestHeaders)
         return DefaultDataSource.Factory(context, baseFactory)
     }
 
@@ -3887,21 +3923,16 @@ private fun captionStyle(index: Int): CaptionStyleCompat = when (index) {
     else -> CaptionStyleCompat.DEFAULT
 }
 
-private fun isAdaptiveUrl(url: String?): Boolean {
+private fun isAdaptiveUrl(url: String?, kind: StreamKind? = null): Boolean {
+    if (kind != null) return true
     if (url.isNullOrBlank()) return false
-    val clean = url.substringBefore('?').substringBefore('#').lowercase()
-    val leaf = clean.substringAfterLast('/', "")
-    return clean.endsWith(".m3u8") ||
-        clean.endsWith(".mpd") ||
-        clean.endsWith(".ism") ||
-        clean.endsWith(".ismc") ||
-        leaf == "manifest"
+    return StreamUrls.kindOf(url) != null
 }
 
-private fun isHlsUrl(url: String?): Boolean {
+private fun isHlsUrl(url: String?, kind: StreamKind? = null): Boolean {
+    if (kind != null) return kind == StreamKind.HLS
     if (url.isNullOrBlank()) return false
-    val clean = url.substringBefore('?').substringBefore('#').lowercase()
-    return clean.endsWith(".m3u8") || clean.endsWith(".m3u")
+    return StreamUrls.kindOf(url) == StreamKind.HLS
 }
 
 private fun PlaybackException.isHttpAuthorizationFailure(): Boolean {

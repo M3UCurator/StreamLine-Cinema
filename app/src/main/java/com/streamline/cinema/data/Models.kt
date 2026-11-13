@@ -820,6 +820,12 @@ data class PlaybackOption(
     val url: String,
     /** Extra request headers required by the source (addon proxyHeaders). */
     val headers: Map<String, String> = emptyMap(),
+    /**
+     * Container family detected before playback. Sources behind a short link or
+     * a token endpoint have no usable extension, so the player needs this to
+     * pick the HLS/DASH extractor instead of falling back to progressive.
+     */
+    val streamKind: StreamKind? = null,
     /** Subtitles shipped inline with the stream entry. */
     val subtitles: List<AddonSubtitle> = emptyList(),
     /** Set when the stream is CENC-protected. */

@@ -179,7 +179,57 @@ object CatalogNormalizer {
 /** A stream URL split from the optional `|Header=value&Header2=value` suffix. */
 data class ParsedStream(val url: String, val headers: Map<String, String> = emptyMap())
 
+/** Container family a source URL serves, decided before the player opens it. */
+enum class StreamKind { HLS, DASH, SMOOTH }
+
 object StreamUrls {
+
+    /**
+     * Container family from the strongest evidence available: a real media
+     * extension in the path, then the response Content-Type, then the manifest
+     * prefix. Token/short-link endpoints (`/play/abc123`, `.php`) carry no
+     * extension, and Media3's own heuristic would treat them as progressive
+     * media and fail with UnrecognizedInputFormatException.
+     */
+    fun kindOf(
+        url: String?,
+        contentType: String? = null,
+        manifestPrefix: String? = null
+    ): StreamKind? {
+        val clean = url?.substringBefore('?')?.substringBefore('#')?.lowercase().orEmpty()
+        val leaf = clean.substringAfterLast('/')
+        when {
+            clean.endsWith(".m3u8") || clean.endsWith(".m3u") -> return StreamKind.HLS
+            clean.endsWith(".mpd") -> return StreamKind.DASH
+            leaf == "manifest" || clean.endsWith(".ism") || clean.endsWith(".ismc") ->
+                return StreamKind.SMOOTH
+        }
+        val type = contentType?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+        when {
+            type.contains("mpegurl") -> return StreamKind.HLS
+            type.contains("dash+xml") -> return StreamKind.DASH
+            type.contains("smoothstreaming") || type.contains("vnd.ms-sstr") ->
+                return StreamKind.SMOOTH
+        }
+        val prefix = manifestPrefix?.trimStart()?.take(2048).orEmpty()
+        return when {
+            prefix.startsWith("#EXTM3U") -> StreamKind.HLS
+            prefix.startsWith("<?xml") && prefix.contains("<MPD", ignoreCase = true) ->
+                StreamKind.DASH
+            prefix.contains("<SmoothStreamingMedia", ignoreCase = true) -> StreamKind.SMOOTH
+            else -> null
+        }
+    }
+
+    /**
+     * True when neither the path nor [StreamKind] can name the container, so a
+     * redirect walk is the only way to learn what the endpoint really serves.
+     * Known progressive files (`.mp4`, `.mkv`, …) never need that round trip.
+     */
+    fun needsKindDiscovery(raw: String): Boolean {
+        val url = parse(raw).url
+        return kindOf(url) == null && !isDirectMedia(url)
+    }
 
     /**
      * Splits `http://host/live.m3u8|User-Agent=...&Referer=...` into a clean URL and

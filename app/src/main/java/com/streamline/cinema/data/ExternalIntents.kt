@@ -13,10 +13,21 @@ import android.net.Uri
  */
 object ExternalIntents {
 
-    fun mimeFor(url: String): String {
+    /**
+     * Type handed to the player. [kind] wins over the extension because a short
+     * link or token endpoint has none, and a generic video type would let the
+     * receiving player fall back to a demuxer that cannot read a playlist.
+     */
+    fun mimeFor(url: String, kind: StreamKind? = null): String {
+        when (kind) {
+            StreamKind.HLS -> return "application/x-mpegURL"
+            StreamKind.DASH -> return "application/dash+xml"
+            StreamKind.SMOOTH -> return "application/vnd.ms-sstr+xml"
+            null -> Unit
+        }
         val lower = url.substringBefore('?').substringBefore('#').lowercase()
         return when {
-            lower.endsWith(".m3u8") -> "application/x-mpegURL"
+            lower.endsWith(".m3u8") || lower.endsWith(".m3u") -> "application/x-mpegURL"
             lower.endsWith(".mpd") -> "application/dash+xml"
             lower.endsWith(".mkv") -> "video/x-matroska"
             lower.endsWith(".webm") -> "video/webm"
@@ -31,15 +42,14 @@ object ExternalIntents {
         extra: Map<String, String>,
         userAgent: String
     ): Array<String> {
-        val merged = LinkedHashMap<String, String>()
+        // Case-insensitive: an addon may publish `user-agent` while the source
+        // page supplies `User-Agent`, and two UA headers make CDNs answer 400.
+        val merged = java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER)
         extra.forEach { (key, value) ->
             if (key.isNotBlank() && value.isNotBlank()) merged[key] = value
         }
-        // The explicit Referer wins over an addon-supplied one, regardless of casing.
-        if (!referer.isNullOrBlank()) {
-            merged.keys.filter { it.equals("Referer", ignoreCase = true) }.forEach { merged.remove(it) }
-            merged["Referer"] = referer
-        }
+        // The explicit Referer wins over an addon-supplied one.
+        if (!referer.isNullOrBlank()) merged["Referer"] = referer
         if (merged.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
             merged["User-Agent"] = userAgent
         }
@@ -50,9 +60,10 @@ object ExternalIntents {
         url: String,
         referer: String? = null,
         headers: Map<String, String> = emptyMap(),
-        userAgent: String = Http.BROWSER_USER_AGENT
+        userAgent: String = Http.BROWSER_USER_AGENT,
+        kind: StreamKind? = null
     ): Intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(Uri.parse(url), mimeFor(url))
+        setDataAndType(Uri.parse(url), mimeFor(url, kind))
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         putExtra("headers", headerPairs(referer, headers, userAgent))
     }
@@ -72,10 +83,11 @@ object ExternalIntents {
         url: String,
         referer: String? = null,
         headers: Map<String, String> = emptyMap(),
-        userAgent: String = Http.BROWSER_USER_AGENT
+        userAgent: String = Http.BROWSER_USER_AGENT,
+        kind: StreamKind? = null
     ): Boolean {
         if (url.isBlank()) return false
-        val base = intent(url = url, referer = referer, headers = headers, userAgent = userAgent)
+        val base = intent(url = url, referer = referer, headers = headers, userAgent = userAgent, kind = kind)
         val target = if (base.resolveActivity(context.packageManager) != null) {
             base
         } else {

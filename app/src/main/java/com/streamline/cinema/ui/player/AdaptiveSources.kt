@@ -14,6 +14,8 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.upstream.CmcdConfiguration
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+import com.streamline.cinema.data.StreamKind
+import com.streamline.cinema.data.StreamUrls
 
 /**
  * Picks the explicit Media3 source for each URL instead of relying on the
@@ -147,13 +149,19 @@ internal fun adaptiveSourceFactories(
 private fun isSmoothStreamingPath(path: String?): Boolean =
     path == "manifest" || path?.endsWith(".ism") == true || path?.endsWith(".ismc") == true
 
-internal fun adaptiveMimeType(url: String?): String? {
-    val clean = url?.substringBefore('?')?.substringBefore('#')?.lowercase() ?: return null
-    val path = clean.substringAfterLast('/', "")
-    return when {
-        clean.endsWith(".m3u8") -> MimeTypes.APPLICATION_M3U8
-        clean.endsWith(".mpd") -> MimeTypes.APPLICATION_MPD
-        isSmoothStreamingPath(path) -> MimeTypes.APPLICATION_SS
-        else -> null
+internal fun adaptiveMimeType(url: String?, kind: StreamKind? = null): String? {
+    when (kind) {
+        StreamKind.HLS -> return MimeTypes.APPLICATION_M3U8
+        StreamKind.DASH -> return MimeTypes.APPLICATION_MPD
+        StreamKind.SMOOTH -> return MimeTypes.APPLICATION_SS
+        null -> Unit
     }
+    return StreamUrls.kindOf(url)?.media3Mime()
+}
+
+/** Exact Media3 constant; DefaultMediaSourceFactory compares case-sensitively. */
+internal fun StreamKind.media3Mime(): String = when (this) {
+    StreamKind.HLS -> MimeTypes.APPLICATION_M3U8
+    StreamKind.DASH -> MimeTypes.APPLICATION_MPD
+    StreamKind.SMOOTH -> MimeTypes.APPLICATION_SS
 }

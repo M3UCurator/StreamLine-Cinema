@@ -61,6 +61,8 @@ private data class GuideResult(
 
 /** Upper bound for one addon's part of the playable-source search. */
 private const val ADDON_SEARCH_TIMEOUT_MS = 20_000L
+/** Short links resolved per addon reply; each one costs a round trip. */
+private const val MAX_KIND_DISCOVERIES = 4
 private const val GUIDE_TIMEOUT_MS = 120_000L
 /** Probes per channel: dead links queue up to 10 s each before failover. */
 private const val MAX_LIVE_PROBES = 6
@@ -538,6 +540,7 @@ class CinemaRepository(
 
         val type = if (item.isSeries) "series" else "movie"
         val searchItem = item.copy(imdbId = verifiedImdbId(item))
+        val searchUserAgent = settingsStore.settings.value.userAgentString
         val ids = StremioAddons.contentIds(searchItem, season, episode)
         // A series without an episode cannot be searched without inventing S1E1.
         if (ids.isEmpty()) {
@@ -579,6 +582,28 @@ class CinemaRepository(
                                 if (matched.isNotEmpty()) {
                                     playable += matched.mapNotNull {
                                         it.toPlaybackOption(label, addon.logo)
+                                    }.mapIndexed { index, option ->
+                                        // A short link or token endpoint tells the
+                                        // player nothing, and HLS variants would
+                                        // resolve against the short link, so the
+                                        // first few unknown-format sources are
+                                        // walked once here. The cap keeps a large
+                                        // addon reply from paying it per link.
+                                        if (index < MAX_KIND_DISCOVERIES &&
+                                            StreamUrls.needsKindDiscovery(option.url)
+                                        ) {
+                                            val resolved = StremioAddons.resolveSource(
+                                                option.url,
+                                                option.headers,
+                                                searchUserAgent
+                                            )
+                                            option.copy(
+                                                url = resolved.url,
+                                                streamKind = resolved.kind ?: option.streamKind
+                                            )
+                                        } else {
+                                            option
+                                        }
                                     }
                                     if (playable.isNotEmpty()) break
                                 }
@@ -1147,21 +1172,23 @@ class CinemaRepository(
                 parsed.url.startsWith("https://", true)
             return@withContext if (throughMedia3) {
                 // Short links (jmp2.uk/…) hide the manifest URL; Media3 resolves
-                // HLS variants against the URL it is handed, so swap in the target.
-                val playableUrl = if (needsRedirectResolution(parsed.url)) {
-                    StremioAddons.resolveFinalUrl(parsed.url, parsed.headers, userAgent).also { resolved ->
-                        if (resolved != parsed.url) {
-                            Log.i("StreamLine:live", "${channel.name} resolved · ${resolved.take(160)}")
+                // HLS variants against the URL it is handed, so swap in the target
+                // and remember the container the response actually served.
+                val resolved = if (StreamUrls.needsKindDiscovery(parsed.url)) {
+                    StremioAddons.resolveSource(parsed.url, parsed.headers, userAgent).also {
+                        if (it.url != parsed.url) {
+                            Log.i("StreamLine:live", "${channel.name} resolved · ${it.url.take(160)}")
                         }
                     }
                 } else {
-                    parsed.url
+                    SourceResolution(parsed.url, StreamUrls.kindOf(parsed.url))
                 }
                 LiveStreamResult(
                     option = PlaybackOption(
                         name = channel.name,
-                        url = playableUrl,
-                        headers = parsed.headers
+                        url = resolved.url,
+                        headers = parsed.headers,
+                        streamKind = resolved.kind
                     )
                 )
             } else {
@@ -1186,7 +1213,11 @@ class CinemaRepository(
         for (option in liveOptions.take(MAX_LIVE_PROBES)) {
             val probe = StremioAddons.probeStream(option.url, option.headers, userAgent)
             if (probe.error == null) {
-                var playable = if (probe.url != option.url) option.copy(url = probe.url) else option
+                var playable = if (probe.url != option.url || probe.kind != null) {
+                    option.copy(url = probe.url, streamKind = probe.kind ?: option.streamKind)
+                } else {
+                    option
+                }
                 // Direct manifests can carry their own protection. Media3 ignores
                 // <ms:laurl>/SESSION-KEY, so the DRM session must come from here.
                 val manifest = StremioAddons.manifestDrm(probe, option.headers)
@@ -1269,7 +1300,15 @@ class CinemaRepository(
                     Log.i("StreamLine:live", "${channel.name} ${lastError}")
                     continue
                 }
-                option = if (probe.url != option.url) option.copy(url = probe.url, drm = drm) else option.copy(drm = drm)
+                option = if (probe.url != option.url || probe.kind != null) {
+                    option.copy(
+                        url = probe.url,
+                        streamKind = probe.kind ?: option.streamKind,
+                        drm = drm
+                    )
+                } else {
+                    option.copy(drm = drm)
+                }
                 if (drm != null) Log.i("StreamLine:live", "${channel.name} drm=${drm.scheme} · ${option.url.take(160)}")
                 return@withContext LiveStreamResult(option = option, externalUrl = pageUrl)
             }
@@ -1288,18 +1327,6 @@ class CinemaRepository(
             external != null -> LiveStreamResult(externalUrl = external)
             else -> LiveStreamResult(error = "the addon returned no playable links")
         }
-    }
-
-    /**
-     * Pre-resolving costs a round trip, so only links whose last path segment
-     * cannot name a media file are treated as short links
-     * (`jmp2.uk/stvp-FR200016Y5`). Direct `.m3u8`/`.ts`/`.mp4` URLs let Media3
-     * follow redirects itself.
-     */
-    private fun needsRedirectResolution(url: String): Boolean {
-        val parsed = url.toHttpUrlOrNull() ?: return false
-        val last = parsed.pathSegments.lastOrNull().orEmpty()
-        return last.isEmpty() || !last.contains('.')
     }
 
     fun installedExternalPlayers(): List<ExternalPlayerInfo> {
@@ -1328,14 +1355,16 @@ class CinemaRepository(
     fun openExternally(
         url: String,
         headers: Map<String, String> = emptyMap(),
-        referer: String? = null
+        referer: String? = null,
+        kind: StreamKind? = null
     ): Boolean {
         val settings = settingsStore.settings.value
         val intent = ExternalIntents.intent(
             url = url,
             referer = referer,
             headers = headers,
-            userAgent = settings.userAgentString
+            userAgent = settings.userAgentString,
+            kind = kind ?: StreamUrls.kindOf(url)
         )
         val manager = appContext.packageManager
         val target = if (intent.resolveActivity(manager) != null) {

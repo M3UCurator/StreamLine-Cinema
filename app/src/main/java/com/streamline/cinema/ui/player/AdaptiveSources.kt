@@ -4,18 +4,26 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.ParserException
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.drm.DrmSessionManagerProvider
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker
 import androidx.media3.exoplayer.smoothstreaming.SsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.upstream.CmcdConfiguration
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import com.streamline.cinema.data.StreamKind
 import com.streamline.cinema.data.StreamUrls
+
+// Multiplier on the playlist's target duration before a non-advancing live
+// playlist is declared stuck (Media3's own default is 3.5).
+private const val PLAYLIST_STUCK_TARGET_DURATIONS = 10.0
 
 /**
  * Picks the explicit Media3 source for each URL instead of relying on the
@@ -26,7 +34,9 @@ internal class AdaptiveMediaSourceFactory(
     private val progressive: MediaSource.Factory,
     private val hls: MediaSource.Factory,
     private val dash: MediaSource.Factory,
-    private val smoothStreaming: MediaSource.Factory
+    private val smoothStreaming: MediaSource.Factory,
+    private val subtitleDataSource: DataSource.Factory,
+    private var loadErrorPolicy: LoadErrorHandlingPolicy
 ) : MediaSource.Factory {
 
     override fun setDrmSessionManagerProvider(
@@ -42,6 +52,7 @@ internal class AdaptiveMediaSourceFactory(
     override fun setLoadErrorHandlingPolicy(
         loadErrorHandlingPolicy: LoadErrorHandlingPolicy
     ): MediaSource.Factory {
+        loadErrorPolicy = loadErrorHandlingPolicy
         progressive.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
         hls.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
         dash.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
@@ -67,13 +78,31 @@ internal class AdaptiveMediaSourceFactory(
         val path = mediaItem.localConfiguration?.uri?.lastPathSegment?.lowercase()
         return when {
             mimeType == MimeTypes.APPLICATION_M3U8 || path?.endsWith(".m3u8") == true ->
-                hls.createMediaSource(mediaItem)
+                mergeSubtitles(hls.createMediaSource(mediaItem), mediaItem)
             mimeType == MimeTypes.APPLICATION_MPD || path?.endsWith(".mpd") == true ->
-                dash.createMediaSource(mediaItem)
+                mergeSubtitles(dash.createMediaSource(mediaItem), mediaItem)
             mimeType == MimeTypes.APPLICATION_SS || isSmoothStreamingPath(path) ->
-                smoothStreaming.createMediaSource(mediaItem)
+                mergeSubtitles(smoothStreaming.createMediaSource(mediaItem), mediaItem)
             else -> progressive.createMediaSource(mediaItem)
         }
+    }
+
+    /**
+     * Only DefaultMediaSourceFactory merges MediaItem.SubtitleConfigurations; the
+     * HLS/DASH/Smooth factories ignore them, so adaptive sources have to carry
+     * their side-loaded tracks here or captions are attached but never fetched.
+     */
+    private fun mergeSubtitles(source: MediaSource, mediaItem: MediaItem): MediaSource {
+        val configs = mediaItem.localConfiguration?.subtitleConfigurations.orEmpty()
+        if (configs.isEmpty()) return source
+        val factory = SingleSampleMediaSource.Factory(subtitleDataSource)
+            .setLoadErrorHandlingPolicy(loadErrorPolicy)
+        val sources = ArrayList<MediaSource>(configs.size + 1)
+        sources.add(source)
+        configs.forEach { config ->
+            sources.add(factory.createMediaSource(config, C.TIME_UNSET))
+        }
+        return MergingMediaSource(*sources.toTypedArray())
     }
 }
 
@@ -108,10 +137,14 @@ internal fun streamRetryDelayMs(
     parserError: ParserException?,
     errorCount: Int
 ): Long {
+    // A throttled provider wants fewer requests, not faster ones. Retrying
+    // inside the loader every 500 ms only refreshes its negative cache
+    // (Flussonic bans the token for two minutes), so 429 is final here and
+    // the player-level backoff in the OSD waits the limit out.
+    if (httpStatusCode == 429) return C.TIME_UNSET
     if (httpStatusCode != null &&
         httpStatusCode in 400..499 &&
-        httpStatusCode != 408 &&
-        httpStatusCode != 429
+        httpStatusCode != 408
     ) {
         return C.TIME_UNSET
     }
@@ -139,11 +172,26 @@ internal fun adaptiveSourceFactories(
         // Chunkless preparation drives ABR from the master playlist immediately
         // instead of waiting for the first segment to reveal the renditions.
         .setAllowChunklessPreparation(true)
+        // Media3 calls a non-advancing playlist stuck after 3.5 target
+        // durations, which is 7 s on a 2 s-segment live channel: a couple of
+        // slow refreshes then end a healthy stream as ERROR_CODE_TIMEOUT. Ten
+        // durations give a short-window CDN room to catch up, while the 15 s
+        // stall watchdog still catches a playhead that really stopped.
+        .setPlaylistTrackerFactory { dataSource, errorPolicy, parser, cmcd, executor ->
+            DefaultHlsPlaylistTracker(
+                dataSource,
+                errorPolicy,
+                parser,
+                cmcd,
+                PLAYLIST_STUCK_TARGET_DURATIONS,
+                executor
+            )
+        }
     val dash = DashMediaSource.Factory(adaptiveDataSource)
         .setLoadErrorHandlingPolicy(policy)
     val smoothStreaming = SsMediaSource.Factory(adaptiveDataSource)
         .setLoadErrorHandlingPolicy(policy)
-    return AdaptiveMediaSourceFactory(progressive, hls, dash, smoothStreaming)
+    return AdaptiveMediaSourceFactory(progressive, hls, dash, smoothStreaming, adaptiveDataSource, policy)
 }
 
 private fun isSmoothStreamingPath(path: String?): Boolean =

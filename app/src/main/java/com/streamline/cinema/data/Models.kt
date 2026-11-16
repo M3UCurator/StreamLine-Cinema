@@ -212,7 +212,9 @@ object TmdbImages {
 
     fun poster(pathOrUrl: String?): String? = absolute(pathOrUrl, "w500")
     fun backdrop(pathOrUrl: String?): String? = absolute(pathOrUrl, "w1280")
-    fun still(pathOrUrl: String?): String? = absolute(pathOrUrl, "w300")
+    // Episodes render up to 240 dp wide on a TV's 2x panel, where w300 upsamples
+    // visibly; w500 covers every list and the next-up card without waste.
+    fun still(pathOrUrl: String?): String? = absolute(pathOrUrl, "w500")
     // Logos render as large as 560 dp in the hero; TMDB's rendition ladder stops
     // at w500, which upsamples there, so ask for the source artwork instead.
     fun logo(pathOrUrl: String?): String? = absolute(pathOrUrl, "original")

@@ -170,4 +170,85 @@ class BufferTuningTest {
         // Without the switch the tier still owns the caches.
         assertEquals(4, nativeCache(BufferTier.LEAN).mpvCacheSeconds)
     }
+
+    /** Every window DefaultLoadControl receives must be internally consistent. */
+    @Test
+    fun everyPresetSatisfiesTheLoadControlConstraints() {
+        BufferTier.entries.forEach { tier ->
+            listOf(
+                bufferWindow(tier, adaptive = true, lowLatency = false, lowRam = false),
+                bufferWindow(tier, adaptive = true, lowLatency = true, lowRam = false),
+                bufferWindow(tier, adaptive = false, lowLatency = true, lowRam = false),
+                bufferWindow(tier, adaptive = true, lowLatency = true, lowRam = true),
+                bufferWindow(
+                    tier,
+                    adaptive = false,
+                    lowLatency = false,
+                    lowRam = true,
+                    highCapacityVod = true
+                )
+            ).forEach { window ->
+                assertTrue(window.minBufferMs >= window.bufferForPlaybackMs)
+                assertTrue(window.minBufferMs >= window.bufferForPlaybackAfterRebufferMs)
+                assertTrue(window.maxBufferMs >= window.minBufferMs)
+                assertTrue(window.backBufferMs >= 0)
+            }
+        }
+    }
+
+    @Test
+    fun lowRamPresetsAreBoundedByTheHeapShare() {
+        // The byte presets stay at their shipped values; the resolver only ever
+        // lowers them, and never to zero (Media3 reads <=0 as "unbounded").
+        assertEquals(16L * 1024 * 1024, LOW_RAM_ADAPTIVE_BUFFER_BYTES)
+        assertEquals(24L * 1024 * 1024, LOW_RAM_PROGRESSIVE_BUFFER_BYTES)
+        listOf(LOW_RAM_ADAPTIVE_BUFFER_BYTES, LOW_RAM_PROGRESSIVE_BUFFER_BYTES).forEach { preset ->
+            assertTrue(preset > 0)
+            val budget = byteBudget(preset, maxMemoryBytes = 256L * 1024 * 1024)
+            assertTrue(budget.effectiveBytes in 1..(16L * 1024 * 1024))
+            assertEquals(preset > 16L * 1024 * 1024, budget.clamped)
+        }
+    }
+
+    @Test
+    fun byteBudgetHonoursAPresetThatFitsTheHeapShare() {
+        val budget = byteBudget(presetBytes = 24L * 1024 * 1024, maxMemoryBytes = 1024L * 1024 * 1024)
+        assertEquals(24L * 1024 * 1024, budget.effectiveBytes)
+        assertEquals(64L * 1024 * 1024, budget.heapLimitBytes)
+        assertTrue(!budget.clamped)
+        assertEquals(
+            "24.0 MiB preset (heap 1024.0 MiB)",
+            describeByteBudget(budget)
+        )
+    }
+
+    @Test
+    fun byteBudgetClampsAPresetAboveASixteenthOfTheHeap() {
+        // A 256 MiB heap allows 16 MiB; the 24 MiB progressive preset asks for more.
+        val budget = byteBudget(presetBytes = 24L * 1024 * 1024, maxMemoryBytes = 256L * 1024 * 1024)
+        assertEquals(16L * 1024 * 1024, budget.effectiveBytes)
+        assertEquals(24L * 1024 * 1024, budget.presetBytes)
+        assertTrue(budget.clamped)
+        assertEquals(
+            "24.0 MiB preset clamped to 16.0 MiB (heap 256.0 MiB)",
+            describeByteBudget(budget)
+        )
+    }
+
+    @Test
+    fun byteBudgetEqualityIsNotAClampAndTinyHeapsKeepASliver() {
+        val exact = byteBudget(presetBytes = 16L * 1024 * 1024, maxMemoryBytes = 256L * 1024 * 1024)
+        assertEquals(16L * 1024 * 1024, exact.effectiveBytes)
+        assertTrue(!exact.clamped)
+
+        // A very small heap must not yield a zero or negative budget: Media3
+        // reads a non-positive target as "unbounded" and would lift the cap.
+        val tiny = byteBudget(presetBytes = 16L * 1024 * 1024, maxMemoryBytes = 8L * 1024 * 1024)
+        assertEquals(512L * 1024, tiny.effectiveBytes)
+        assertTrue(tiny.effectiveBytes > 0)
+        assertTrue(tiny.clamped)
+
+        val zeroHeap = byteBudget(presetBytes = 16L * 1024 * 1024, maxMemoryBytes = 0L)
+        assertTrue(zeroHeap.effectiveBytes > 0)
+    }
 }

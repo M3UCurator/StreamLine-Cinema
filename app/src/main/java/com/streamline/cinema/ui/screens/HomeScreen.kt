@@ -72,6 +72,7 @@ import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.ContinueCard
+import com.streamline.cinema.ui.EpisodeActionsDialog
 import com.streamline.cinema.ui.ErrorBanner
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoBadge
@@ -164,6 +165,8 @@ fun HomeScreen(
                 ))
             }
     }
+
+    var continueMenu by remember { mutableStateOf<Pair<WatchProgress, CatalogItem>?>(null) }
 
     val progressByKey = remember(progress) {
         progress.values.groupBy { it.groupKey }.mapValues { (_, rows) ->
@@ -367,6 +370,9 @@ fun HomeScreen(
                                 onPlay(item, entry.season, entry.episode, entry.episodeTitle)
                             },
                             onRemove = { vm.removeProgressForItem(entry.groupKey) },
+                            onLongPress = if (entry.season != null && entry.episode != null) {
+                                ({ continueMenu = entry to item })
+                            } else null,
                             focusSurface = "home.continue"
                         )
                     }
@@ -497,6 +503,32 @@ fun HomeScreen(
                 onSettings = { onNavigate(AppTab.SETTINGS) }
             )
         }
+        }
+
+        continueMenu?.let { (entry, item) ->
+            val episodeKicker = buildString {
+                append("S${entry.season} E${entry.episode}")
+                entry.episodeTitle?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+            }
+            EpisodeActionsDialog(
+                kicker = episodeKicker,
+                title = item.title,
+                watched = false,
+                canRemoveFromContinue = true,
+                onMarkWatched = {
+                    vm.markWatchedFromContinue(item, entry)
+                    continueMenu = null
+                },
+                onMarkWatchedUntilHere = {
+                    vm.markWatchedUntilFromContinue(item, entry)
+                    continueMenu = null
+                },
+                onRemoveFromContinue = {
+                    vm.removeProgressForItem(entry.groupKey)
+                    continueMenu = null
+                },
+                onDismiss = { continueMenu = null }
+            )
         }
     }
 }

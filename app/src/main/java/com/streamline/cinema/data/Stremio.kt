@@ -182,7 +182,12 @@ data class AddonSubtitle(
             val lang = o.stringOrNull("lang")
                 ?: o.optJSONArray("langs")?.stringList()?.firstOrNull()
                 ?: ""
-            return AddonSubtitle(url = url, lang = lang, label = o.stringOrNull("label"))
+            return AddonSubtitle(
+                url = url,
+                lang = lang,
+                // OpenSubtitles labels a track by its file, not by `label`.
+                label = o.stringOrNull("label") ?: o.stringOrNull("subtitleFileName")
+            )
         }
     }
 }
@@ -483,6 +488,23 @@ internal fun StreamItem.toPlaybackOption(label: String, logo: String = ""): Play
 }
 
 object StremioAddons {
+
+    /**
+     * Subtitle source used when the viewer has not added one: OpenSubtitles v3
+     * answers `/subtitles/{type}/{id}.json` like any other Stremio addon, so the
+     * captions toggle can offer English tracks on a fresh install.
+     */
+    const val DEFAULT_SUBTITLE_ADDON = "https://opensubtitles-v3.strem.io/manifest.json"
+
+    /**
+     * Configured subtitle addon URLs plus the built-in default, de-duplicated
+     * so a viewer who already added OpenSubtitles does not fetch it twice.
+     */
+    fun subtitleSources(configured: List<String>): List<String> =
+        (configured + DEFAULT_SUBTITLE_ADDON)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.trimEnd('/').lowercase() }
 
     /** Probes pull tiny playlist bodies; they must never hang the Live tab. */
     private val probeClient: OkHttpClient by lazy {

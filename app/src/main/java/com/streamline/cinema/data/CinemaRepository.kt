@@ -685,7 +685,9 @@ class CinemaRepository(
         episode: Int? = null
     ): List<AddonSubtitle> {
         val addons = settingsStore.settings.value.addons.filter { it.enabled && it.url.isNotBlank() }
-        if (addons.isEmpty()) return emptyList()
+        // A viewer who has not added a subtitle addon still gets captions: the
+        // built-in OpenSubtitles endpoint joins whatever is configured.
+        val sources = StremioAddons.subtitleSources(addons.map { it.url })
         val type = if (item.isSeries) "series" else "movie"
         // Subtitle ids must belong to this title too; an unverified stored `tt…`
         // would list another title's tracks over the video.
@@ -693,10 +695,10 @@ class CinemaRepository(
         val ids = StremioAddons.contentIds(searchItem, season, episode)
         if (ids.isEmpty()) return emptyList()
         val collected = coroutineScope {
-            addons.map { addon ->
+            sources.map { source ->
                 async(Dispatchers.IO) {
                     ids.firstNotNullOfOrNull { id ->
-                        runCatching { StremioAddons.fetchSubtitles(addon.url, type, id) }
+                        runCatching { StremioAddons.fetchSubtitles(source, type, id) }
                             .getOrDefault(emptyList())
                             .takeIf { it.isNotEmpty() }
                     }.orEmpty()

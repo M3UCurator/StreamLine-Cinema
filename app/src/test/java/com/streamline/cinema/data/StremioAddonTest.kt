@@ -165,6 +165,27 @@ class StremioAddonTest {
         assertNull(stream("1080p · HDR").advertisedEpisode())
     }
 
+    @Test
+    fun subtitleSourcesAlwaysIncludeTheBuiltInDefault() {
+        assertEquals(
+            listOf(StremioAddons.DEFAULT_SUBTITLE_ADDON),
+            StremioAddons.subtitleSources(emptyList())
+        )
+        assertEquals(
+            listOf("https://subs.example/manifest.json", StremioAddons.DEFAULT_SUBTITLE_ADDON),
+            StremioAddons.subtitleSources(listOf("https://subs.example/manifest.json"))
+        )
+    }
+
+    @Test
+    fun subtitleSourcesDoNotFetchOpenSubtitlesTwice() {
+        val sources = StremioAddons.subtitleSources(
+            listOf(" https://opensubtitles-v3.strem.io/manifest.json/ ", "")
+        )
+        assertEquals(listOf(StremioAddons.DEFAULT_SUBTITLE_ADDON.trimEnd('/')), sources.map { it.trimEnd('/') })
+        assertEquals(1, sources.size)
+    }
+
     companion object {
         private const val ADDON = "https://hyper.stravo.site/local/manifest.json"
 

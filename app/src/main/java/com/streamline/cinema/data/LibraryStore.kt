@@ -290,6 +290,36 @@ class LibraryStore(context: Context) {
         }
     }
 
+    fun removeProgress(playbackKey: String) {
+        synchronized(lock) {
+            if (!_progress.value.containsKey(playbackKey)) return
+            _progress.value = _progress.value - playbackKey
+            snapshotActive()
+            scheduleSave()
+        }
+    }
+
+    /** Clears playback rows for a show up to and including one episode. */
+    fun removeProgressUpTo(groupKey: String, season: Int, episode: Int) {
+        synchronized(lock) {
+            val trimmed = _progress.value.filterValues { entry ->
+                if (entry.groupKey != groupKey) return@filterValues true
+                val s = entry.season
+                val e = entry.episode
+                when {
+                    s == null || e == null -> true
+                    s < season -> false
+                    s == season && e <= episode -> false
+                    else -> true
+                }
+            }
+            if (trimmed.size == _progress.value.size) return
+            _progress.value = trimmed
+            snapshotActive()
+            scheduleSave()
+        }
+    }
+
     private fun mergeItems(old: CatalogItem, fresh: CatalogItem): CatalogItem {
         if (old.tmdbLoaded && !fresh.tmdbLoaded) {
             return old

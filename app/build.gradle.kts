@@ -5,7 +5,7 @@ import java.time.format.DateTimeFormatter
 // Release artifacts are named by build day and iteration (Cinema<ddMMyy>v<iteration>.apk)
 // so successive builds never overwrite each other. Bump -PcinemaIteration per release;
 // -PallAbis=true adds the emulator suffix and drops the 32-bit ABI filter for that build.
-val iteration = providers.gradleProperty("cinemaIteration").orElse("12.89").get()
+val iteration = providers.gradleProperty("cinemaIteration").orElse("12.98").get()
 val allAbis = providers.gradleProperty("allAbis").map(String::toBoolean).getOrElse(false)
 val buildDay = LocalDate.now().format(DateTimeFormatter.ofPattern("ddMMyy"))
 val artifactName = "Cinema${buildDay}v$iteration" + if (allAbis) "-allabis" else ""
@@ -30,6 +30,7 @@ android {
         targetSdk = 35
         versionCode = versionCodeValue
         versionName = iteration
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The updater compares the installed iteration with the latest GitHub
         // release tag and downloads the same ABI flavor that is installed.
@@ -162,4 +163,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:core:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }

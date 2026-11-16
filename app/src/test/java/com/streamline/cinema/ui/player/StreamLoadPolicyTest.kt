@@ -21,11 +21,16 @@ class StreamLoadPolicyTest {
     }
 
     @Test
-    fun definitive4xxIsFinalButThrottlingIsRetried() {
-        assertEquals(C.TIME_UNSET, retry(status = 404))
+    fun definitive4xxIsFinalAndThrottlingIsNeverRetriedInTheLoader() {
+        assertEquals(C.TIME_UNSET, retry(status = 401))
         assertEquals(C.TIME_UNSET, retry(status = 403))
+        assertEquals(C.TIME_UNSET, retry(status = 404))
+        // 429 leaves the loader untouched: the player-level backoff owns it.
+        assertEquals(C.TIME_UNSET, retry(status = 429))
         assertEquals(500L, retry(status = 408, count = 1))
-        assertEquals(500L, retry(status = 429, count = 1))
+        assertEquals(1_000L, retry(status = 408, count = 2))
+        assertEquals(500L, retry(status = 500, count = 1))
+        assertEquals(1_000L, retry(status = 503, count = 2))
     }
 
     @Test

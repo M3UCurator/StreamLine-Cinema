@@ -50,7 +50,9 @@ internal class VlcEnginePlayer(
     private val abrEnabled: Boolean,
     isLive: Boolean,
     private val cachingMs: Int,
-    private val amlogicFix: Boolean
+    private val amlogicFix: Boolean,
+    private val maxWidth: Int,
+    private val maxHeight: Int
 ) : NativeEnginePlayer(context.applicationContext, isLive) {
 
     private val appContext = context.applicationContext
@@ -149,6 +151,11 @@ internal class VlcEnginePlayer(
         // No --http-reconnect: VLC then reopens the source at EOF, so a finite
         // HLS master playlist is re-downloaded forever instead of parsed.
         "--adaptive-logic=" + if (abrEnabled) "predictive" else "highest",
+        // The same ceiling the built-in selector enforces. libVLC's adaptive
+        // module reads these as input variables when it parses the ladder, so
+        // they must arrive as constructor options rather than live updates.
+        "--adaptive-maxwidth=$maxWidth",
+        "--adaptive-maxheight=$maxHeight",
         "--no-video-title-show"
     ).apply {
         if (amlogicFix) add("--mediacodec-dr")
@@ -224,10 +231,16 @@ internal class VlcEnginePlayer(
 
     override fun startEngine(item: MediaItem, play: Boolean) {
         val url = item.localConfiguration?.uri?.toString() ?: return
+        // An addon pipe UA wins over the app-wide UA, exactly as in the Media3
+        // data source; sending both would make the CDN pick the wrong one.
+        val effectiveUserAgent = headers.entries
+            .firstOrNull { it.key.equals("User-Agent", true) }
+            ?.value
+            ?: userAgent
         val next = Media(libVlc, Uri.parse(url)).apply {
             addOption(":network-caching=$cachingMs")
             addOption(":live-caching=$cachingMs")
-            addOption(":http-user-agent=$userAgent")
+            addOption(":http-user-agent=$effectiveUserAgent")
             headers.entries
                 .firstOrNull { it.key.equals("Referer", true) }
                 ?.value

@@ -20,6 +20,12 @@ internal data class BufferWindow(
 private const val START_MS = 2_500
 private const val REBUFFER_MS = 5_000
 
+// Hard RAM ceilings for the low-RAM load control. Seconds are not a memory
+// bound: the same window holds four times the bytes at 4K, so the loader is
+// capped by bytes and the resolver below clamps the preset to the device heap.
+internal const val LOW_RAM_ADAPTIVE_BUFFER_BYTES = 16L * 1024 * 1024
+internal const val LOW_RAM_PROGRESSIVE_BUFFER_BYTES = 24L * 1024 * 1024
+
 /**
  * The window the "High-capacity buffering" switch pins on MP4/MKV: a 15 s
  * fill before playback may start, 50 s of forward buffer to ride out a line
@@ -128,24 +134,54 @@ internal fun describeNativeCache(tier: BufferTier, highCapacityVod: Boolean = fa
     return "${cache.mpvCacheSeconds} s MPV · ${seconds(cache.vlcCachingMs)} s VLC"
 }
 
-/** One-line summary for Settings, e.g. "min 3 s · max 30 s · start 1.2 s". */
-internal fun describeBuffer(
-    tier: BufferTier,
-    adaptive: Boolean,
-    lowLatency: Boolean,
-    lowRam: Boolean,
-    highCapacityVod: Boolean = false
-): String {
-    val window = bufferWindow(tier, adaptive, lowLatency, lowRam, highCapacityVod)
-    val forward = if (window.minBufferMs == window.maxBufferMs) {
-        "window ${seconds(window.minBufferMs)} s"
-    } else {
-        "min ${seconds(window.minBufferMs)} s · max ${seconds(window.maxBufferMs)} s"
-    }
-    return "$forward · start ${seconds(window.bufferForPlaybackMs)} s · " +
-        "re-buffer ${seconds(window.bufferForPlaybackAfterRebufferMs)} s"
+internal const val BYTE_BUDGET_HEAP_DIVISOR = 16
+
+/**
+ * The loader's byte ceiling. A preset is a wish, not a promise: the budget is
+ * capped at a sixteenth of the process heap, because Media3 counts every
+ * allocation against it and a preset larger than that share leaves a 32-bit
+ * box without room for codecs and UI. The effective value is what the load
+ * control receives; [clamped] records that the preset was not honoured.
+ */
+internal data class ByteBudget(
+    val presetBytes: Long,
+    val effectiveBytes: Long,
+    val heapLimitBytes: Long
+) {
+    val clamped: Boolean get() = effectiveBytes < presetBytes
 }
 
-private fun seconds(ms: Int): String =
+internal fun byteBudget(
+    presetBytes: Long,
+    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()
+): ByteBudget {
+    val limit = (maxMemoryBytes / BYTE_BUDGET_HEAP_DIVISOR).coerceAtLeast(1L)
+    return ByteBudget(
+        presetBytes = presetBytes,
+        effectiveBytes = minOf(presetBytes, limit),
+        heapLimitBytes = limit
+    )
+}
+
+/** One-line budget summary for the build log, e.g. "24 MiB preset clamped to 16 MiB (heap 256 MiB)". */
+internal fun describeByteBudget(budget: ByteBudget): String {
+    val preset = mebibytes(budget.presetBytes)
+    val effective = mebibytes(budget.effectiveBytes)
+    val heap = mebibytes(budget.heapLimitBytes * BYTE_BUDGET_HEAP_DIVISOR)
+    return if (budget.clamped) "$preset MiB preset clamped to $effective MiB (heap $heap MiB)"
+    else "$effective MiB preset (heap $heap MiB)"
+}
+
+private fun mebibytes(bytes: Long): String = String.format(Locale.US, "%.1f", bytes / 1_048_576f)
+
+/** Compact form for dense rows, e.g. "15–50 s". */
+internal fun describeWindow(window: BufferWindow): String =
+    if (window.minBufferMs == window.maxBufferMs) {
+        "window ${seconds(window.minBufferMs)} s"
+    } else {
+        "${seconds(window.minBufferMs)}–${seconds(window.maxBufferMs)} s"
+    }
+
+internal fun seconds(ms: Int): String =
     if (ms % 1000 == 0) (ms / 1000).toString()
     else String.format(Locale.US, "%.1f", ms / 1000f)

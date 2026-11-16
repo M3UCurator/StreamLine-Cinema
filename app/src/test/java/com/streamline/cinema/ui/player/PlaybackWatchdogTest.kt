@@ -324,4 +324,18 @@ class PlaybackWatchdogTest {
         assertEquals(2_000L, stallRetryDelayMs(1))
         assertEquals(8_000L, stallRetryDelayMs(100))
     }
+
+    @Test
+    fun providerLimitBackoffOutlastsTheNegativeCache() {
+        // A film spends two waits before the source list, live spends four.
+        assertEquals(4, providerRetryLimit(isLive = true))
+        assertEquals(2, providerRetryLimit(isLive = false))
+
+        // Every step clears Flussonic's two-minute ban window.
+        assertEquals(20_000L, providerRetryDelayMs(1))
+        assertEquals(45_000L, providerRetryDelayMs(2))
+        assertEquals(90_000L, providerRetryDelayMs(3))
+        assertEquals(120_000L, providerRetryDelayMs(4))
+        assertEquals(120_000L, providerRetryDelayMs(9))
+    }
 }

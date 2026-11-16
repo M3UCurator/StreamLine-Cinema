@@ -1279,6 +1279,63 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         container.libraryStore.setEpisodesWatched(item, pairs, watched = !pairs.all { it in watched })
     }
 
+    /** Marks or clears one episode without starting playback. */
+    fun setEpisodeWatched(item: CatalogItem, season: Int, episode: Int, watched: Boolean) {
+        container.libraryStore.setEpisodesWatched(item, setOf(season to episode), watched)
+    }
+
+    /**
+     * Continue Watching long-press actions: a watched mark plus clearing the
+     * saved playheads so the row actually leaves Continue Watching.
+     */
+    fun markWatchedFromContinue(item: CatalogItem, progress: WatchProgress) {
+        val season = progress.season ?: return
+        val episode = progress.episode ?: return
+        setEpisodeWatched(item, season, episode, true)
+        container.libraryStore.removeProgress(progress.playbackKey)
+    }
+
+    fun markWatchedUntilFromContinue(item: CatalogItem, progress: WatchProgress) {
+        val season = progress.season ?: return
+        val episode = progress.episode ?: return
+        markEpisodesWatchedUntil(item, season, episode)
+        container.libraryStore.removeProgressUpTo(progress.groupKey, season, episode)
+    }
+
+    /**
+     * Long-press action on the episode list: marks everything aired from the
+     * first season through [episodeNumber] of [seasonNumber]. Seasons without
+     * episode metadata fall back to their published episode count, the same way
+     * [togglePastSeasonsWatched] does for the back catalogue.
+     */
+    fun markEpisodesWatchedUntil(item: CatalogItem, seasonNumber: Int, episodeNumber: Int) {
+        viewModelScope.launch {
+            val today = todayStamp()
+            val pairs = mutableSetOf<Pair<Int, Int>>()
+            for (season in item.seasons.filter { it.number in 1 until seasonNumber }) {
+                val episodes = seasonEpisodes(item, season)
+                val aired = episodes.filter { it.airDate.isNullOrBlank() || it.airDate <= today }
+                when {
+                    aired.isNotEmpty() -> aired.forEach { pairs += season.number to it.number }
+                    episodes.isEmpty() && season.episodeCount > 0 ->
+                        (1..season.episodeCount).forEach { pairs += season.number to it }
+                }
+            }
+            val current = item.seasons.firstOrNull { it.number == seasonNumber }
+            val currentEpisodes = current?.let { seasonEpisodes(item, it) }.orEmpty()
+            val upTo = currentEpisodes.filter {
+                it.number in 1..episodeNumber && (it.airDate.isNullOrBlank() || it.airDate <= today)
+            }
+            when {
+                upTo.isNotEmpty() -> upTo.forEach { pairs += seasonNumber to it.number }
+                currentEpisodes.isEmpty() -> (1..episodeNumber).forEach { pairs += seasonNumber to it }
+            }
+            if (pairs.isNotEmpty()) {
+                container.libraryStore.setEpisodesWatched(item, pairs, watched = true)
+            }
+        }
+    }
+
     /**
      * Marks every aired episode of the seasons before [beforeSeason] as watched, or
      * clears those marks when the whole back catalogue is already marked.
@@ -1292,16 +1349,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             val today = todayStamp()
             val pairs = mutableSetOf<Pair<Int, Int>>()
             for (season in item.seasons.filter { it.number in 1 until beforeSeason }) {
-                val cached = _sniffedSeasons.value[item.key]
-                    ?.firstOrNull { it.number == season.number }
-                    ?.episodes
-                    .orEmpty()
-                val episodes = when {
-                    cached.isNotEmpty() -> cached
-                    season.episodes.isNotEmpty() -> season.episodes
-                    else -> runCatching { repository.loadSeasonEpisodes(item, season.number) }
-                        .getOrDefault(emptyList())
-                }
+                val episodes = seasonEpisodes(item, season)
                 val aired = episodes.filter { it.airDate.isNullOrBlank() || it.airDate <= today }
                 when {
                     aired.isNotEmpty() -> aired.forEach { pairs += season.number to it.number }
@@ -1320,6 +1368,16 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             onDone(!alreadyMarked, pairs.size)
         }
     }
+
+    /** Season episodes from the sniff cache, the imported scaffold, or TMDB. */
+    private suspend fun seasonEpisodes(item: CatalogItem, season: Season): List<Episode> =
+        _sniffedSeasons.value[item.key]
+            ?.firstOrNull { it.number == season.number }
+            ?.episodes
+            ?.takeIf { it.isNotEmpty() }
+            ?: season.episodes.takeIf { it.isNotEmpty() }
+            ?: runCatching { repository.loadSeasonEpisodes(item, season.number) }
+                .getOrDefault(emptyList())
 
     private fun watchedPairs(itemKey: String): Set<Pair<Int, Int>> {
         val played = progress.value.values

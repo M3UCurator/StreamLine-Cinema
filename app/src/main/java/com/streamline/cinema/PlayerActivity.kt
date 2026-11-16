@@ -50,7 +50,16 @@ class PlayerActivity : CinemaActivity() {
                 episode?.let { putExtra(EXTRA_EPISODE, it) }
                 episodeTitle?.let { putExtra(EXTRA_EPISODE_TITLE, it) }
                 startPositionMs?.let { putExtra(EXTRA_START_MS, it) }
-                url?.let { putExtra(EXTRA_URL, it) }
+                // A raw `url|Header=value` passed here carries the same pipe
+                // suffix launchUrl() splits; extract it so the player receives
+                // both the clean URL and the addon's request headers.
+                url?.takeIf { it.isNotBlank() }?.let { raw ->
+                    val parsed = StreamUrls.parse(raw)
+                    putExtra(EXTRA_URL, parsed.url)
+                    if (parsed.headers.isNotEmpty()) {
+                        putExtra(EXTRA_HEADERS, JSONObject(parsed.headers).toString())
+                    }
+                }
             }
             context.startActivity(intent)
         }

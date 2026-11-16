@@ -109,7 +109,9 @@ import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.TvTextField
 import com.streamline.cinema.ui.glassSurface
 import com.streamline.cinema.ui.player.describeBuffer
+import com.streamline.cinema.ui.player.describeMemoryBudget
 import com.streamline.cinema.ui.player.describeNativeCache
+import com.streamline.cinema.ui.player.playbackProfile
 import com.streamline.cinema.ui.rememberScreenScrollState
 import coil.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
@@ -1118,6 +1120,25 @@ fun SettingsScreen(
                             } + " · live tunes directly"
                         )
                         }
+                        // The same resolver the player builds from, so these
+                        // rows report what a stream will actually get rather
+                        // than re-deriving it beside the player.
+                        val progressiveProfile = remember(settings, lowRamDevice) {
+                            playbackProfile(
+                                settings,
+                                settings.decoderType,
+                                adaptive = false,
+                                lowRam = lowRamDevice
+                            )
+                        }
+                        val adaptiveProfile = remember(settings, lowRamDevice) {
+                            playbackProfile(
+                                settings,
+                                settings.decoderType,
+                                adaptive = true,
+                                lowRam = lowRamDevice
+                            )
+                        }
                         SettingsGroup(
                             "Bandwidth & buffering",
                             hint = when {
@@ -1177,29 +1198,19 @@ fun SettingsScreen(
                         )
                         SettingsInfoRow(
                             title = "MP4 / MKV load control",
-                            value = describeBuffer(
-                                settings.bufferTier,
-                                adaptive = false,
-                                lowLatency = settings.lowLatency,
-                                lowRam = lowRamDevice,
-                                highCapacityVod = settings.highCapacityBuffer
-                            )
+                            value = describeBuffer(progressiveProfile)
                         )
                         SettingsInfoRow(
                             title = "HLS / MPEG-DASH load control",
-                            value = describeBuffer(
-                                settings.bufferTier,
-                                adaptive = true,
-                                lowLatency = settings.lowLatency,
-                                lowRam = lowRamDevice
-                            )
+                            value = describeBuffer(adaptiveProfile)
                         )
                         SettingsInfoRow(
                             title = "VLC / MPV cache",
-                            value = describeNativeCache(
-                                settings.bufferTier,
-                                highCapacityVod = settings.highCapacityBuffer
-                            )
+                            value = describeNativeCache(progressiveProfile)
+                        )
+                        SettingsInfoRow(
+                            title = "Buffer memory budget",
+                            value = describeMemoryBudget(progressiveProfile)
                         )
                         SettingsToggleRow(
                             label = "Next up follows furthest watched",

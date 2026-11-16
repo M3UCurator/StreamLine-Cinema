@@ -121,8 +121,7 @@ class NativeStreamProxyTest {
     }
 
     @Test
-    fun contentTypeKeepsSpecificUpstreamAndRejectsGeneric() {
-        assertEquals(
+    fun contentTypeKeepsSpecificUpstreamAndRejectsGeneric() {        assertEquals(
             "audio/mpeg",
             NativeStreamProxy.contentTypeFor("https://cdn.example/segment.php?id=7", "audio/mpeg; charset=binary")
         )
@@ -138,6 +137,229 @@ class NativeStreamProxyTest {
             "application/octet-stream",
             NativeStreamProxy.contentTypeFor("https://cdn.example/segment.php?id=7", "   ")
         )
+    }
+
+    @Test
+    fun hlsPrefixSniffingAcceptsTagAndBom() {
+        assertTrue(NativeStreamProxy.isHlsPlaylistPrefix("#EXTM3U\n#EXTINF:4,".toByteArray()))
+        assertTrue(
+            NativeStreamProxy.isHlsPlaylistPrefix(
+                byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + "#EXTM3U".toByteArray()
+            )
+        )
+        assertTrue(!NativeStreamProxy.isHlsPlaylistPrefix("<!DOCTYPE html>".toByteArray()))
+        assertTrue(!NativeStreamProxy.isHlsPlaylistPrefix("PK".toByteArray()))
+        assertTrue(!NativeStreamProxy.isHlsPlaylistPrefix(ByteArray(0)))
+    }
+
+    @Test
+    fun extensionlessPlaylistWithGenericTypeStillRewritesSegments() {
+        // Token endpoints serve the playlist from a path without an extension
+        // and label it octet-stream; the body, not the header, has to decide.
+        val server = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+        server.soTimeout = 10_000
+        Thread {
+            repeat(2) {
+                runCatching {
+                    server.accept().use { client ->
+                        client.soTimeout = 10_000
+                        val reader = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+                        val requestLine = reader.readLine().orEmpty()
+                        while (true) {
+                            val header = reader.readLine() ?: break
+                            if (header.isEmpty()) break
+                        }
+                        val segment = requestLine.contains("/media/v0/seg718.ts")
+                        val body = if (segment) {
+                            "TS-BYTES".toByteArray()
+                        } else {
+                            ("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\n" +
+                                "/media/v0/seg718.ts\n#EXT-X-ENDLIST\n").toByteArray()
+                        }
+                        val type = if (segment) "video/mp2t" else "application/octet-stream"
+                        client.getOutputStream().apply {
+                            write(
+                                ("HTTP/1.1 200 OK\r\nContent-Type: $type\r\n" +
+                                    "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n")
+                                    .toByteArray(Charsets.US_ASCII)
+                            )
+                            write(body)
+                            flush()
+                        }
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        try {
+            val handle = NativeStreamProxy.proxyHls(
+                url = "http://localhost:${server.localPort}/media/token/raw",
+                userAgent = "UA"
+            ) ?: error("proxy did not start")
+            fun fetch(url: String): String {
+                val connection = java.net.URL(url).openConnection()
+                connection.connectTimeout = 5_000
+                connection.readTimeout = 5_000
+                return connection.getInputStream().use { it.readBytes().toString(Charsets.UTF_8) }
+            }
+            val playlist = fetch(handle.url)
+            val segmentUrl = playlist.lineSequence().first { it.startsWith("http") }
+            assertTrue(segmentUrl.startsWith("http://127.0.0.1"))
+            assertEquals("TS-BYTES", fetch(segmentUrl))
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun playlistTargetsAreNarrowerThanMediaSegments() {
+        assertTrue(NativeStreamProxy.isPlaylistTarget("https://cdn.example/live/master.m3u8?token=1"))
+        assertTrue(NativeStreamProxy.isPlaylistTarget("https://cdn.example/live/list.M3U"))
+        assertTrue(NativeStreamProxy.isPlaylistTarget("http://cdn.example/live/index.m3u8#frag"))
+        assertTrue(!NativeStreamProxy.isPlaylistTarget("https://cdn.example/live/seg-1.ts"))
+        assertTrue(!NativeStreamProxy.isPlaylistTarget("https://cdn.example/live/playlist"))
+        assertTrue(!NativeStreamProxy.isPlaylistTarget("https://cdn.example/live/key.m3u8.key"))
+    }
+
+    @Test
+    fun playlistRetriesOnceWhenTheUpstreamResetsBeforeAnswering() {
+        val server = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+        server.soTimeout = 10_000
+        val playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg.ts\n"
+        Thread {
+            var attempts = 0
+            while (attempts < 2) {
+                val client = runCatching { server.accept() }.getOrNull() ?: break
+                attempts += 1
+                if (attempts == 1) {
+                    // A one-off reset: accept, then drop without an answer.
+                    client.close()
+                    continue
+                }
+                runCatching {
+                    client.use {
+                        it.getInputStream().bufferedReader(Charsets.ISO_8859_1).apply {
+                            readLine()
+                            while (readLine()?.isNotEmpty() == true) Unit
+                        }
+                        val body = playlist.toByteArray()
+                        it.getOutputStream().apply {
+                            write(
+                                ("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n" +
+                                    "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n")
+                                    .toByteArray(Charsets.US_ASCII)
+                            )
+                            write(body)
+                            flush()
+                        }
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        try {
+            val handle = NativeStreamProxy.proxyHls(
+                url = "http://localhost:${server.localPort}/live/index.m3u8",
+                userAgent = "UA"
+            ) ?: error("proxy did not start")
+            val connection = java.net.URL(handle.url).openConnection()
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            val body = connection.getInputStream().use { it.readBytes().toString(Charsets.UTF_8) }
+            assertTrue(body.startsWith("#EXTM3U"))
+            assertTrue(body.contains("/s/"))
+        } finally {
+            server.close()
+        }
+    }
+
+    @Test
+    fun fixedLengthPlaylistsReuseOneLoopbackSocket() {
+        val server = java.net.ServerSocket(0, 8, java.net.InetAddress.getByName("127.0.0.1"))
+        server.soTimeout = 10_000
+        val playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg.ts\n"
+        Thread {
+            repeat(2) {
+                runCatching {
+                    server.accept().use { client ->
+                        client.soTimeout = 10_000
+                        client.getInputStream().bufferedReader(Charsets.ISO_8859_1).apply {
+                            readLine()
+                            while (readLine()?.isNotEmpty() == true) Unit
+                        }
+                        val body = playlist.toByteArray()
+                        // Connection: close keeps the pooled upstream client
+                        // from reusing its side; only the loopback socket is
+                        // under test here.
+                        client.getOutputStream().apply {
+                            write(
+                                ("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n" +
+                                    "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n")
+                                    .toByteArray(Charsets.US_ASCII)
+                            )
+                            write(body)
+                            flush()
+                        }
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        try {
+            val handle = NativeStreamProxy.proxyHls(
+                url = "http://localhost:${server.localPort}/live/index.m3u8",
+                userAgent = "UA"
+            ) ?: error("proxy did not start")
+            val url = handle.url.toHttpUrl()
+            java.net.Socket("127.0.0.1", url.port).use { socket ->
+                socket.soTimeout = 5_000
+                val input = java.io.BufferedInputStream(socket.getInputStream())
+                fun request(): String {
+                    socket.getOutputStream().apply {
+                        write(
+                            ("GET ${url.encodedPath} HTTP/1.1\r\n" +
+                                "Host: 127.0.0.1:${url.port}\r\nConnection: keep-alive\r\n\r\n")
+                                .toByteArray(Charsets.US_ASCII)
+                        )
+                        flush()
+                    }
+                    val head = java.io.ByteArrayOutputStream()
+                    var matched = 0
+                    while (matched < 4) {
+                        val byte = input.read()
+                        if (byte < 0) error("socket closed before headers")
+                        head.write(byte)
+                        matched = when {
+                            (matched == 0 || matched == 2) && byte == '\r'.code -> matched + 1
+                            (matched == 1 || matched == 3) && byte == '\n'.code -> matched + 1
+                            else -> 0
+                        }
+                    }
+                    val headText = head.toString(Charsets.ISO_8859_1.name())
+                    assertTrue(headText.contains("Connection: keep-alive", true))
+                    val length = Regex("(?i)Content-Length: *(\\d+)")
+                        .find(headText)?.groupValues?.get(1)?.toInt() ?: 0
+                    val body = ByteArray(length)
+                    var read = 0
+                    while (read < length) {
+                        val chunk = input.read(body, read, length - read)
+                        if (chunk < 0) error("socket closed before the body")
+                        read += chunk
+                    }
+                    return String(body, Charsets.UTF_8)
+                }
+                assertTrue(request().startsWith("#EXTM3U"))
+                assertTrue(request().startsWith("#EXTM3U"))
+            }
+        } finally {
+            server.close()
+        }
     }
 
     @Test

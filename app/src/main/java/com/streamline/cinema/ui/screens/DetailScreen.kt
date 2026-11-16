@@ -1,7 +1,8 @@
 package com.streamline.cinema.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,8 +42,19 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +80,7 @@ import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
+import com.streamline.cinema.ui.EpisodeActionsDialog
 import com.streamline.cinema.ui.ErrorBanner
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
@@ -83,7 +98,9 @@ import com.streamline.cinema.ui.glassFrame
 import com.streamline.cinema.ui.glassSurface
 import com.streamline.cinema.ui.rememberScreenListState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -133,6 +150,8 @@ fun DetailScreen(
     var episodeRetry by remember(seed.key) { mutableStateOf(0) }
     var markingPast by remember(seed.key) { mutableStateOf(false) }
     var trackerNote by remember(seed.key) { mutableStateOf<String?>(null) }
+    // The episode whose long-press menu is open; null keeps it hidden.
+    var menuEpisode by remember(seed.key) { mutableStateOf<Episode?>(null) }
 
     val savedItem = library.firstOrNull { it.key == item.key }
     val isFavorite = favorites.any { it.key == item.key }
@@ -146,6 +165,9 @@ fun DetailScreen(
     var lastDetailFocus by remember(seed.key) { mutableStateOf("play") }
     val lifecycleOwner = LocalLifecycleOwner.current
     var focusReseed by remember { mutableIntStateOf(0) }
+    val hasProgress = remember(progress, item.key) {
+        progress.values.any { it.itemKey == item.key && it.fraction > 0f }
+    }
     DisposableEffect(lifecycleOwner) {
         var wasPaused = false
         val observer = LifecycleEventObserver { _, event ->
@@ -632,36 +654,6 @@ fun DetailScreen(
                 }
             }
 
-            if (relatedLoading) {
-                item(key = "relatedLoading") {
-                    Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 30.dp)) {
-                        SectionHeader(title = "More Like This", subtitle = "Finding titles with the same pull")
-                        Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                            repeat(6) {
-                                ShimmerBox(
-                                    Modifier
-                                        .width(150.dp)
-                                        .height(225.dp),
-                                    shape = RoundedCornerShape(10.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            } else if (related.isNotEmpty()) {
-                item(key = "related") {
-                    Box(Modifier.padding(top = 26.dp)) {
-                        PosterRow(
-                            title = "More Like This",
-                            subtitle = "Picked from TMDB recommendations",
-                            items = related,
-                            onItemClick = onOpenRelated,
-                            focusSurface = "detail.related"
-                        )
-                    }
-                }
-            }
-
             if (item.isSeries) {
                 item(key = "seasonHeader") {
                     Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 30.dp)) {
@@ -799,10 +791,13 @@ fun DetailScreen(
                         onFocused = { lastDetailFocus = "episode-${episode.number}" },
                         onPlay = {
                             onPlay(item, selectedSeason, episode.number, episode.title)
-                        }
+                        },
+                        onLongPress = { menuEpisode = episode }
                     )
                 }
+                relatedSection(relatedLoading, related, onOpenRelated)
             } else {
+                relatedSection(relatedLoading, related, onOpenRelated)
                 item(key = "about") {
                     Box(Modifier.padding(start = 48.dp, end = 48.dp, top = 30.dp)) {
                         Column(
@@ -873,7 +868,73 @@ fun DetailScreen(
             }
         }
     }
+
+    menuEpisode?.let { episode ->
+        val watched = (selectedSeason to episode.number) in watchedPairs
+        EpisodeActionsDialog(
+            kicker = "S$selectedSeason E${episode.number}",
+            title = episode.title,
+            watched = watched,
+            canRemoveFromContinue = hasProgress,
+            onMarkWatched = {
+                vm.setEpisodeWatched(item, selectedSeason, episode.number, !watched)
+                menuEpisode = null
+            },
+            onMarkWatchedUntilHere = {
+                vm.markEpisodesWatchedUntil(item, selectedSeason, episode.number)
+                menuEpisode = null
+            },
+            onRemoveFromContinue = {
+                vm.removeProgressForItem(item.key)
+                menuEpisode = null
+            },
+            onDismiss = { menuEpisode = null }
+        )
+    }
 }
+
+/**
+ * The recommendations rail. Series append it after the season picker and
+ * episode list so the episodes a viewer came for sit above the fold.
+ */
+private fun LazyListScope.relatedSection(
+    loading: Boolean,
+    related: List<CatalogItem>,
+    onOpenRelated: (CatalogItem) -> Unit
+) {
+    if (loading) {
+        item(key = "relatedLoading") {
+            Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 30.dp)) {
+                SectionHeader(title = "More Like This", subtitle = "Finding titles with the same pull")
+                Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    repeat(6) {
+                        ShimmerBox(
+                            Modifier
+                                .width(150.dp)
+                                .height(225.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                    }
+                }
+            }
+        }
+    } else if (related.isNotEmpty()) {
+        item(key = "related") {
+            Box(Modifier.padding(top = 26.dp)) {
+                PosterRow(
+                    title = "More Like This",
+                    subtitle = "Picked from TMDB recommendations",
+                    items = related,
+                    onItemClick = onOpenRelated,
+                    focusSurface = "detail.related"
+                )
+            }
+        }
+    }
+}
+
+// Holding the remote's centre key this long opens the episode menu instead of playing.
+private const val LONG_PRESS_MS = 600L
 
 @Composable
 private fun EpisodeRow(
@@ -883,10 +944,22 @@ private fun EpisodeRow(
     watched: Boolean,
     focusRequester: FocusRequester,
     onFocused: () -> Unit,
-    onPlay: () -> Unit
+    onPlay: () -> Unit,
+    onLongPress: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
+    val scope = rememberCoroutineScope()
+    // D-pad long press is a key being held, not a pointer gesture: the menu
+    // opens once the centre key has been down for LONG_PRESS_MS and the key-up
+    // that follows is swallowed so it cannot also start playback.
+    var holdJob by remember { mutableStateOf<Job?>(null) }
+    var holding by remember { mutableStateOf(false) }
+    // Remotes repeat KeyDown while held. Without this latch the repeats after the
+    // timer fires re-arm the hold, and the release would fall through to playback
+    // (opening the source picker) on top of the menu.
+    var consumed by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { holdJob?.cancel() } }
     val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = Modifier
@@ -905,11 +978,69 @@ private fun EpisodeRow(
                 if (it.isFocused) {
                     sounds.focus()
                     onFocused()
+                } else {
+                    holdJob?.cancel()
+                    holdJob = null
+                    holding = false
+                    consumed = false
                 }
             }
-            .clickable {
-                sounds.select()
-                onPlay()
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.key != Key.DirectionCenter && event.key != Key.Enter) {
+                    return@onKeyEvent false
+                }
+                when (event.type) {
+                    KeyEventType.KeyDown -> {
+                        if (!consumed && !holding) {
+                            holding = true
+                            holdJob = scope.launch {
+                                delay(LONG_PRESS_MS)
+                                holding = false
+                                consumed = true
+                                sounds.select()
+                                onLongPress()
+                            }
+                        }
+                        true
+                    }
+                    KeyEventType.KeyUp -> {
+                        holdJob?.cancel()
+                        holdJob = null
+                        if (consumed) {
+                            consumed = false
+                        } else if (holding) {
+                            holding = false
+                            sounds.select()
+                            onPlay()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = {
+                        sounds.select()
+                        onPlay()
+                    },
+                    onLongPress = {
+                        sounds.select()
+                        onLongPress()
+                    }
+                )
+            }
+            .semantics {
+                role = Role.Button
+                onClick(label = "Play episode") {
+                    onPlay()
+                    true
+                }
+                onLongClick(label = "Episode options") {
+                    onLongPress()
+                    true
+                }
             }
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically

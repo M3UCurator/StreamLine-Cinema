@@ -8,6 +8,9 @@ import java.net.ConnectException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import javax.net.ssl.SSLException
 
 internal enum class FailureKind { NETWORK, PROVIDER, SOURCE, FORMAT, DRM, UNKNOWN }
@@ -80,6 +83,15 @@ internal fun classifyPlaybackFailure(errorCode: Int, cause: Throwable?): Playbac
         PlaybackException.ERROR_CODE_TIMEOUT ->
             return networkFailure("Connection timed out", "The provider stopped sending video.")
 
+        // Only shown once the live-edge re-prepare budget is spent: the window
+        // keeps moving, so this is a route problem, not a dead channel.
+        PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> return PlaybackFailure(
+            FailureKind.NETWORK,
+            "Fell behind live",
+            "The channel's live window moved past the buffered video.",
+            "Reload to rejoin at the live edge, or choose another source."
+        )
+
         PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> return PlaybackFailure(
             FailureKind.SOURCE,
             "Source not found",
@@ -124,6 +136,8 @@ internal fun classifyPlaybackFailure(errorCode: Int, cause: Throwable?): Playbac
             "Switch the decoder (HW+ or SW) or choose another source."
         )
 
+        PlaybackException.ERROR_CODE_DRM_SCHEME_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_DRM_CONTENT_ERROR,
         PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED,
         PlaybackException.ERROR_CODE_DRM_LICENSE_EXPIRED,
         PlaybackException.ERROR_CODE_DRM_PROVISIONING_FAILED,
@@ -158,6 +172,89 @@ private fun networkFailure(title: String, detail: String): PlaybackFailure = Pla
     detail,
     "Check the network connection, then reload."
 )
+
+/**
+ * Failures the next attempt can plausibly cure without changing the source.
+ * A bad status or a missing file is definitive and must keep failing fast; a
+ * reset, timeout or truncated read is not. Licence acquisition joins the
+ * transport failures because the licence server is another network hop: a
+ * retry re-prepares the same media item through the same DRM session, so an
+ * encrypted feed is never retried as a clear stream.
+ */
+internal fun PlaybackException.isRetryableInPlace(): Boolean = when (errorCode) {
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+    PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
+    // A playlist that stopped refreshing (Media3's HLS stuck detection) or a
+    // load that timed out mid-stream is a transport fault: re-preparing
+    // re-fetches the playlist and rejoins where the viewer was.
+    PlaybackException.ERROR_CODE_TIMEOUT,
+    PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED -> true
+    else -> false
+}
+
+/**
+ * True for failures that say something about the route to a live channel
+ * rather than the channel itself. A reset, a timeout or a slip past the live
+ * edge cures itself on the next tune, so it must not mark the entry dead and
+ * teach the Live tab to skip a stream that works.
+ */
+internal fun PlaybackException.isTransientForChannel(): Boolean = when {
+    isHttpAuthorizationFailure() -> true
+    else -> when (errorCode) {
+        PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+        PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+        PlaybackException.ERROR_CODE_TIMEOUT,
+        PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> true
+        else -> false
+    }
+}
+
+/** True when the retry is spent on the licence server rather than the media. */
+internal fun PlaybackException.isLicenceAcquisitionFailure(): Boolean =
+    errorCode == PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED
+
+/**
+ * 401/403/429 from the provider. These are session or rate limits, not proof
+ * the link is dead: the same request succeeds again once the provider releases
+ * the old session, so the caller waits instead of switching sources.
+ */
+internal fun PlaybackException.isHttpAuthorizationFailure(): Boolean =
+    isProviderLimitStatus(httpStatus())
+
+internal fun isProviderLimitStatus(code: Int?): Boolean =
+    code == 401 || code == 403 || code == 429
+
+internal fun PlaybackException.httpStatus(): Int? =
+    cause.httpResponse()?.responseCode
+
+/**
+ * The provider's own Retry-After hint, clamped to a window that keeps the
+ * viewer informed instead of hiding a multi-minute ban behind a spinner.
+ * Accepts delay-seconds and the HTTP-date form.
+ */
+internal fun PlaybackException.providerRetryAfterMs(
+    nowMs: Long = System.currentTimeMillis()
+): Long? = retryAfterMs(cause.httpResponse()?.headerFields, nowMs)
+
+internal fun retryAfterMs(headers: Map<String, List<String>>?, nowMs: Long): Long? {
+    val raw = headers
+        ?.entries?.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }
+        ?.value?.firstOrNull()?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: return null
+    val waitMs = raw.toLongOrNull()?.times(1_000L) ?: runCatching {
+        SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
+            .apply { timeZone = TimeZone.getTimeZone("GMT") }
+            .parse(raw)!!.time - nowMs
+    }.getOrNull() ?: return null
+    return waitMs.coerceIn(5_000L, 180_000L)
+}
+
+private fun Throwable?.httpResponse(): HttpDataSource.InvalidResponseCodeException? =
+    chain().filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()
 
 private fun Throwable.networkFailureOrNull(): PlaybackFailure? = when (this) {
     is UnknownHostException -> PlaybackFailure(

@@ -29,6 +29,15 @@ internal const val VOD_STALL_RETRY_LIMIT = 2
 // because there is no playhead to lose when a channel is re-tuned.
 internal const val LIVE_ERROR_RETRY_LIMIT = 3
 internal const val VOD_ERROR_RETRY_LIMIT = 2
+// A playhead that slid out of the live window is re-prepared straight back to
+// the edge. It is not charged to the reconnect budget above, because on a
+// short window it can happen several times before a genuinely dead edge does.
+internal const val LIVE_EDGE_RECOVERY_LIMIT = 6
+// Provider session/rate limits clear on the provider's clock, not ours. A
+// channel waits longer because zapping back is free; a film stops after two
+// waits so a genuinely expired link still reaches the panel (and failover).
+internal const val LIVE_PROVIDER_RETRY_LIMIT = 4
+internal const val VOD_PROVIDER_RETRY_LIMIT = 2
 
 /**
  * The slice of [Player] the watchdogs observe. Keeping it this narrow lets
@@ -169,6 +178,18 @@ internal fun errorRetryLimit(isLive: Boolean): Int =
 
 internal fun stallRetryLimit(isLive: Boolean): Int =
     if (isLive) LIVE_STALL_RETRY_LIMIT else VOD_STALL_RETRY_LIMIT
+
+internal fun providerRetryLimit(isLive: Boolean): Int =
+    if (isLive) LIVE_PROVIDER_RETRY_LIMIT else VOD_PROVIDER_RETRY_LIMIT
+
+// Flussonic remembers a denied token for two minutes, so each retry stays well
+// clear of that window; retrying every few seconds only keeps the ban fresh.
+internal fun providerRetryDelayMs(attempt: Int): Long = when (attempt) {
+    1 -> 20_000L
+    2 -> 45_000L
+    3 -> 90_000L
+    else -> 120_000L
+}
 
 // A stalled player is stopped first, so its retry only has to serialize a new
 // request; transient errors keep a short backoff to let the provider recover.

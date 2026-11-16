@@ -5,12 +5,16 @@ import androidx.annotation.VisibleForTesting
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
+import okhttp3.Response
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.BufferedReader
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.SequenceInputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
@@ -44,15 +48,27 @@ object NativeStreamProxy {
     // the rewritten document gets a separate, slightly higher ceiling.
     private const val MAX_REWRITTEN_PLAYLIST_BYTES = 6 * 1024 * 1024
     private const val MAX_STREAMS = 96
-    private const val MAX_WORKERS = 6
-    private const val KEEP_ALIVE_SECONDS = 30
+    // Kept-alive sockets sit idle in a worker until KEEP_ALIVE_SECONDS, so the
+    // pool needs headroom for the player's pooled connections plus in-flight
+    // loads; six was sized for one-request-per-socket.
+    private const val MAX_WORKERS = 12
+    private const val KEEP_ALIVE_SECONDS = 10
     private const val UPSTREAM_FAILURE_LIMIT = 3
+    private const val PLAYLIST_PREFIX_BYTES = 10
+    // Playlists are a few KB and live channels re-fetch them about once a
+    // second, so a stall there must not inherit the segment read budget.
+    private const val PLAYLIST_TIMEOUT_SECONDS = 10L
+    private const val PLAYLIST_ATTEMPTS = 2
 
     private class Upstream(
         val url: String,
         val userAgent: String,
         val headers: Map<String, String>
-    )
+    ) {
+        // Set once the provider accepts the browser profile, so later segments
+        // skip the deny round-trip.
+        @Volatile var browserMasked = false
+    }
 
     /** A registered stream: the loopback URL to hand Media3 and its id. */
     data class ProxyHandle(val url: String, val streamId: String)
@@ -142,6 +158,14 @@ object NativeStreamProxy {
         synchronized(lock) { upstreamFailures.remove(id) }
     }
 
+    /**
+     * True once this stream only answered under the browser profile, meaning a
+     * request with the configured agent is refused. The player uses this to
+     * skip its direct-URL fallback, which would present the same denied agent.
+     */
+    fun requiresBrowserMask(id: String): Boolean =
+        synchronized(lock) { streams[id]?.browserMasked == true }
+
     @VisibleForTesting
     internal fun noteUpstreamFailure(id: String) {
         val tripped = synchronized(lock) {
@@ -175,6 +199,16 @@ object NativeStreamProxy {
      */
     private val upstreamClient = Http.streamingClient.newBuilder()
         .readTimeout(20, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * Playlist-shaped requests get their own client: one slow manifest refresh
+     * otherwise pins a worker for 20 s, turns into a 502 that Media3 backs off
+     * on for up to 8 s, and lands squarely in the playlist-stuck detector. A
+     * playlist is a few KB, so 10 s is already conclusive.
+     */
+    private val playlistClient = Http.streamingClient.newBuilder()
+        .readTimeout(PLAYLIST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
     /**
@@ -247,37 +281,65 @@ object NativeStreamProxy {
         val headers: Map<String, String>
     )
 
+    /**
+     * A write to the player's own socket failed. Aborted segment loads are
+     * routine — a seek, a re-tune or a live-edge relocation closes the
+     * connection mid-body — and they say nothing about the provider.
+     */
+    private class LocalConnectionFailure(cause: IOException) : IOException(cause)
+
+    private fun writeLocal(output: OutputStream, body: ByteArray, count: Int = body.size) {
+        try {
+            output.write(body, 0, count)
+        } catch (error: IOException) {
+            throw LocalConnectionFailure(error)
+        }
+    }
+
     private fun serve(socket: Socket) {
         socket.soTimeout = KEEP_ALIVE_SECONDS * 1000
         val input = BufferedInputStream(socket.getInputStream())
+        // One reader per socket: a fresh BufferedReader would read ahead into
+        // the request that follows on a kept-alive connection and swallow it.
+        val reader = input.bufferedReader(Charsets.ISO_8859_1)
         val output = BufferedOutputStream(socket.getOutputStream())
-        val request = runCatching { readRequest(input) }.getOrNull()
-        if (request == null) {
-            // Native engines drop a connection without answering when their
-            // request is malformed; naming that here beats a silent retry loop.
-            Log.w(TAG, "Unreadable request from ${socket.remoteSocketAddress}")
-            return
+        var first = true
+        while (true) {
+            val request = runCatching { readRequest(reader) }.getOrNull()
+            if (request == null) {
+                // An idle kept-alive socket closes here once its timeout
+                // expires; only a first request that never arrives is a fault.
+                if (first) {
+                    // Native engines drop a connection without answering when
+                    // their request is malformed; naming that here beats a
+                    // silent retry loop.
+                    Log.w(TAG, "Unreadable request from ${socket.remoteSocketAddress}")
+                }
+                return
+            }
+            first = false
+            if (!handle(output, request)) return
         }
+    }
+
+    /** Serves [request]; returns true when the socket may carry another one. */
+    private fun handle(output: OutputStream, request: LocalRequest): Boolean {
         if (!isLoopbackHost(request.headers["host"], port)) {
             // A page that rebinds its own domain to 127.0.0.1 still sends that
             // domain in Host; only loopback names for our own port get served.
             Log.w(TAG, "Rejected Host ${request.headers["host"] ?: "(none)"}")
-            writeText(output, 403, "Forbidden host")
-            return
+            return writeText(output, 403, "Forbidden host")
         }
         if (request.method == "OPTIONS") {
-            writeResponse(output, 204, emptyMap(), ByteArray(0))
-            return
+            return writeResponse(output, 204, emptyMap(), ByteArray(0), keepAlive = true)
         }
         if (request.method != "GET" && request.method != "HEAD") {
-            writeText(output, 405, "Only GET and HEAD are proxied")
-            return
+            return writeText(output, 405, "Only GET and HEAD are proxied")
         }
         val path = request.target.substringBefore('?')
         val prefix = "/$token/"
         if (!path.startsWith(prefix)) {
-            writeText(output, 404, "Not found")
-            return
+            return writeText(output, 404, "Not found")
         }
         val rest = path.removePrefix(prefix)
         val id: String
@@ -290,12 +352,18 @@ object NativeStreamProxy {
             rest.startsWith("s/") -> {
                 id = rest.removePrefix("s/").substringBefore('/')
                 val encoded = queryValue(request.target, "u")
-                target = encoded?.let { String(decodeBase64Url(it) ?: return writeText(output, 400, "Bad target")) }
+                if (encoded != null) {
+                    val decoded = decodeBase64Url(encoded)
+                        ?: return writeText(output, 400, "Bad target")
+                    target = String(decoded)
+                } else {
+                    target = null
+                }
             }
             else -> return writeText(output, 404, "Not found")
         }
         val upstream = target ?: return writeText(output, 404, "Unknown stream")
-        forward(output, request, id, upstream)
+        return forward(output, request, id, upstream)
     }
 
     /**
@@ -318,100 +386,249 @@ object NativeStreamProxy {
 
     private fun streamUrl(id: String): String? = synchronized(lock) { streams[id]?.url }
 
-    private fun forward(output: OutputStream, request: LocalRequest, id: String, target: String) {
-        val entry = synchronized(lock) { streams[id] } ?: return writeText(output, 404, "Unknown stream")
-        val headers = LinkedHashMap<String, String>()
+    /**
+     * Playlist-shaped means the path names the HLS manifest. Those requests
+     * use the tighter read timeout and retry as a whole, body included, because
+     * their body is buffered before the player sees a byte. Extensionless
+     * manifests keep the segment path — they are still typed from the payload,
+     * but a reset there cannot be retried safely.
+     */
+    @VisibleForTesting
+    internal fun isPlaylistTarget(url: String): Boolean {
+        val path = url.substringBefore('?').substringBefore('#').lowercase(Locale.US)
+        return path.endsWith(".m3u8") || path.endsWith(".m3u")
+    }
+
+    private fun forward(output: OutputStream, request: LocalRequest, id: String, target: String): Boolean {
+        val entry = synchronized(lock) { streams[id] }
+            ?: return writeText(output, 404, "Unknown stream")
         // Source headers win; otherwise keep the UA the player was registered with,
         // not a browser UA — providers bind tokens and session limits to theirs.
-        headers["User-Agent"] = entry.headers.entries
+        val explicit = LinkedHashMap<String, String>()
+        explicit["User-Agent"] = entry.headers.entries
             .firstOrNull { it.key.equals("User-Agent", true) }?.value
             ?: entry.userAgent
         entry.headers.forEach { (key, value) ->
-            if (!key.equals("User-Agent", true)) headers[key] = value
+            if (!key.equals("User-Agent", true)) explicit[key] = value
         }
-        if (headers.keys.none { it.equals("Accept", true) }) headers["Accept"] = "*/*"
-        request.headers["range"]?.let { headers["Range"] = it }
-        request.headers["if-range"]?.let { headers["If-Range"] = it }
+        // Browser defaults fill the gaps (Accept, Accept-Language). ByteDance-
+        // backed CDNs deny anything that does not look like a page request.
+        val targetUrl = target.toHttpUrlOrNull() ?: return writeText(output, 400, "Bad target URL")
 
-        val builder = try {
-            Request.Builder().url(target)
-        } catch (_: IllegalArgumentException) {
-            return writeText(output, 400, "Bad target URL")
-        }
-        headers.forEach { (key, value) -> runCatching { builder.header(key, value) } }
-        if (request.method == "HEAD") builder.head() else builder.get()
-
-        val call = upstreamClient.newCall(builder.build())
-        try {
-            call.execute().use { response ->
-                // Any answer proves the upstream is reachable, even a deny.
-                noteUpstreamSuccess(id)
-                if (response.code !in 200..299) {
-                    // Token/session limits surface here long before Media3 sees
-                    // the status, so name the provider's own deny reason.
-                    val deny = response.header("X-Deny-Reason").orEmpty()
-                    val path = response.request.url.encodedPath
-                    Log.w(TAG, "Upstream ${response.code} ${deny.ifBlank { "-" }} $path")
-                }
-                val body = response.body
-                if (body == null) {
-                    writeResponse(output, response.code, responseHeaders(response), ByteArray(0))
-                    return
-                }
-                val contentType = response.header("Content-Type").orEmpty()
-                val targetPath = response.request.url.encodedPath.lowercase(Locale.US)
-                val playlist = contentType.contains("mpegurl", true) ||
-                    (targetPath.endsWith(".m3u8") && !contentType.contains("html", true))
-
-                if (playlist) {
-                    val out = rewritePlaylistStreaming(
-                        body.byteStream(),
-                        response.request.url,
-                        MAX_PLAYLIST_BYTES,
-                        MAX_REWRITTEN_PLAYLIST_BYTES
-                    ) { absolute -> proxyUrl(id, absolute) }
-                    val type = contentTypeFor(response.request.url.toString(), contentType)
-                    // A playlist is rewritten as a whole document, so it always
-                    // answers 200. libVLC probes with "Range: bytes=0-" and
-                    // rejects a 206 that carries no Content-Range.
-                    writeResponse(
-                        output,
-                        200,
-                        mapOf(
-                            "Content-Type" to type,
-                            "Cache-Control" to "no-cache, no-store"
-                        ),
-                        out
-                    )
-                } else {
-                    val outHeaders = responseHeaders(response)
-                    val head = buildString {
-                        append("HTTP/1.1 ${response.code} ${reason(response.code)}\r\n")
-                        outHeaders.forEach { (key, value) -> append("$key: $value\r\n") }
-                        append("Access-Control-Allow-Origin: *\r\n")
-                        append("Connection: close\r\n\r\n")
-                    }.toByteArray(Charsets.US_ASCII)
-                    output.write(head)
-                    if (request.method != "HEAD") {
-                        body.byteStream().use { source ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                val read = source.read(buffer)
-                                if (read < 0) break
-                                output.write(buffer, 0, read)
-                            }
-                        }
-                    }
-                    output.flush()
-                }
-            }
+        return try {
+            fetch(output, request, id, targetUrl, explicit, entry)
+        } catch (error: LocalConnectionFailure) {
+            // The player aborted the load — a seek, a re-tune or a live-edge
+            // relocation closes the connection mid-body all the time. Counting
+            // that as an upstream failure tripped the three-strike listener and
+            // pushed a healthy stream onto the direct URL the CDN already
+            // refused.
+            Log.d(TAG, "Player closed the connection · ${error.cause?.javaClass?.simpleName}")
+            false
         } catch (error: IOException) {
             noteUpstreamFailure(id)
-            val host = target.toHttpUrlOrNull()?.host ?: "upstream"
-            Log.w(TAG, "Upstream $host failed: ${error.javaClass.simpleName}")
+            val host = targetUrl.host
+            Log.w(TAG, "Upstream $host${targetUrl.encodedPath} failed: ${error.javaClass.simpleName}: ${error.message}")
             runCatching { writeText(output, 502, "Upstream unavailable") }
+            false
         } finally {
             runCatching { output.flush() }
+        }
+    }
+
+    /**
+     * Retries a playlist that fails before a single byte reached the player.
+     * Live playlists reload roughly once a second and weigh a few KB, so a
+     * one-off CDN reset becomes invisible on the second attempt instead of a
+     * 502 that Media3 backs off on and the stuck detector counts. Segments and
+     * keys retry at the connection stage instead (see [forwardOnce]), because
+     * once their head is on the wire a reset has to surface.
+     */
+    private fun fetch(
+        output: OutputStream,
+        request: LocalRequest,
+        id: String,
+        targetUrl: HttpUrl,
+        explicit: Map<String, String>,
+        entry: Upstream
+    ): Boolean {
+        val retryable = isPlaylistTarget(targetUrl.toString())
+        var attempts = 0
+        var responded = false
+        while (true) {
+            attempts += 1
+            try {
+                return forwardOnce(output, request, id, targetUrl, explicit, entry) {
+                    responded = true
+                }
+            } catch (error: LocalConnectionFailure) {
+                throw error
+            } catch (error: IOException) {
+                if (!retryable || responded || attempts >= PLAYLIST_ATTEMPTS) throw error
+                Log.i(
+                    TAG,
+                    "Playlist ${error.javaClass.simpleName} before response · " +
+                        "retrying once · ${targetUrl.encodedPath}"
+                )
+            }
+        }
+    }
+
+    private fun forwardOnce(
+        output: OutputStream,
+        request: LocalRequest,
+        id: String,
+        targetUrl: HttpUrl,
+        explicit: Map<String, String>,
+        entry: Upstream,
+        beforePlayerWrite: () -> Unit
+    ): Boolean {
+        val playlistShaped = isPlaylistTarget(targetUrl.toString())
+        val client = if (playlistShaped) playlistClient else upstreamClient
+        val persistent = !request.headers["connection"].orEmpty().contains("close", true)
+
+        fun upstream(mask: Boolean): Response {
+            val source =
+                if (mask) explicit + ("User-Agent" to Http.BROWSER_USER_AGENT) else explicit
+            val headers = LinkedHashMap(BrowserMask.withDefaults(source))
+            request.headers["range"]?.let { headers["Range"] = it }
+            request.headers["if-range"]?.let { headers["If-Range"] = it }
+            val builder = Request.Builder().url(targetUrl)
+            headers.forEach { (key, value) -> runCatching { builder.header(key, value) } }
+            if (request.method == "HEAD") builder.head() else builder.get()
+            fun call(): Response = client.newCall(builder.build()).execute()
+            if (playlistShaped) return call()
+            // Idempotent GET: a reset before the response head reached the
+            // player is invisible when the immediate retry succeeds. Playlists
+            // handle their own retry in [fetch]; a segment body already on the
+            // wire cannot be replayed.
+            return try {
+                call()
+            } catch (error: IOException) {
+                Log.i(
+                    TAG,
+                    "Upstream ${error.javaClass.simpleName} · retrying once · " +
+                        "${targetUrl.encodedPath}"
+                )
+                call()
+            }
+        }
+
+        var masked = entry.browserMasked
+        var response = upstream(masked)
+        if (!masked && response.code in 401..403) {
+            // A CDN that gates on the browser profile denies every player
+            // UA. Retry once as the stock browser and stick to it for this
+            // stream, instead of failing every segment the same way.
+            val path = response.request.url.encodedPath
+            val code = response.code
+            response.close()
+            Log.i(TAG, "Retrying $code as a browser · $path")
+            masked = true
+            response = upstream(true)
+        }
+        if (masked && response.code in 200..299) entry.browserMasked = true
+        response.use { response ->
+            // Any answer proves the upstream is reachable, even a deny.
+            noteUpstreamSuccess(id)
+            if (response.code !in 200..299) {
+                // Token/session limits surface here long before Media3 sees
+                // the status, so name the provider's own deny reason.
+                val deny = response.header("X-Deny-Reason").orEmpty()
+                val path = response.request.url.encodedPath
+                Log.w(TAG, "Upstream ${response.code} ${deny.ifBlank { "-" }} $path")
+            }
+            val body = response.body
+            if (body == null) {
+                beforePlayerWrite()
+                return writeResponse(
+                    output,
+                    response.code,
+                    responseHeaders(response),
+                    ByteArray(0),
+                    keepAlive = persistent
+                )
+            }
+            val contentType = response.header("Content-Type").orEmpty()
+            val targetPath = response.request.url.encodedPath.lowercase(Locale.US)
+            var bodyStream = body.byteStream()
+            val declaredPlaylist = contentType.contains("mpegurl", true) ||
+                (targetPath.endsWith(".m3u8") && !contentType.contains("html", true))
+            // Token endpoints often serve playlists from a path without an
+            // extension and label them octet-stream. Missing that leaves the
+            // URI lines unrewritten, so the player resolves segments against
+            // the loopback proxy and every chunk 404s.
+            val playlist = declaredPlaylist || if (isGenericContentType(contentType)) {
+                val prefix = peek(bodyStream, PLAYLIST_PREFIX_BYTES)
+                bodyStream = SequenceInputStream(ByteArrayInputStream(prefix), bodyStream)
+                isHlsPlaylistPrefix(prefix)
+            } else {
+                false
+            }
+
+            // A denied playlist must surface the provider's own status. The
+            // rewrite below always answers 200, and an empty deny body then
+            // reads to Media3 as a malformed manifest instead of a 403.
+            if (playlist && response.code in 200..299) {
+                val out = rewritePlaylistStreaming(
+                    bodyStream,
+                    response.request.url,
+                    MAX_PLAYLIST_BYTES,
+                    MAX_REWRITTEN_PLAYLIST_BYTES
+                ) { absolute -> proxyUrl(id, absolute) }
+                // A playlist is rewritten as a whole document, so it always
+                // answers 200. libVLC probes with "Range: bytes=0-" and
+                // rejects a 206 that carries no Content-Range.
+                beforePlayerWrite()
+                return writeResponse(
+                    output,
+                    200,
+                    mapOf(
+                        "Content-Type" to "application/vnd.apple.mpegurl",
+                        "Cache-Control" to "no-cache, no-store"
+                    ),
+                    out,
+                    keepAlive = persistent
+                )
+            }
+
+            val outHeaders = responseHeaders(response)
+            // Fixed-length bodies can keep the socket: the player knows where
+            // the document ends. Without a length the only framing is the
+            // close, so those stay one-shot.
+            val length = response.header("Content-Length")?.toLongOrNull()
+            var keepAlive = persistent &&
+                (request.method == "HEAD" || (length != null && length >= 0))
+            beforePlayerWrite()
+            val head = buildString {
+                append("HTTP/1.1 ${response.code} ${reason(response.code)}\r\n")
+                outHeaders.forEach { (key, value) -> append("$key: $value\r\n") }
+                append("Access-Control-Allow-Origin: *\r\n")
+                append("Connection: ${if (keepAlive) "keep-alive" else "close"}\r\n\r\n")
+            }.toByteArray(Charsets.US_ASCII)
+            writeLocal(output, head)
+            if (request.method != "HEAD") {
+                var written = 0L
+                bodyStream.use { source ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        writeLocal(output, buffer, read)
+                        written += read
+                    }
+                }
+                // A short body already went out against the declared length;
+                // reusing the socket would splice the next request into the
+                // fragment, so hand it back to the player to discard.
+                if (length != null && written != length) keepAlive = false
+            }
+            try {
+                output.flush()
+            } catch (error: IOException) {
+                throw LocalConnectionFailure(error)
+            }
+            return keepAlive
         }
     }
 
@@ -458,6 +675,38 @@ object NativeStreamProxy {
             offered.isBlank() || offered in genericTypes -> "application/octet-stream"
             else -> offered
         }
+    }
+
+    private fun isGenericContentType(contentType: String): Boolean {
+        val offered = contentType.substringBefore(';').trim().lowercase(Locale.US)
+        return offered.isBlank() || offered in genericTypes
+    }
+
+    private fun peek(input: InputStream, count: Int): ByteArray {
+        val buffer = ByteArray(count)
+        var read = 0
+        while (read < count) {
+            val chunk = input.read(buffer, read, count - read)
+            if (chunk < 0) break
+            read += chunk
+        }
+        return if (read == count) buffer else buffer.copyOf(read)
+    }
+
+    /** The HLS tag is the only reliable type signal for extensionless playlists. */
+    @VisibleForTesting
+    internal fun isHlsPlaylistPrefix(prefix: ByteArray): Boolean {
+        val start = if (prefix.size >= 3 &&
+            prefix[0] == 0xEF.toByte() &&
+            prefix[1] == 0xBB.toByte() &&
+            prefix[2] == 0xBF.toByte()
+        ) {
+            3
+        } else {
+            0
+        }
+        if (prefix.size < start + 7) return false
+        return String(prefix, start, 7, Charsets.US_ASCII) == "#EXTM3U"
     }
 
     internal fun rewritePlaylist(
@@ -523,8 +772,7 @@ object NativeStreamProxy {
     private fun proxyUrl(id: String, absolute: String): String =
         "http://$HOST:$port/$token/s/$id?u=${encodeBase64Url(absolute.toByteArray(Charsets.UTF_8))}"
 
-    private fun readRequest(input: InputStream): LocalRequest? {
-        val reader = input.bufferedReader(Charsets.ISO_8859_1)
+    private fun readRequest(reader: BufferedReader): LocalRequest? {
         val line = reader.readLine() ?: return null
         if (line.length > 16 * 1024) return null
         val parts = line.split(' ')
@@ -547,9 +795,9 @@ object NativeStreamProxy {
         return LocalRequest(parts[0].uppercase(Locale.US), target, headers)
     }
 
-    private fun writeText(output: OutputStream, code: Int, message: String) {
+    private fun writeText(output: OutputStream, code: Int, message: String): Boolean {
         val body = message.toByteArray(Charsets.UTF_8)
-        writeResponse(
+        return writeResponse(
             output,
             code,
             mapOf(
@@ -560,12 +808,14 @@ object NativeStreamProxy {
         )
     }
 
+    /** Returns true when the connection is framed for another request. */
     private fun writeResponse(
         output: OutputStream,
         code: Int,
         headers: Map<String, String>,
-        body: ByteArray
-    ) {
+        body: ByteArray,
+        keepAlive: Boolean = false
+    ): Boolean {
         val head = buildString {
             append("HTTP/1.1 $code ${reason(code)}\r\n")
             headers.forEach { (key, value) ->
@@ -575,11 +825,18 @@ object NativeStreamProxy {
             }
             append("Content-Length: ${body.size}\r\n")
             append("Access-Control-Allow-Origin: *\r\n")
-            append("Connection: close\r\n\r\n")
+            append("Connection: ${if (keepAlive) "keep-alive" else "close"}\r\n\r\n")
         }.toByteArray(Charsets.US_ASCII)
-        output.write(head)
-        if (body.isNotEmpty()) output.write(body)
-        output.flush()
+        // This writes to the player, never upstream, so a broken pipe here is
+        // an aborted load and must not be attributed to the provider.
+        try {
+            output.write(head)
+            if (body.isNotEmpty()) output.write(body)
+            output.flush()
+        } catch (error: IOException) {
+            throw LocalConnectionFailure(error)
+        }
+        return keepAlive
     }
 
     private fun reason(code: Int): String = when (code) {

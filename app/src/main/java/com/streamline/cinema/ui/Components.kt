@@ -11,6 +11,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
@@ -40,10 +41,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +65,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
@@ -74,6 +78,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -83,6 +89,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -91,7 +99,9 @@ import com.streamline.cinema.data.WatchProgress
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 enum class AppTab(val label: String) {
     HOME("Home"),
@@ -838,6 +848,7 @@ fun ContinueCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onRemove: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
     focusSurface: String? = null
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -848,6 +859,13 @@ fun ContinueCard(
     val style = LocalPosterStyle.current
     val cardShape = RoundedCornerShape(CinemaDimens.CardRadius)
     val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "continueScale")
+    val scope = rememberCoroutineScope()
+    var holdJob by remember { mutableStateOf<Job?>(null) }
+    var holding by remember { mutableStateOf(false) }
+    // Held remotes repeat KeyDown; the repeats that arrive after the menu opens
+    // must not re-arm the timer or the release would also start playback.
+    var consumed by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { holdJob?.cancel() } }
     val spoken = buildString {
         append(item.title)
         if (progress.season != null && progress.episode != null) {
@@ -876,14 +894,70 @@ fun ContinueCard(
                 if (it.isFocused && focusSurface != null) {
                     focusMemory.record(focusSurface, item.key)
                 }
+                if (!it.isFocused) {
+                    holdJob?.cancel()
+                    holdJob = null
+                    holding = false
+                    consumed = false
+                }
+            }
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.key != Key.DirectionCenter && event.key != Key.Enter) return@onKeyEvent false
+                when (event.type) {
+                    KeyEventType.KeyDown -> {
+                        if (onLongPress != null && !consumed && !holding) {
+                            holding = true
+                            holdJob = scope.launch {
+                                delay(LONG_PRESS_MS)
+                                holding = false
+                                consumed = true
+                                sounds.select()
+                                onLongPress.invoke()
+                            }
+                        }
+                        true
+                    }
+                    KeyEventType.KeyUp -> {
+                        holdJob?.cancel()
+                        holdJob = null
+                        if (consumed) {
+                            consumed = false
+                        } else if (holding) {
+                            holding = false
+                            sounds.select()
+                            onClick()
+                        } else if (onLongPress == null) {
+                            sounds.select()
+                            onClick()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .pointerInput(onLongPress) {
+                detectTapGestures(
+                    onTap = {
+                        sounds.select()
+                        onClick()
+                    },
+                    onLongPress = onLongPress?.let { { sounds.select(); it() } }
+                )
             }
             .semantics {
                 role = Role.Button
                 contentDescription = spoken
-            }
-            .clickable {
-                sounds.select()
-                onClick()
+                onClick(label = "Play") {
+                    onClick()
+                    true
+                }
+                if (onLongPress != null) {
+                    onLongClick(label = "Episode options") {
+                        onLongPress()
+                        true
+                    }
+                }
             }
     ) {
         Box(
@@ -999,6 +1073,114 @@ fun ContinueCard(
                     )
                 }
             }
+        }
+    }
+}
+
+private const val LONG_PRESS_MS = 600L
+
+/**
+ * Long-press actions for a series episode. Used by the Detail episode list and
+ * the Continue Watching rail so both surfaces offer the same four options.
+ */
+@Composable
+fun EpisodeActionsDialog(
+    kicker: String,
+    title: String,
+    watched: Boolean,
+    canRemoveFromContinue: Boolean,
+    onMarkWatched: () -> Unit,
+    onMarkWatchedUntilHere: () -> Unit,
+    onRemoveFromContinue: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        val firstAction = remember { FocusRequester() }
+        // The hold that opened this sheet began outside it. Swallow the centre
+        // key's release (and its auto-repeats) so the menu's first action does
+        // not fire the moment the key comes up.
+        var pressedInside by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            delay(90)
+            runCatching { firstAction.requestFocus() }
+        }
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .onPreviewKeyEvent { event ->
+                    if (event.key != Key.DirectionCenter && event.key != Key.Enter) {
+                        return@onPreviewKeyEvent false
+                    }
+                    when (event.type) {
+                        KeyEventType.KeyDown -> {
+                            if (event.nativeKeyEvent.repeatCount == 0) pressedInside = true
+                            false
+                        }
+                        KeyEventType.KeyUp -> {
+                            if (pressedInside) {
+                                pressedInside = false
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        else -> false
+                    }
+                }
+                .glassSurface(
+                    shape = RoundedCornerShape(CinemaDimens.CardRadius),
+                    base = Glass.Sheet
+                )
+                .padding(24.dp)
+        ) {
+            Text(
+                kicker,
+                color = Cinema.Gold,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.6.sp
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                title,
+                color = Cinema.TextPrimary,
+                style = CinemaType.SectionTitle,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(18.dp))
+            TvButton(
+                label = if (watched) "MARK AS UNWATCHED" else "MARK AS WATCHED",
+                glyph = if (watched) "✕" else "✓",
+                modifier = Modifier.fillMaxWidth(),
+                focusRequester = firstAction,
+                onClick = onMarkWatched
+            )
+            Spacer(Modifier.height(10.dp))
+            TvButton(
+                label = "MARK AS WATCHED UNTIL HERE",
+                glyph = "⏮",
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onMarkWatchedUntilHere
+            )
+            Spacer(Modifier.height(10.dp))
+            TvButton(
+                label = "REMOVE FROM CONTINUE WATCHING",
+                glyph = "✕",
+                modifier = Modifier.fillMaxWidth(),
+                enabled = canRemoveFromContinue,
+                onClick = onRemoveFromContinue
+            )
+            Spacer(Modifier.height(10.dp))
+            TvButton(
+                label = "CANCEL",
+                style = TvButtonStyle.GHOST,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onDismiss
+            )
         }
     }
 }

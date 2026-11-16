@@ -115,7 +115,7 @@ internal class MpvEnginePlayer(
         mpv.setOptionString("demuxer-lavf-probesize", "131072")
         mpv.setOptionString("demuxer-lavf-analyzeduration", "2")
         mpv.setOptionString("network-timeout", "15")
-        mpv.setOptionString("user-agent", userAgent)
+        mpv.setOptionString("user-agent", effectiveUserAgent(headers, userAgent))
         headerFields(userAgent, headers)?.let { mpv.setOptionString("http-header-fields", it) }
         mpv.setOptionString("ytdl", "no")
         mpv.addObserver(observer)
@@ -127,13 +127,17 @@ internal class MpvEnginePlayer(
 
     private fun headerFields(userAgent: String, headers: Map<String, String>): String? {
         val fields = buildList {
-            add("User-Agent: $userAgent")
+            add("User-Agent: ${effectiveUserAgent(headers, userAgent)}")
             headers.forEach { (key, value) ->
                 if (!key.equals("User-Agent", true)) add("$key: $value")
             }
         }
         return fields.joinToString(",").takeIf { it.isNotBlank() }
     }
+
+    /** An addon pipe UA wins over the app-wide UA, as in the Media3 data source. */
+    private fun effectiveUserAgent(headers: Map<String, String>, fallback: String): String =
+        headers.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value ?: fallback
 
     private fun eofReached(): Boolean =
         runCatching { mpv.getPropertyBoolean("eof-reached") }.getOrNull() == true

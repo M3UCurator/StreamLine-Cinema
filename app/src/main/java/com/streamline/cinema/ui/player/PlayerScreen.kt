@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -80,6 +81,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -113,6 +116,7 @@ import androidx.media3.exoplayer.analytics.PlaybackStats
 import androidx.media3.exoplayer.analytics.PlaybackStatsListener
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -120,8 +124,9 @@ import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import com.streamline.cinema.StreamLineApp
 import com.streamline.cinema.data.AddonSubtitle
-import com.streamline.cinema.data.AppSettings
 import com.streamline.cinema.data.BandwidthCap
+import com.streamline.cinema.data.BrowserMask
+import com.streamline.cinema.data.BufferTier
 import com.streamline.cinema.data.CatalogItem
 import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.DecoderType
@@ -155,6 +160,7 @@ import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.Glass
+import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.glassSurface
@@ -187,15 +193,18 @@ private enum class OsdPanel { AUDIO, SUBTITLES, OVERFLOW, TOOLS, TOGGLES, SPEED,
 
 private enum class OsdFocus { PLAY, TIMELINE, SKIP, BACK }
 
-private const val STREAM_RETRY_COUNT = 4
-// Hard RAM ceilings for the low-RAM load control. Media3 counts allocations in
-// its byte budget, so these stop a 4K rendition from filling the same number of
-// seconds with 4x the bytes.
-private const val LOW_RAM_ADAPTIVE_BUFFER_BYTES = 16 * 1024 * 1024
-private const val LOW_RAM_PROGRESSIVE_BUFFER_BYTES = 24 * 1024 * 1024
-// A low-RAM box rarely drives a 4K panel, and decoding one there drops frames
-// anyway; 1080p is the ceiling unless the user asks for less.
-private const val LOW_RAM_MAX_VIDEO_HEIGHT = 1080
+// Live edge policy for HLS. Media3's default target offset is three target
+// durations clamped to the window, which on a six-second window (2 s segments)
+// pins the playhead to the oldest edge with no slack. Three seconds puts it in
+// the middle of such a window, and the speed range lets the player walk back to
+// the target after a hitch instead of falling out of the window.
+private val LIVE_ITEM_CONFIGURATION = MediaItem.LiveConfiguration.Builder()
+    .setTargetOffsetMs(3_000)
+    .setMinOffsetMs(2_000)
+    .setMaxOffsetMs(6_000)
+    .setMinPlaybackSpeed(0.97f)
+    .setMaxPlaybackSpeed(1.03f)
+    .build()
 // Dropped-frame fallback: when the decoder cannot keep up with the selected
 // rendition, cap the video height instead of letting the picture stutter.
 private const val DROPPED_FRAME_WINDOW_MS = 15_000L
@@ -222,12 +231,24 @@ private const val SCRUB_PREVIEW_INTERVAL_MS = 250L
 private const val PROXY_RESTORE_MS = 60_000L
 // A live stream that has played this long clears a dead-channel mark.
 private const val CHANNEL_HEALTH_SUCCESS_MS = 20_000L
+// A D-pad sweep through the buffer rows saves several values back-to-back;
+// rebuilding Media3 per step would re-initialise the codec each time.
+private const val BUFFER_SETTLE_MS = 400L
+
+// The three settings the load control is built from. They reach the player
+// only once the selection has settled, so one pick costs one rebuild.
+private data class BufferSelection(
+    val tier: BufferTier,
+    val lowLatency: Boolean,
+    val highCapacity: Boolean
+)
 
 private data class TrackChoice(
     val group: TrackGroup,
     val index: Int,
     val label: String,
-    val selected: Boolean
+    val selected: Boolean,
+    val language: String = ""
 )
 
 private val hardwareFirstSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -330,11 +351,27 @@ fun PlayerScreen(
         mutableIntStateOf(if (isLive && directUrl != null) liveIndex else -1)
     }
     var channelResolving by remember { mutableStateOf(false) }
-    val baseOptions: List<PlaybackOption> = remember(plan, directUrl, directHeaders, channelOption, isLive) {
+    val baseOptions: List<PlaybackOption> = remember(
+        plan,
+        directUrl,
+        directHeaders,
+        directDrm,
+        directMeta,
+        channelOption,
+        isLive
+    ) {
         when {
             isLive -> listOfNotNull(channelOption)
             directUrl != null ->
-                listOf(PlaybackOption(name = "Direct stream", url = directUrl, headers = directHeaders))
+                listOf(
+                    PlaybackOption(
+                        name = "Direct stream",
+                        url = directUrl,
+                        headers = directHeaders,
+                        drm = directDrm,
+                        meta = directMeta
+                    )
+                )
             else -> plan?.options.orEmpty()
         }
     }
@@ -499,10 +536,12 @@ fun PlayerScreen(
         mutableStateOf<List<AddonSubtitle>>(emptyList())
     }
 
-    LaunchedEffect(item?.key, activeSeason, activeEpisode, addonsEnabled) {
+    LaunchedEffect(item?.key, activeSeason, activeEpisode) {
         val target = item
         val repo = repository
-        if (directUrl != null || target == null || repo == null || !addonsEnabled) {
+        // The built-in subtitle addon serves a fresh install too, so this no
+        // longer depends on the viewer having added one.
+        if (directUrl != null || target == null || repo == null) {
             addonSubtitles = emptyList()
             return@LaunchedEffect
         }
@@ -548,6 +587,9 @@ fun PlayerScreen(
     val qualityLabel = if (liveQualityChoices.isNotEmpty()) qualityCapLabel ?: "AUTO" else currentQuality
     val qualityVisible = qualityChoices.size >= 2 || liveQualityChoices.isNotEmpty()
     var onlineSubtitlesOn by remember(current?.url, item?.key) { mutableStateOf(false) }
+    // Which addon track the reload should mark as default; null means the
+    // first English entry of the fetched list.
+    var preferredAddonSubtitle by remember(current?.url, item?.key) { mutableStateOf<String?>(null) }
 
     val title = when {
         isLive -> channels.getOrNull(liveIndex)?.name ?: fallbackTitle
@@ -617,15 +659,15 @@ fun PlayerScreen(
     }
     var languageAppliedFor by remember(item?.key, directUrl) { mutableStateOf<String?>(null) }
 
+    fun dismissNextUp() {
+        nextUpCancelled = true
+        nextUpSlot = null
+        nextUpDueAtMs = null
+    }
+
     BackHandler {
         when {
             locked -> osdVisible = true
-            nextUpSlot != null -> {
-                nextUpCancelled = true
-                nextUpSlot = null
-                nextUpDueAtMs = null
-                osdVisible = true
-            }
             panel != null -> panel = null
             showPicker -> {
                 showPicker = false
@@ -634,6 +676,9 @@ fun PlayerScreen(
                 awaitingPick = false
             }
             osdVisible -> hideOsd()
+            // The pill is hidden while the OSD is up, so BACK only reaches it
+            // from the clean video surface.
+            nextUpSlot != null -> dismissNextUp()
             else -> onExit()
         }
     }
@@ -689,37 +734,56 @@ fun PlayerScreen(
     // A native engine that decodes audio but never creates a video output
     // leaves a black screen; the source is then rebuilt on the built-in player.
     var nativeFallback by remember(playbackUrl) { mutableStateOf(false) }
+    val lowRamDevice = remember { DeviceProfile.isLowRam(context) }
+    // Buffer settings are rebuild-class: the load control and the native
+    // engine caches are fixed at construction. They enter the build only after
+    // the selection has settled, so sweeping the tier row rebuilds once.
+    val bufferSelection = BufferSelection(
+        tier = settings.bufferTier,
+        lowLatency = settings.lowLatency,
+        highCapacity = settings.highCapacityBuffer
+    )
+    var settledBuffer by remember { mutableStateOf(bufferSelection) }
+    LaunchedEffect(bufferSelection) {
+        if (bufferSelection == settledBuffer) return@LaunchedEffect
+        delay(BUFFER_SETTLE_MS)
+        settledBuffer = bufferSelection
+    }
+    val profileAdaptive = remember(playbackUrl, playbackKind) {
+        isAdaptiveUrl(playbackUrl, playbackKind)
+    }
+    // One resolution for the build, the live re-apply paths and the panels.
+    // Buffer fields come from the settled selection, so the player key only
+    // moves once a sweep has finished; everything else is already live.
+    val profile = playbackProfile(
+        settings = settings,
+        decoder = decoderMode,
+        adaptive = profileAdaptive,
+        lowRam = lowRamDevice,
+        tier = settledBuffer.tier,
+        lowLatency = settledBuffer.lowLatency,
+        highCapacityVod = settledBuffer.highCapacity,
+        headers = playbackHeaders,
+        forceBuiltIn = nativeFallback
+    )
     // Reloads (retry timer, proxy bypass, RELOAD button) re-prepare the same
     // player instance instead of building a new one: tearing down Media3 or a
     // native engine costs a codec re-init and drops every buffered segment,
     // which turns a transient network blip into a multi-second black screen.
-    val playerOrNull: Player? = remember(
+    val builtPlayer: BuiltPlayer? = remember(
         nativeRequired,
         playbackUrl,
-        decoderMode,
         isLive,
-        settings.playbackEngine,
-        settings.forceStereoDownmix,
-        settings.normalizeVolume,
-        settings.amlogicFix,
-        settings.playerUserAgent,
-        settings.userAgentString,
-        playbackHeaders,
+        profile.rebuildKey,
         playbackDrm,
-        playbackKind,
         nativeFallback
     ) {
         if (nativeRequired) {
             buildPlayer(
                 context = context,
-                settings = settings,
-                decoderMode = decoderMode,
-                adaptive = isAdaptiveUrl(playbackUrl, playbackKind),
+                profile = profile,
                 isLive = isLive,
-                userAgent = settings.userAgentString,
-                headers = playbackHeaders,
                 drm = playbackDrm,
-                forceBuiltIn = nativeFallback,
                 subtitlesDisabled = dropSubtitles,
                 subtitleLanguage = preferredSubtitleLanguage(activeProfile)
             )
@@ -727,8 +791,22 @@ fun PlayerScreen(
             null
         }
     }
-    DisposableEffect(playerOrNull) {
-        onDispose { playerOrNull?.release() }
+    val playerOrNull: Player? = builtPlayer?.player
+    // VOD resumes where the replaced player stopped; live re-tunes to the edge.
+    var carryOverPositionMs by remember(playbackUrl) { mutableLongStateOf(0L) }
+    DisposableEffect(playerOrNull, isLive) {
+        onDispose {
+            val leaving = playerOrNull
+            if (leaving != null && !isLive) {
+                carryOverPositionMs = leaving.currentPosition.coerceAtLeast(0L)
+            }
+            leaving?.release()
+        }
+    }
+    // UA and headers are live-class for Media3: the factory hands every new
+    // data source the current properties, so no codec re-init is needed.
+    LaunchedEffect(builtPlayer, profile.userAgent, profile.headers) {
+        builtPlayer?.liveHeaders?.update(profile.userAgent, profile.headers)
     }
     // The preferred display mode is owned by the player window; hand the
     // launcher back its original rate instead of leaving it at 24 Hz.
@@ -761,7 +839,6 @@ fun PlayerScreen(
         }
     }
 
-    val lowRamDevice = remember { DeviceProfile.isLowRam(context) }
     // Set when the decoder cannot keep up with the selected rendition; the
     // video ceiling then drops to 720p for the rest of this source.
     var droppedFrameCapHeight by remember(playbackUrl) { mutableIntStateOf(0) }
@@ -824,6 +901,10 @@ fun PlayerScreen(
 
     var nativeError by remember { mutableStateOf<PlaybackFailure?>(null) }
     var reconnectAttempt by remember { mutableIntStateOf(0) }
+    // Slips past the live edge are re-prepared straight to the edge; they are
+    // counted apart from reconnectAttempt so a hiccup never spends the budget a
+    // real reconnect needs.
+    var liveEdgeRecoveries by remember(playbackUrl) { mutableIntStateOf(0) }
     var reconnectNotice by remember { mutableStateOf<String?>(null) }
     var retryPlanMs by remember { mutableStateOf<Long?>(null) }
     // Repeated transport failures at the proxy mean the upstream is gone; the
@@ -900,6 +981,9 @@ fun PlayerScreen(
         if (nativeError != null || proxyBypassed) return
         val target = playerOrNull ?: return
         if (!target.canBypassProxy()) return
+        // A provider that refused the configured agent refuses the direct
+        // request too, so the proxy is the only path that can play this one.
+        if (proxyStreamId?.let { NativeStreamProxy.requiresBrowserMask(it) } == true) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastRecoveryAt < RECOVERY_COOLDOWN_MS) return
         lastRecoveryAt = now
@@ -1023,11 +1107,15 @@ fun PlayerScreen(
     var durationMs by remember { mutableStateOf(0L) }
 
     // Credits start minutes before the file ends, so that marker — not EOF —
-    // is when the next episode becomes relevant. The hand-off itself waits for
-    // the playhead to reach the end, letting an untouched offer roll over only
-    // as the credits finish.
-    val creditsStartMs = remember(skipSegments, durationMs, isLive) {
-        if (isLive) null else skipSegments?.creditsStart(durationMs)
+    // is when the next episode becomes relevant. A database entry without a
+    // credits marker falls back to the same last-minute window a viewer
+    // expects from a standard episode, so the offer still appears on time.
+    val creditsStartMs = remember(skipSegments, segmentsResolved, durationMs, isLive) {
+        when {
+            isLive -> null
+            else -> skipSegments?.creditsStart(durationMs)
+                ?: if (segmentsResolved) fallbackCreditsStartMs(durationMs) else null
+        }
     }
     LaunchedEffect(
         creditsStartMs, positionMs, durationMs, nextSlot, nextUpSlot, nextUpCancelled, isLive
@@ -1038,6 +1126,9 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         val dueAt = durationMs - CREDITS_END_MARGIN_S * 1_000L
+        // Seeking into the final seconds should not switch episodes on its own;
+        // the offer only arms while there is still something to hand off to.
+        if (positionMs >= dueAt) return@LaunchedEffect
         val seconds = ((dueAt - positionMs) / 1_000L).toInt().coerceAtLeast(1)
         nextUpTotal = seconds.coerceAtLeast(NEXT_UP_SECONDS)
         nextUpSeconds = seconds
@@ -1152,17 +1243,41 @@ fun PlayerScreen(
                 // Snapshot the playhead before the failure tears the player down;
                 // the failover source resumes from it.
                 notePlayhead(maxOf(lastKnownPositionMs, target.currentPosition))
-                // Flussonic-style token protection answers 403 when the account's
-                // session limit is hit. Reconnecting straight away (or bypassing
-                // the proxy) only adds sessions and refreshes the provider's
-                // two-minute negative cache, so wait out the ban instead.
-                if (isLive && error.isHttpAuthorizationFailure()) {
+                // A playhead that slid out of the live window is not a fault,
+                // and Media3's documented remedy is a re-prepare: it rejoins at
+                // the edge without spending a provider session, a source slot,
+                // or the channel's health.
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW &&
+                    liveEdgeRecoveries < LIVE_EDGE_RECOVERY_LIMIT
+                ) {
+                    liveEdgeRecoveries += 1
+                    Log.i(
+                        "StreamLine:player",
+                        "live edge · re-preparing at the edge " +
+                            "(attempt $liveEdgeRecoveries/$LIVE_EDGE_RECOVERY_LIMIT)"
+                    )
+                    nativeError = null
+                    failoverNote = null
+                    reconnectNotice = "Catching up to live"
+                    retryPlanMs = null
+                    runCatching { target.prepare() }
+                    return
+                }
+                // Flussonic-style token protection answers 401/403/429 when the
+                // account's session limit is hit. Reconnecting straight away (or
+                // bypassing the proxy) only adds sessions and refreshes the
+                // provider's negative cache, so wait out the ban instead — the
+                // provider's own Retry-After wins over our backoff ladder.
+                if (error.isHttpAuthorizationFailure() &&
+                    reconnectAttempt < providerRetryLimit(isLive)
+                ) {
                     reconnectAttempt += 1
-                    val waitMs = liveReconnectDelayMs(reconnectAttempt)
+                    val waitMs = error.providerRetryAfterMs() ?: providerRetryDelayMs(reconnectAttempt)
+                    if (!isLive) pendingSeekMs = resumePosition().takeIf { it > 5_000 }
                     nativeError = null
                     failoverNote = null
                     reconnectNotice =
-                        "Provider is limiting this stream · reconnecting in ${waitMs / 1000}s"
+                        "Provider is limiting this stream · retrying in ${waitMs / 1000}s"
                     retryPlanMs = waitMs
                     return
                 }
@@ -1174,7 +1289,7 @@ fun PlayerScreen(
                 // with stall recovery, so a source that keeps failing still
                 // reaches the panel and the automatic source switch.
                 if (reconnectAttempt < errorRetryLimit(isLive) &&
-                    error.isTransientTransportFailure()
+                    error.isRetryableInPlace()
                 ) {
                     reconnectAttempt += 1
                     val waitMs = transientReconnectDelayMs(reconnectAttempt, isLive)
@@ -1183,17 +1298,40 @@ fun PlayerScreen(
                     failoverNote = null
                     Log.i(
                         "StreamLine:player",
-                        "transient · ${error.errorCodeName} · re-preparing the same " +
-                            "source in $waitMs ms " +
-                            "(attempt $reconnectAttempt/${errorRetryLimit(isLive)})"
+                        if (error.isLicenceAcquisitionFailure()) {
+                            "licence · re-acquiring in $waitMs ms · DRM retained " +
+                                "(attempt $reconnectAttempt/${errorRetryLimit(isLive)})"
+                        } else {
+                            "transient · ${error.errorCodeName} · re-preparing the same " +
+                                "source in $waitMs ms " +
+                                "(attempt $reconnectAttempt/${errorRetryLimit(isLive)})"
+                        }
                     )
-                    reconnectNotice =
+                    reconnectNotice = if (error.isLicenceAcquisitionFailure()) {
+                        "Licence server busy · retrying in ${waitMs / 1000}s"
+                    } else if (error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT) {
+                        "Stream interrupted · reconnecting in ${waitMs / 1000}s"
+                    } else {
                         "Connection lost · reconnecting in ${waitMs / 1000}s"
+                    }
                     retryPlanMs = waitMs
                     return
                 }
+                // A bypass only helps transport faults. When the provider
+                // denies the direct request outright, the proxy is the side
+                // that can present a browser profile this CDN accepts.
+                if (proxyBypassed && error.isHttpAuthorizationFailure()) {
+                    proxyBypassed = false
+                    nativeError = null
+                    reloadToken++
+                    return
+                }
                 val failure = classifyPlaybackError(error)
-                if (isLive) recordLiveFailure()
+                // Only a failure that survives the retries and says something
+                // about the channel may mark it dead; a reset, a timeout or a
+                // live-edge slip would otherwise make zapping skip a stream
+                // that works on the next tune.
+                if (isLive && !error.isTransientForChannel()) recordLiveFailure()
                 Log.w(
                     "StreamLine:player",
                     "Playback failed (${error.errorCodeName}/${error.errorCode}) · ${failure.kind}"
@@ -1204,7 +1342,19 @@ fun PlayerScreen(
                 // Keep the panel up: a silent reload here only hides the failure
                 // and delays the next verdict by another loader timeout. RELOAD
                 // (or the next tune) then runs without the proxy.
-                if (!proxyBypassed && isHlsUrl(playbackUrl, playbackKind) && target.canBypassProxy()) {
+                // A deny on the direct URL spends another provider session and
+                // keeps the ban fresh, so only transport failures try the bypass.
+                // A behind-window stall is tune latency, not a proxy fault, and
+                // the proxy is often the only thing a UA-gated CDN will answer.
+                val proxyMaskRequired = proxyStreamId
+                    ?.let { NativeStreamProxy.requiresBrowserMask(it) } == true
+                if (!proxyBypassed &&
+                    !proxyMaskRequired &&
+                    !error.isHttpAuthorizationFailure() &&
+                    error.errorCode != PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW &&
+                    isHlsUrl(playbackUrl, playbackKind) &&
+                    target.canBypassProxy()
+                ) {
                     proxyBypassed = true
                 }
             }
@@ -1393,17 +1543,26 @@ fun PlayerScreen(
             val builder = MediaItem.Builder().setUri(sourceUrl)
             val mime = resolvedKind?.media3Mime() ?: adaptiveMimeType(sourceUrl)
             mime?.let { builder.setMimeType(it) }
+            // Live HLS keeps an explicit target offset: Media3's default of
+            // three target durations lands on the oldest edge of a short-window
+            // channel, where the first hitch drops the playhead out of it.
+            if (isLive && mime == MimeTypes.APPLICATION_M3U8) {
+                builder.setLiveConfiguration(LIVE_ITEM_CONFIGURATION)
+            }
             val subtitleConfigs = buildList {
                 val seen = mutableSetOf<String>()
                 media.subtitles.forEach { subtitle ->
                     if (seen.add(subtitle.url)) add(subtitleConfiguration(subtitle))
                 }
                 if (onlineSubtitlesOn) {
-                    val firstEnglish = addonSubtitles.firstOrNull { it.lang.startsWith("en") }
-                        ?: addonSubtitles.firstOrNull()
+                    val english = addonSubtitles
+                        .filter { it.lang.startsWith("en", ignoreCase = true) }
+                        .ifEmpty { addonSubtitles }
+                    val chosen = english.firstOrNull { it.url == preferredAddonSubtitle }
+                        ?: english.firstOrNull()
                     addonSubtitles.forEach { subtitle ->
                         if (seen.add(subtitle.url)) {
-                            add(subtitleConfiguration(subtitle, default = subtitle == firstEnglish))
+                            add(subtitleConfiguration(subtitle, default = subtitle.url == chosen?.url))
                         }
                     }
                 }
@@ -1425,18 +1584,25 @@ fun PlayerScreen(
             val override = startOverrideMs
             if (override != null) startOverrideApplied = true
             startOverrideMs = null
+            // A rebuild-class setting replaced the player; resume VOD where the
+            // old instance stopped instead of restarting the film at zero.
+            val carried = if (!isLive) carryOverPositionMs else 0L
+            carryOverPositionMs = 0L
             val planSeek =
                 if (!startOverrideApplied && optionIndex == 0) plan?.startPositionMs ?: 0L else 0L
-            val seek = pendingSeekMs ?: override ?: planSeek
+            val seek = pendingSeekMs ?: override ?: carried.takeIf { it > 0 } ?: planSeek
             pendingSeekMs = null
             if (seek > 5_000) target.seekTo(seek)
             target.playWhenReady = true
             target.setPlaybackSpeed(speed)
-            if (dropSubtitles) {
-                target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
-                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                    .build()
-            }
+            // The player is built with text tracks disabled. Every reload has to
+            // re-assert the current choice, otherwise a side-loaded subtitle is
+            // attached to the media item but the text renderer never starts, so
+            // the cue file is never fetched.
+            target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, dropSubtitles)
+                .build()
         }.onFailure {
             nativeError = PlaybackFailure(
                 kind = FailureKind.UNKNOWN,
@@ -1564,40 +1730,35 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(playerOrNull, settings.abrEnabled) {
+    LaunchedEffect(playerOrNull, profile.abr) {
         val target = playerOrNull ?: return@LaunchedEffect
         target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
-            .setForceHighestSupportedBitrate(!settings.abrEnabled)
+            .setForceHighestSupportedBitrate(!profile.abr)
             .build()
     }
 
-    // Video ceiling for every source, live and VOD alike: renditions at or
-    // below the chosen height, while ABR may still step further down. The
-    // exclusion setting is a hard ceiling: it hides its tier and everything
-    // above. Low-RAM boxes stop at 1080p, and a decoder that drops frames
-    // pulls this source down to 720p for the rest of playback.
+    // Video ceiling for every source, live and VOD alike: renditions within the
+    // resolved cap (1080p at the top), while ABR may still step further down.
+    // The exclusion setting is a hard ceiling: it hides its tier and everything
+    // above. A decoder that drops frames pulls this source down to 720p for the
+    // rest of playback. Rebuilt on the running player, never by a teardown.
     LaunchedEffect(
         playerOrNull,
         qualityCap,
-        settings.qualityLimit,
-        settings.bandwidthCap,
+        profile.maxResolution,
+        profile.bandwidthCap,
         droppedFrameCapHeight
     ) {
         val target = playerOrNull ?: return@LaunchedEffect
-        val cutoff = settings.qualityLimit.cutoffHeight
+        val cap = profile.maxResolution
         val maxHeight = listOfNotNull(
+            cap.maxHeight.takeIf { it > 0 },
             qualityCap.takeIf { it > 0 },
-            (cutoff - 1).takeIf { cutoff > 0 },
-            droppedFrameCapHeight.takeIf { it > 0 },
-            LOW_RAM_MAX_VIDEO_HEIGHT.takeIf { lowRamDevice }
+            droppedFrameCapHeight.takeIf { it > 0 }
         ).minOrNull() ?: Int.MAX_VALUE
         val builder = target.trackSelectionParameters.buildUpon()
-            .applyBandwidthCap(settings.bandwidthCap)
-        if (maxHeight < Int.MAX_VALUE) {
-            builder.setMaxVideoSize(Int.MAX_VALUE, maxHeight)
-        } else {
-            builder.clearVideoSizeConstraints()
-        }
+            .applyBandwidthCap(profile.bandwidthCap)
+        builder.setMaxVideoSize(cap.maxWidth, maxHeight)
         target.trackSelectionParameters = builder.build()
     }
 
@@ -1709,10 +1870,15 @@ fun PlayerScreen(
 
     // Only a sustained session clears the backoff; a stream that plays for a
     // few seconds and drops again must keep escalating instead of resetting.
+    // The live-edge budget is reset on the same clock: a channel that holds
+    // the edge for 90 s has proven it can stay there.
     LaunchedEffect(isPlaying, optionIndex, reloadToken) {
-        if (!isPlaying || reconnectAttempt == 0) return@LaunchedEffect
+        if (!isPlaying || (reconnectAttempt == 0 && liveEdgeRecoveries == 0)) {
+            return@LaunchedEffect
+        }
         delay(90_000L)
         reconnectAttempt = 0
+        liveEdgeRecoveries = 0
     }
 
     LaunchedEffect(nativeError, options.size, searchInProgress) {
@@ -1999,7 +2165,7 @@ fun PlayerScreen(
             tracks = tracks,
             audioAudit = audioAudit,
             decoder = decoderMode,
-            abr = settings.abrEnabled
+            abr = profile.abr
         )
     }
 
@@ -2062,6 +2228,45 @@ fun PlayerScreen(
         target.trackSelectionParameters = builder.build()
         panel = null
         interaction++
+    }
+
+    fun loadOnlineSubtitles(pick: AddonSubtitle?) {
+        onlineSubtitlesOn = true
+        preferredAddonSubtitle = pick?.url
+        dropSubtitles = false
+        pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
+        reloadToken++
+        panel = null
+        interaction++
+    }
+
+    /**
+     * The captions switch turns itself on in this order: an embedded (or VTT)
+     * track the viewer can actually show, then the English addon list, then the
+     * file they loaded from disk. Only a stream with none of those stays off.
+     */
+    fun enableCaptions() {
+        val embedded = textChoices
+        val preferred = embedded.firstOrNull {
+            preferredSubtitleLanguage(activeProfile)
+                ?.let { tag -> it.language.startsWith(tag, ignoreCase = true) } == true
+        } ?: embedded.firstOrNull { it.language.startsWith("en", ignoreCase = true) }
+            ?: embedded.firstOrNull()
+        if (preferred != null) {
+            selectText(preferred)
+            return
+        }
+        if (addonSubtitles.isNotEmpty()) {
+            loadOnlineSubtitles(pick = null)
+            return
+        }
+        if (externalSubtitleUri != null) {
+            dropSubtitles = false
+            pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
+            reloadToken++
+            panel = null
+            interaction++
+        }
     }
 
     // The window pauses the one player instance instead of closing it, so the
@@ -2215,6 +2420,9 @@ fun PlayerScreen(
                 if (!osdVisible) {
                     when (keyCode) {
                         KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            // LEFT/RIGHT also retire the next-up pill; the seek
+                            // itself still runs so the remote stays predictable.
+                            if (nextUpSlot != null) dismissNextUp()
                             if (isLive) {
                                 tuneChannel(-1)
                             } else {
@@ -2224,11 +2432,26 @@ fun PlayerScreen(
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            if (nextUpSlot != null) dismissNextUp()
                             if (isLive) {
                                 tuneChannel(1)
                             } else {
                                 seekBy(10_000L)
                                 showTrickplay(10_000L)
+                            }
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_CENTER,
+                        KeyEvent.KEYCODE_ENTER,
+                        KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                            // OK on the clean surface is the pill's play-now
+                            // action; without a pill it wakes the OSD as before.
+                            // A failure overlay keeps OK for its own buttons.
+                            val offer = nextUpSlot
+                            if (offer != null && nativeError == null) {
+                                playSlot(offer)
+                            } else {
+                                wake(OsdFocus.PLAY)
                             }
                             true
                         }
@@ -2459,15 +2682,21 @@ fun PlayerScreen(
             )
         }
 
-        nextUpSlot?.let { slot ->
-            NextUpCard(
-                slot = slot,
-                seconds = nextUpSeconds,
-                total = nextUpTotal,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 30.dp, bottom = 148.dp)
-            )
+        // The pill owns the clean video surface; with the OSD up, its transport
+        // and NEXT button already cover the same hand-off.
+        if (!osdVisible && !locked) {
+            nextUpSlot?.let { slot ->
+                NextUpCard(
+                    slot = slot,
+                    seconds = nextUpSeconds,
+                    total = nextUpTotal,
+                    onPlayNow = { playSlot(slot) },
+                    onDismiss = { dismissNextUp() },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 24.dp, bottom = 108.dp)
+                )
+            }
         }
 
         val failure = nativeError
@@ -2836,11 +3065,18 @@ fun PlayerScreen(
                     }
                 }
                 OsdPanel.SUBTITLES -> {
-                    Chip(
-                        label = "Off",
-                        selected = dropSubtitles,
-                        onClick = { selectText(null) }
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Chip(
+                            label = "Off",
+                            selected = dropSubtitles,
+                            onClick = { selectText(null) }
+                        )
+                        Chip(
+                            label = "ON · auto",
+                            selected = !dropSubtitles && textChoices.none { it.selected },
+                            onClick = { enableCaptions() }
+                        )
+                    }
                     textChoices.forEach { choice ->
                         Chip(
                             label = choice.label + if (choice.selected) "  ·  ON" else "",
@@ -2870,26 +3106,35 @@ fun PlayerScreen(
                             )
                         }
                     )
-                    if (addonSubtitles.isNotEmpty()) {
+                    val englishAddons = remember(addonSubtitles) {
+                        addonSubtitles
+                            .filter { it.lang.startsWith("en", ignoreCase = true) }
+                            .ifEmpty { addonSubtitles }
+                    }
+                    if (englishAddons.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         TvButton(
                             label = if (onlineSubtitlesOn) {
-                                "ONLINE SUBTITLES · ON (${addonSubtitles.size})"
+                                "ENGLISH SUBTITLES · ON (${englishAddons.size})"
                             } else {
-                                "LOAD ${addonSubtitles.size} ONLINE SUBTITLES"
+                                "LOAD ${englishAddons.size} ENGLISH SUBTITLES"
                             },
                             glyph = "☁",
                             style = if (onlineSubtitlesOn) TvButtonStyle.PRIMARY else TvButtonStyle.SECONDARY,
                             compact = true,
-                            onClick = {
-                                onlineSubtitlesOn = !onlineSubtitlesOn
-                                if (onlineSubtitlesOn) dropSubtitles = false
-                                pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
-                                reloadToken++
-                                panel = null
-                                interaction++
-                            }
+                            onClick = { loadOnlineSubtitles(pick = null) }
                         )
+                        // Every English entry from the addons is a one-press
+                        // choice once loaded; picking one re-prepares the same
+                        // source with that track as the default.
+                        englishAddons.take(6).forEach { subtitle ->
+                            Chip(
+                                label = subtitle.label?.take(34)
+                                    ?: "English · ${subtitle.url.substringAfterLast('/').take(24)}",
+                                selected = onlineSubtitlesOn && preferredAddonSubtitle == subtitle.url,
+                                onClick = { loadOnlineSubtitles(pick = subtitle) }
+                            )
+                        }
                     }
                     if (textChoices.isEmpty() && externalSubtitleName == null && addonSubtitles.isEmpty()) {
                         Text(
@@ -3332,8 +3577,12 @@ fun PlayerScreen(
                                 ?.let { formatBufferedMs(it.totalBufferedDuration) } ?: "—")
                         )
                         add("Audio" to describeAudio(audioFormat))
-                        add("Decoder" to decoderMode.name.replace('_', ' '))
-                        add("Engine" to settings.playbackEngine.name.replace('_', ' '))
+                        add("Decoder" to profile.decoder.name.replace('_', ' '))
+                        add(
+                            "Engine" to describeRunningEngine(playerOrNull, nativeFallback)
+                        )
+                        add("Buffer" to describeBuffer(profile))
+                        add("Memory cap" to describeMemoryBudget(profile))
                         add(
                             "Delivery" to when {
                                 proxyBypassed -> "Direct · proxy bypassed"
@@ -3687,6 +3936,30 @@ private fun persistProgress(
 }
 
 /**
+ * A built player plus the handles needed to restyle it while it plays. Only
+ * the built-in engine exposes live request headers: its data source factories
+ * outlive construction, so a UA/header change reaches the next segment without
+ * a codec re-init.
+ */
+private class BuiltPlayer(
+    val player: Player,
+    val liveHeaders: LiveRequestHeaders? = null
+)
+
+/** Late-bound UA/header sink for the built-in player's data sources. */
+private class LiveRequestHeaders {
+    @Volatile private var apply: ((String, Map<String, String>) -> Unit)? = null
+
+    fun install(apply: (String, Map<String, String>) -> Unit) {
+        this.apply = apply
+    }
+
+    fun update(userAgent: String, headers: Map<String, String>) {
+        apply?.invoke(userAgent, headers)
+    }
+}
+
+/**
  * Picks the engine pinned in Settings. AUTO, BUILT-IN and EXTERNAL keep the
  * built-in Media3 player (EXTERNAL hands off before this point); VLC and MPV
  * fall back to it when their native library is missing, below the API floor,
@@ -3694,64 +3967,48 @@ private fun persistProgress(
  */
 private fun buildPlayer(
     context: Context,
-    settings: AppSettings,
-    decoderMode: DecoderType,
-    adaptive: Boolean,
+    profile: PlaybackProfile,
     isLive: Boolean,
-    userAgent: String,
-    headers: Map<String, String> = emptyMap(),
     drm: DrmConfig? = null,
-    forceBuiltIn: Boolean = false,
     subtitlesDisabled: Boolean = false,
     subtitleLanguage: String? = null
-): Player {
-    // The native engines hold their own caches, so the tier has to reach them
-    // too; without this LEAN/GENEROUS only moved the Media3 window.
-    // The high-capacity switch targets progressive files only, so the native
-    // engines get the deeper cache only when they are playing one.
-    val engineCache = nativeCache(
-        settings.bufferTier,
-        highCapacityVod = settings.highCapacityBuffer && !adaptive
-    )
-    val native = if (forceBuiltIn) {
-        null
-    } else {
-        when (settings.playbackEngine) {
-            PlaybackEngine.VLC -> nativeEngine("VLC", drm) {
-                VlcEnginePlayer(
-                    context,
-                    userAgent,
-                    headers,
-                    settings.abrEnabled,
-                    isLive,
-                    engineCache.vlcCachingMs,
-                    settings.amlogicFix
-                )
-            }
-            PlaybackEngine.MPV -> nativeEngine("MPV", drm) {
-                if (MpvEnginePlayer.isSupported) {
-                    MpvEnginePlayer(
-                        context,
-                        userAgent,
-                        headers,
-                        isLive,
-                        engineCache.mpvCacheSeconds,
-                        settings.amlogicFix
-                    )
-                } else {
-                    null
-                }
-            }
-            PlaybackEngine.AUTO, PlaybackEngine.BUILT_IN, PlaybackEngine.EXTERNAL -> null
+): BuiltPlayer {
+    // Native engines take their caches and request headers as constructor
+    // arguments, which is why both sit in the profile's rebuild key for VLC
+    // and MPV but not for Media3.
+    val native = when (profile.engine) {
+        PlaybackEngine.VLC -> nativeEngine("VLC", drm) {
+            VlcEnginePlayer(
+                context,
+                profile.userAgent,
+                profile.headers,
+                profile.abr,
+                isLive,
+                profile.native.vlcCachingMs,
+                profile.amlogicFix,
+                profile.maxResolution.maxWidth,
+                profile.maxResolution.maxHeight
+            )
         }
+        PlaybackEngine.MPV -> nativeEngine("MPV", drm) {
+            if (MpvEnginePlayer.isSupported) {
+                MpvEnginePlayer(
+                    context,
+                    profile.userAgent,
+                    profile.headers,
+                    isLive,
+                    profile.native.mpvCacheSeconds,
+                    profile.amlogicFix
+                )
+            } else {
+                null
+            }
+        }
+        PlaybackEngine.AUTO, PlaybackEngine.BUILT_IN, PlaybackEngine.EXTERNAL -> null
     }
-    return native ?: buildExoPlayer(
+    return native?.let { BuiltPlayer(it) } ?: buildExoPlayer(
         context = context,
-        settings = settings,
-        decoderMode = decoderMode,
-        adaptive = adaptive,
-        userAgent = userAgent,
-        headers = headers,
+        profile = profile,
         drm = drm,
         subtitlesDisabled = subtitlesDisabled,
         subtitleLanguage = subtitleLanguage
@@ -3786,10 +4043,11 @@ private fun TrackSelectionParameters.Builder.applyBandwidthCap(
 /**
  * One meter for the whole process, so the estimate survives channel changes:
  * a zap starts on the rendition the previous segment justified instead of
- * re-learning the line. Media3's network-aware initial estimate (Wi-Fi and
- * Ethernet alike) covers the time before the first sample; the stats panel
- * reads this instance, which is why it is owned here rather than left to the
- * library singleton.
+ * re-learning the line. The fixed 500 kbps seed replaces Media3's network-class
+ * guess: on a volatile line a Wi-Fi/Ethernet default opens on a rendition the
+ * first seconds cannot drain, and ABR climbs from the seed once samples land.
+ * The stats panel reads this instance, which is why it is owned here rather
+ * than left to the library singleton.
  */
 private object PlaybackBandwidth {
     @Volatile private var meter: DefaultBandwidthMeter? = null
@@ -3797,6 +4055,7 @@ private object PlaybackBandwidth {
     fun meter(context: Context): DefaultBandwidthMeter =
         meter ?: synchronized(this) {
             meter ?: DefaultBandwidthMeter.Builder(context.applicationContext)
+                .setInitialBitrateEstimate(INITIAL_BITRATE_ESTIMATE_BPS)
                 .build()
                 .also { meter = it }
         }
@@ -3805,66 +4064,85 @@ private object PlaybackBandwidth {
     fun estimateBps(): Long = meter?.bitrateEstimate ?: 0L
 }
 
+// ABR tuning for the adaptive track selection. Ascending takes longer than
+// descending so a short burst cannot ratchet quality up into a stall, and only
+// 70% of the measured rate is treated as available, leaving headroom for
+// bursts the meter cannot see. The retained tail means a recovering line does
+// not re-download segments it just discarded.
+private const val INITIAL_BITRATE_ESTIMATE_BPS = 500_000L
+private const val QUALITY_INCREASE_SETTLE_MS = 15_000
+private const val QUALITY_DECREASE_SETTLE_MS = 10_000
+private const val RETAIN_AFTER_DISCARD_MS = 25_000
+private const val ADAPTIVE_BANDWIDTH_FRACTION = 0.7f
+
+/**
+ * Merges the configured UA under the addon's own headers over the browser
+ * defaults. Both the initial build and every live update run through this,
+ * so a restyle and a fresh build send identical headers.
+ */
+private fun requestProperties(
+    userAgent: String,
+    headers: Map<String, String>
+): Map<String, String> = BrowserMask.withDefaults(
+    StreamUrls.mergeHeaders(mapOf("User-Agent" to userAgent), headers)
+)
+
 private fun buildExoPlayer(
     context: Context,
-    settings: AppSettings,
-    decoderMode: DecoderType,
-    adaptive: Boolean,
-    userAgent: String,
-    headers: Map<String, String> = emptyMap(),
+    profile: PlaybackProfile,
     drm: DrmConfig? = null,
     subtitlesDisabled: Boolean = false,
     subtitleLanguage: String? = null
-): ExoPlayer {
+): BuiltPlayer {
     CinemaRenderersFactory.logFfmpegAvailability()
     Log.i(
         "StreamLine:audio",
-        "Sink plan · ${AudioAuditProbe.describeSink(context, settings.forceStereoDownmix, settings.normalizeVolume)}"
+        "Sink plan · ${AudioAuditProbe.describeSink(context, profile.downmixStereo, profile.normalizeVolume)}"
     )
 
-    fun dataSource(client: okhttp3.OkHttpClient): DefaultDataSource.Factory {
-        val baseFactory = OkHttpDataSource.Factory(client)
-            .setUserAgent(userAgent)
-        // Some CDNs (Google DAI among them) answer 404 to OkHttp's default UA
-        // even when the factory-level UA is set, so pin it on every request as
-        // well. Addon streams also frequently need the emitting page's Referer;
-        // the CDN answers 403 otherwise. Merging case-insensitively keeps one
-        // UA header when the addon spells it `user-agent`, since two UA values
-        // are rejected by several CDNs.
-        val requestHeaders = StreamUrls.mergeHeaders(
-            mapOf("User-Agent" to userAgent),
-            headers
-        )
-        baseFactory.setDefaultRequestProperties(requestHeaders)
-        return DefaultDataSource.Factory(context, baseFactory)
+    fun dataSource(client: okhttp3.OkHttpClient): OkHttpDataSource.Factory {
+        // The UA must travel as a default request property only: Media3 appends
+        // the factory-level UA with addHeader() after the request properties, so
+        // setUserAgent() would send two UA values and win over an addon's pipe
+        // UA. Addon streams also often need the emitting page's Referer; the
+        // CDN answers 403 otherwise. Merging case-insensitively keeps one UA
+        // header when the addon spells it `user-agent`.
+        val factory = OkHttpDataSource.Factory(client)
+        // Browser defaults sit under the configured UA and the addon's own
+        // headers, so a provider that binds to its app's agent keeps it while
+        // a CDN that sniffs for a browser (Trace) sees the full profile.
+        factory.setDefaultRequestProperties(requestProperties(profile.userAgent, profile.headers))
+        return factory
     }
 
     // Progressive reads must stay unbounded (one response body carries the
     // whole film), while HLS/DASH segments use a bounded read timeout so a
     // stalled chunk is abandoned and retried instead of hanging the loader.
-    val dataSourceFactory = dataSource(Http.streamingClient)
-    val adaptiveDataSourceFactory = dataSource(Http.adaptiveClient)
-
-    val lowRamDevice = DeviceProfile.isLowRam(context)
+    val progressiveSource = dataSource(Http.streamingClient)
+    val adaptiveSource = dataSource(Http.adaptiveClient)
+    val dataSourceFactory = DefaultDataSource.Factory(context, progressiveSource)
+    val adaptiveDataSourceFactory = DefaultDataSource.Factory(context, adaptiveSource)
+    // Held past construction so a UA/header change applies to the next data
+    // source instead of forcing a rebuild.
+    val liveHeaders = LiveRequestHeaders().apply {
+        install { userAgent, headers ->
+            val properties = requestProperties(userAgent, headers)
+            progressiveSource.setDefaultRequestProperties(properties)
+            adaptiveSource.setDefaultRequestProperties(properties)
+        }
+    }
 
     // The tier picks the forward window and the rewind retention; BALANCED is
     // the pre-tier profile, so existing installs keep their tuning. The
     // high-capacity switch pins the MP4/MKV window to 15 s / 50 s.
-    val window = bufferWindow(
-        tier = settings.bufferTier,
-        adaptive = adaptive,
-        lowLatency = settings.lowLatency,
-        lowRam = lowRamDevice,
-        highCapacityVod = settings.highCapacityBuffer
-    )
+    val window = profile.window
     Log.i(
         "StreamLine:player",
-        "Load control · ${if (adaptive) "adaptive" else "progressive"} · " +
+        "Load control · ${if (profile.adaptive) "adaptive" else "progressive"} · " +
             "${window.minBufferMs}/${window.maxBufferMs} ms · " +
             "start ${window.bufferForPlaybackMs} ms · " +
             "re-buffer ${window.bufferForPlaybackAfterRebufferMs} ms · " +
-            "back ${window.backBufferMs} ms" +
-            if (settings.highCapacityBuffer && !adaptive) " · high capacity" else ""
+            "back ${window.backBufferMs} ms"
     )
 
     val loadControlBuilder = DefaultLoadControl.Builder()
@@ -3874,13 +4152,16 @@ private fun buildExoPlayer(
             window.bufferForPlaybackMs,
             window.bufferForPlaybackAfterRebufferMs
         )
-    if (lowRamDevice) {
+    profile.byteBudget?.let { budget ->
         // Seconds are not a memory bound: the same window holds four times
         // the bytes at 4K. A byte budget makes the loader stop at the RAM
         // the device actually has, and disabling time priority is what
         // makes Media3 honour it. The tier only moves the time window.
+        if (budget.clamped) {
+            Log.i("StreamLine:player", "Byte cap · ${describeByteBudget(budget)}")
+        }
         loadControlBuilder.setTargetBufferBytes(
-            if (adaptive) LOW_RAM_ADAPTIVE_BUFFER_BYTES else LOW_RAM_PROGRESSIVE_BUFFER_BYTES
+            budget.effectiveBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         )
     }
 
@@ -3890,26 +4171,26 @@ private fun buildExoPlayer(
         // live sessions from exhausting RAM on 32-bit boxes.
         .setBackBuffer(window.backBufferMs, false)
         // Time priority lets the loader keep filling when the device is fast
-        // enough; low-RAM devices switched it off above so their byte budget
-        // is enforced.
-        .setPrioritizeTimeOverSizeThresholds(!lowRamDevice)
+        // enough; low-RAM devices switch it off so their byte budget is
+        // enforced.
+        .setPrioritizeTimeOverSizeThresholds(!profile.memoryBounded)
         .build()
 
     val renderersFactory = CinemaRenderersFactory(
         context,
-        downmixStereo = settings.forceStereoDownmix,
-        normalizeVolume = settings.normalizeVolume
+        downmixStereo = profile.downmixStereo,
+        normalizeVolume = profile.normalizeVolume
     )
-        .setEnableDecoderFallback(decoderMode != DecoderType.HW)
+        .setEnableDecoderFallback(profile.decoder != DecoderType.HW)
         .setEnableAudioTrackPlaybackParams(true)
-    if (settings.amlogicFix) {
+    if (profile.amlogicFix) {
         // Amlogic-class SoCs hand frames to their video pipeline through the
         // asynchronous MediaCodec API; driving the synchronous API can lose
         // frames or drop the stream outright on non-compliant samples.
         renderersFactory.forceEnableMediaCodecAsynchronousQueueing()
         Log.i("StreamLine:player", "Amlogic fix · async MediaCodec queueing + tunneling")
     }
-    when (decoderMode) {
+    when (profile.decoder) {
         DecoderType.SW -> renderersFactory.setMediaCodecSelector(MediaCodecSelector.PREFER_SOFTWARE)
         // AUTO and HW both use hardware first; only explicit SW prefers software.
         DecoderType.AUTO, DecoderType.HW, DecoderType.HW_PLUS ->
@@ -3919,7 +4200,7 @@ private fun buildExoPlayer(
     // Timeout-aware retries shared by progressive, HLS and DASH. The adaptive
     // data source's 30 s read timeout turns a stalled chunk into a retryable
     // SocketTimeoutException rather than an endless buffering spinner.
-    val loadPolicy = StreamLoadErrorPolicy(STREAM_RETRY_COUNT)
+    val loadPolicy = StreamLoadErrorPolicy(profile.segmentRetries)
     val mediaSourceFactory = adaptiveSourceFactories(
         progressiveDataSource = dataSourceFactory,
         adaptiveDataSource = adaptiveDataSourceFactory,
@@ -3936,17 +4217,35 @@ private fun buildExoPlayer(
 
     // Explicit DefaultTrackSelector so ABR stays under our control: mixed
     // HLS/DASH renditions adapt across mime types and non-seamless switches,
-    // and disabling ABR pins the highest supported rendition.
-    val trackSelector = DefaultTrackSelector(context).apply {
+    // and disabling ABR pins the highest supported rendition. The selection
+    // factory tunes how ABR walks the ladder; the size cap goes in at
+    // construction too, so the first rendition is already bounded.
+    Log.i(
+        "StreamLine:player",
+        "Resolution cap · ${profile.maxResolution.maxWidth}×${profile.maxResolution.maxHeight}"
+    )
+    val trackSelector = DefaultTrackSelector(
+        context,
+        AdaptiveTrackSelection.Factory(
+            QUALITY_INCREASE_SETTLE_MS,
+            QUALITY_DECREASE_SETTLE_MS,
+            RETAIN_AFTER_DISCARD_MS,
+            ADAPTIVE_BANDWIDTH_FRACTION
+        )
+    ).apply {
         setParameters(
             buildUponParameters()
                 .setAllowVideoMixedMimeTypeAdaptiveness(true)
                 .setAllowVideoNonSeamlessAdaptiveness(true)
-                .setForceHighestSupportedBitrate(!settings.abrEnabled)
+                .setForceHighestSupportedBitrate(!profile.abr)
                 // Only takes effect on devices whose codecs advertise
                 // tunneling; elsewhere Media3 keeps the non-tunneled path.
-                .setTunnelingEnabled(settings.amlogicFix)
-                .applyBandwidthCap(settings.bandwidthCap)
+                .setTunnelingEnabled(profile.amlogicFix)
+                .applyBandwidthCap(profile.bandwidthCap)
+                .setMaxVideoSize(
+                    profile.maxResolution.maxWidth,
+                    profile.maxResolution.maxHeight
+                )
                 .build()
         )
     }
@@ -3968,7 +4267,7 @@ private fun buildExoPlayer(
         .setAudioAttributes(audioAttributes, true)
         .build()
     player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-        .setForceHighestSupportedBitrate(!settings.abrEnabled)
+        .setForceHighestSupportedBitrate(!profile.abr)
         // Media3 selects the first text track by default; captions stay off
         // until the viewer asks, and the profile's language only biases which
         // track that switch lands on.
@@ -3976,7 +4275,7 @@ private fun buildExoPlayer(
         .setPreferredTextLanguage(subtitleLanguage)
         .setSelectUndeterminedTextLanguage(false)
         .build()
-    return player
+    return BuiltPlayer(player, liveHeaders)
 }
 
 private fun buildTrackChoices(
@@ -3993,7 +4292,8 @@ private fun buildTrackChoices(
                 group = group.mediaTrackGroup,
                 index = index,
                 label = labeler(format, index),
-                selected = group.isTrackSelected(index)
+                selected = group.isTrackSelected(index),
+                language = format.language.orEmpty()
             )
         }
     }
@@ -4062,39 +4362,6 @@ private fun isHlsUrl(url: String?, kind: StreamKind? = null): Boolean {
     if (kind != null) return kind == StreamKind.HLS
     if (url.isNullOrBlank()) return false
     return StreamUrls.kindOf(url) == StreamKind.HLS
-}
-
-private fun PlaybackException.isHttpAuthorizationFailure(): Boolean {
-    var current: Throwable? = cause
-    while (current != null) {
-        if (current is HttpDataSource.InvalidResponseCodeException) {
-            return current.responseCode == 401 ||
-                current.responseCode == 403 ||
-                current.responseCode == 429
-        }
-        current = current.cause
-    }
-    return false
-}
-
-// Transport failures the next attempt can plausibly cure. A bad status or a
-// missing file is definitive and must keep failing fast; a reset, timeout or
-// truncated read is not.
-private fun PlaybackException.isTransientTransportFailure(): Boolean = when (errorCode) {
-    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
-    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-    PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE -> true
-    else -> false
-}
-
-// Flussonic remembers a denied token for two minutes, so each retry stays well
-// clear of that window; retrying every few seconds only keeps the ban fresh.
-private fun liveReconnectDelayMs(attempt: Int): Long = when (attempt) {
-    1 -> 20_000L
-    2 -> 45_000L
-    3 -> 90_000L
-    else -> 120_000L
 }
 
 private fun mediaFileName(url: String?, fallback: String): String {
@@ -4264,7 +4531,12 @@ private fun SearchProgressPill(done: Int, total: Int, modifier: Modifier = Modif
     }
 }
 
-private data class EpisodeSlot(val season: Int, val number: Int, val title: String?)
+private data class EpisodeSlot(
+    val season: Int,
+    val number: Int,
+    val title: String?,
+    val stillUrl: String? = null
+)
 
 private const val NEXT_UP_SECONDS = 8
 
@@ -4273,58 +4545,137 @@ private fun NextUpCard(
     slot: EpisodeSlot,
     seconds: Int,
     total: Int,
+    onPlayNow: () -> Unit,
+    onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val fraction = (seconds.toFloat() / total.coerceAtLeast(1)).coerceIn(0f, 1f)
     Column(
         modifier
-            .widthIn(max = 380.dp)
+            .width(240.dp)
             .glassSurface(
                 shape = RoundedCornerShape(CinemaDimens.ControlRadius),
                 base = Glass.Sheet,
                 sheen = 0.6f
             )
-            .padding(18.dp)
     ) {
-        Text(
-            "UP NEXT",
-            color = Cinema.Gold,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            buildString {
-                append("S").append(slot.season).append("E").append(slot.number)
-                slot.title?.takeIf { it.isNotBlank() }?.let { append("  ·  ").append(it) }
-            },
-            color = Cinema.TextPrimary,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.ExtraBold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.height(10.dp))
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(3.dp)
-                .background(Color.White.copy(alpha = 0.12f))
+                .aspectRatio(2.2f)
         ) {
+            PosterImage(
+                url = slot.stillUrl,
+                title = slot.title.orEmpty(),
+                // The card already names the episode, so the still stays silent.
+                description = null,
+                modifier = Modifier.fillMaxSize()
+            )
             Box(
                 Modifier
-                    .fillMaxWidth(fraction)
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.10f),
+                            1f to Color.Black.copy(alpha = 0.66f)
+                        )
+                    )
+            )
+            Text(
+                "UP NEXT",
+                color = Cinema.Gold,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(5.dp))
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            )
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(7.dp)
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .semantics { contentDescription = "Dismiss next episode" }
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "✕",
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+            Text(
+                "S${slot.season} E${slot.number}",
+                color = Cinema.Gold,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                slot.title?.takeIf { it.isNotBlank() } ?: "Next episode",
+                color = Cinema.TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.ExtraBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Playing next in ${seconds}s",
+                color = Cinema.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(5.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
                     .height(3.dp)
-                    .background(Cinema.Gold)
+                    .background(Color.White.copy(alpha = 0.12f))
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(fraction)
+                        .height(3.dp)
+                        .background(Cinema.Gold)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            TvButton(
+                label = "PLAY NOW",
+                glyph = "▶",
+                style = TvButtonStyle.PRIMARY,
+                compact = true,
+                onClick = onPlayNow
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "◀ ▶ or BACK to dismiss",
+                color = Cinema.TextMuted,
+                fontSize = 9.sp
             )
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Playing in ${seconds}s  ·  NEXT ▸ to start now  ·  BACK to cancel",
-            color = Cinema.TextMuted,
-            fontSize = 11.sp
-        )
     }
+}
+
+/**
+ * Credits window for episodes the database has no marker for. A standard
+ * 20–40 minute episode cuts to credits inside its last minute to ninety
+ * seconds, so the offer starts there; shorter serials get a shorter window
+ * and anything near a feature length keeps the widest one.
+ */
+private fun fallbackCreditsStartMs(durationMs: Long): Long? = when {
+    durationMs >= 40 * 60_000L -> durationMs - 90_000L
+    durationMs >= 20 * 60_000L -> durationMs - 75_000L
+    durationMs >= 10 * 60_000L -> durationMs - 60_000L
+    else -> null
 }
 
 /**
@@ -4358,7 +4709,12 @@ private fun buildEpisodeSlots(item: CatalogItem): List<EpisodeSlot> =
         .sortedBy { it.number }
         .flatMap { season ->
             season.episodes.sortedBy { it.number }.map { episode ->
-                EpisodeSlot(season.number, episode.number, episode.title.takeIf { it.isNotBlank() })
+                EpisodeSlot(
+                    season = season.number,
+                    number = episode.number,
+                    title = episode.title.takeIf { it.isNotBlank() },
+                    stillUrl = episode.stillUrl
+                )
             }
         }
 
@@ -4485,6 +4841,14 @@ private fun formatFrameRate(fps: Float): String =
 private fun formatBufferedMs(ms: Long): String {
     if (ms <= 0) return "—"
     return if (ms >= 1_000) "%.1f s".format(ms / 1_000.0) else "$ms ms"
+}
+
+/** The engine actually running, which differs from the pick after a fallback. */
+private fun describeRunningEngine(player: Player?, fellBack: Boolean): String = when {
+    player is VlcEnginePlayer -> "VLC"
+    player is MpvEnginePlayer -> "MPV"
+    fellBack -> "Built-in · fallback"
+    else -> "Built-in"
 }
 
 private fun Player.asWatchdogPlayer(): WatchdogPlayer = object : WatchdogPlayer {

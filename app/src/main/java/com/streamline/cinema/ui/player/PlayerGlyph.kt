@@ -26,7 +26,7 @@ import kotlin.math.sin
 internal enum class PlayerGlyph {
     BACK, PLAY, PAUSE, PREVIOUS, NEXT, REWIND, FORWARD,
     DISPLAY, SUBTITLES, DECODER, MORE,
-    INFO, EXTERNAL, AUDIO, BOOST, EQ, SPEED, SOURCES, PIP, LOCK, FLIP, RELOAD
+    INFO, EXTERNAL, AUDIO, BOOST, STEREO, SOURCES, PIP, LOCK, RELOAD
 }
 
 /** Vector glyphs drawn in code so the player adds no icon dependency to the APK. */
@@ -171,21 +171,13 @@ private fun DrawScope.drawGlyph(glyph: PlayerGlyph, tint: Color) {
                 style = Stroke(sw * 0.8f, cap = StrokeCap.Round)
             )
         }
-        PlayerGlyph.EQ -> {
-            listOf(0.28f to 0.38f, 0.5f to 0.66f, 0.72f to 0.32f).forEach { (x, knob) ->
-                drawLine(tint, at(x, 0.18f), at(x, 0.82f), sw * 0.8f, StrokeCap.Round)
-                drawCircle(tint, sw * 1.5f, at(x, knob))
-            }
-        }
-        PlayerGlyph.SPEED -> {
-            drawArc(
-                tint, 145f, 250f, false,
-                topLeft = at(0.14f, 0.18f),
-                size = Size(w * 0.72f, h * 0.72f),
-                style = Stroke(sw, cap = StrokeCap.Round)
-            )
-            drawLine(tint, at(0.5f, 0.56f), at(0.74f, 0.34f), sw, StrokeCap.Round)
-            drawCircle(tint, sw * 1.1f, at(0.5f, 0.56f))
+        PlayerGlyph.STEREO -> {
+            // Two channels merging into one: stereo downmix.
+            drawLine(tint, at(0.14f, 0.26f), at(0.52f, 0.5f), sw * 0.8f, StrokeCap.Round)
+            drawLine(tint, at(0.14f, 0.74f), at(0.52f, 0.5f), sw * 0.8f, StrokeCap.Round)
+            drawLine(tint, at(0.52f, 0.5f), at(0.86f, 0.5f), sw, StrokeCap.Round)
+            drawLine(tint, at(0.7f, 0.34f), at(0.86f, 0.5f), sw, StrokeCap.Round)
+            drawLine(tint, at(0.7f, 0.66f), at(0.86f, 0.5f), sw, StrokeCap.Round)
         }
         PlayerGlyph.SOURCES -> {
             drawRoundRect(tint, at(0.28f, 0.16f), Size(w * 0.56f, h * 0.4f), CornerRadius(sw), style = stroke)
@@ -204,23 +196,6 @@ private fun DrawScope.drawGlyph(glyph: PlayerGlyph, tint: Color) {
             )
             drawRoundRect(tint, at(0.22f, 0.42f), Size(w * 0.56f, h * 0.44f), CornerRadius(sw), style = stroke)
             drawCircle(tint, sw * 0.7f, at(0.5f, 0.62f))
-        }
-        PlayerGlyph.FLIP -> {
-            drawLine(tint, at(0.5f, 0.12f), at(0.5f, 0.88f), sw * 0.7f, StrokeCap.Round)
-            val filled = Path().apply {
-                moveTo(w * 0.4f, h * 0.28f)
-                lineTo(w * 0.14f, h * 0.5f)
-                lineTo(w * 0.4f, h * 0.72f)
-                close()
-            }
-            drawPath(filled, tint)
-            val outline = Path().apply {
-                moveTo(w * 0.6f, h * 0.28f)
-                lineTo(w * 0.86f, h * 0.5f)
-                lineTo(w * 0.6f, h * 0.72f)
-                close()
-            }
-            drawPath(outline, tint, style = stroke)
         }
         PlayerGlyph.RELOAD -> {
             val inset = minDim * 0.16f

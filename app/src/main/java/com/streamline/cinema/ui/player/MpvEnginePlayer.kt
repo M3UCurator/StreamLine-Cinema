@@ -27,6 +27,7 @@ internal class MpvEnginePlayer(
     private val headers: Map<String, String>,
     isLive: Boolean,
     cacheSeconds: Int,
+    private val budget: ByteBudget?,
     private val amlogicFix: Boolean
 ) : NativeEnginePlayer(context.applicationContext, isLive) {
 
@@ -104,10 +105,25 @@ internal class MpvEnginePlayer(
             "mpv cache-secs=$cacheSeconds amlogic=$amlogicFix hwdec=" +
                 (if (amlogicFix) "mediacodec" else "auto-safe")
         )
-        // cap the demuxer queues: mpv's defaults can hold hundreds of MB on a
-        // long live stream, which is more than a low-RAM box has to spare
-        mpv.setOptionString("demuxer-max-bytes", "32MiB")
-        mpv.setOptionString("demuxer-max-back-bytes", "8MiB")
+        // Cap the demuxer queues: mpv's defaults can hold hundreds of MB on a
+        // long live stream, which is more than a low-RAM box has to spare. A
+        // resolved byte budget is the same allocation Media3's loader receives,
+        // and live keeps no rewind tail at all.
+        val maxBytes = budget?.effectiveBytes
+        if (maxBytes != null) {
+            val backBytes = if (isLive) 0L else maxBytes / 4
+            mpv.setOptionString("demuxer-max-bytes", maxBytes.toString())
+            mpv.setOptionString("demuxer-max-back-bytes", backBytes.toString())
+            android.util.Log.i(
+                "StreamLine:engine",
+                "mpv demuxer bytes=$maxBytes back=$backBytes (${describeByteBudget(budget)})"
+            )
+        } else {
+            mpv.setOptionString("demuxer-max-bytes", "32MiB")
+            // Live has no rewind to serve, so nothing behind the playhead is
+            // worth keeping even on the default queue.
+            mpv.setOptionString("demuxer-max-back-bytes", if (isLive) "0" else "8MiB")
+        }
         // FFmpeg probes every variant of a master playlist before the first
         // frame. The 5 MB / 5 s defaults make that probe read large chunks of
         // each rendition through the loopback proxy (nearly a minute on slow
@@ -120,8 +136,8 @@ internal class MpvEnginePlayer(
         mpv.setOptionString("ytdl", "no")
         mpv.addObserver(observer)
         mpv.init()
-        mpv.observeProperty("time-pos", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
-        mpv.observeProperty("duration", MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        // Position and duration are polled from the OSD tick; observing them
+        // here only bought a no-op JNI callback several times a second.
         mpv.observeProperty("track-list", MPVLib.MpvFormat.MPV_FORMAT_NONE)
     }
 

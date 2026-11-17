@@ -11,6 +11,7 @@ import java.io.BufferedOutputStream
 import java.io.BufferedReader
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.FilterOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -59,6 +60,15 @@ object NativeStreamProxy {
     // second, so a stall there must not inherit the segment read budget.
     private const val PLAYLIST_TIMEOUT_SECONDS = 10L
     private const val PLAYLIST_ATTEMPTS = 2
+    // A player that stops reading (pause, seek, re-tune) fills the loopback
+    // send window; the blocking write then holds that worker for the life of
+    // the process. Closing the socket after half a minute without a byte
+    // reaching the player unblocks the writer and frees the worker. The clock
+    // only starts once the response has started: while the proxy is still
+    // waiting on the upstream there is nothing the player could read, and a
+    // slow CDN (20 s read, one connection retry) is not a stalled client.
+    private const val CLIENT_WRITE_STALL_MS = 30_000L
+    private const val CLIENT_WATCHDOG_SECONDS = 5L
 
     private class Upstream(
         val url: String,
@@ -77,6 +87,38 @@ object NativeStreamProxy {
         fun onUpstreamFailure(streamId: String)
     }
 
+    /**
+     * One accepted loopback connection. [lastWriteMs] moves whenever a byte
+     * reaches the player; the watchdog closes a link that has been serving a
+     * request, has already put bytes on the wire, and has written nothing for
+     * [CLIENT_WRITE_STALL_MS].
+     */
+    private class ClientLink(val socket: Socket) {
+        @Volatile var lastWriteMs: Long = System.currentTimeMillis()
+        @Volatile var serving = false
+        // Set by the first byte of the current response. Before that the proxy
+        // may still be fetching the upstream head, which is not a client stall.
+        @Volatile var wroteForRequest = false
+    }
+
+    /** Socket output that stamps [ClientLink.lastWriteMs] on every write. */
+    private class ProgressOutput(
+        private val link: ClientLink,
+        out: OutputStream
+    ) : FilterOutputStream(out) {
+        override fun write(b: Int) {
+            out.write(b)
+            link.wroteForRequest = true
+            link.lastWriteMs = System.currentTimeMillis()
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            out.write(b, off, len)
+            link.wroteForRequest = true
+            link.lastWriteMs = System.currentTimeMillis()
+        }
+    }
+
     // Access-ordered LRU so a long session with many sources stays bounded.
     private val streams = object : LinkedHashMap<String, Upstream>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Upstream>?): Boolean =
@@ -86,11 +128,33 @@ object NativeStreamProxy {
     private val lock = Any()
     private val token = randomToken()
     private var server: ServerSocket? = null
-    private var port = 0
+    @Volatile private var port = 0
+
+    // Written by pool threads, read by the watchdog only; the list itself is
+    // tiny (at most the pool size plus keep-alive headroom).
+    private val clientLinks = CopyOnWriteArrayList<ClientLink>()
 
     private val workers = Executors.newFixedThreadPool(MAX_WORKERS, ThreadFactory { runnable ->
         Thread(runnable, "stream-proxy-io").apply { isDaemon = true }
     })
+
+    private val watchdog = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "stream-proxy-watchdog").apply { isDaemon = true }
+    }
+
+    init {
+        watchdog.scheduleWithFixedDelay({
+            val now = System.currentTimeMillis()
+            clientLinks.forEach { link ->
+                if (link.serving && link.wroteForRequest &&
+                    now - link.lastWriteMs > CLIENT_WRITE_STALL_MS
+                ) {
+                    Log.w(TAG, "Client stopped reading · closing ${link.socket.remoteSocketAddress}")
+                    runCatching { link.socket.close() }
+                }
+            }
+        }, CLIENT_WATCHDOG_SECONDS, CLIENT_WATCHDOG_SECONDS, TimeUnit.SECONDS)
+    }
 
     private val uriAttribute = Regex("URI=\"([^\"]+)\"")
 
@@ -220,6 +284,33 @@ object NativeStreamProxy {
         url: String,
         userAgent: String,
         headers: Map<String, String> = emptyMap()
+    ): ProxyHandle? = register(url, userAgent, headers, "index.m3u8")
+
+    /**
+     * Registers a single (non-playlist) stream and returns its loopback URL.
+     * External players that ignore the hand-off's `headers` extra — VLC reads
+     * nothing past the URI — cannot reproduce an addon's pipe headers, so a
+     * gated origin only plays when this process relays the request for them.
+     * The tail keeps the real extension so the receiving player types the file
+     * correctly. The relay needs this process alive, which the paused player
+     * activity now guarantees for the whole hand-off.
+     */
+    fun proxyStream(
+        url: String,
+        userAgent: String,
+        headers: Map<String, String> = emptyMap()
+    ): ProxyHandle? {
+        val path = url.trim().substringBefore('?').substringBefore('#')
+        val extension = path.substringAfterLast('/').substringAfterLast('.', "").lowercase(Locale.US)
+        val tail = if (streamTypes.containsKey(extension)) "stream.$extension" else "stream"
+        return register(url, userAgent, headers, tail)
+    }
+
+    private fun register(
+        url: String,
+        userAgent: String,
+        headers: Map<String, String>,
+        tail: String
     ): ProxyHandle? {
         val clean = url.trim().substringBefore('#')
         if (!clean.startsWith("http://", true) && !clean.startsWith("https://", true)) return null
@@ -237,7 +328,7 @@ object NativeStreamProxy {
             )
             upstreamFailures.remove(id)
         }
-        return ProxyHandle("http://$HOST:$port/$token/hls/$id/index.m3u8", id)
+        return ProxyHandle("http://$HOST:$port/$token/hls/$id/$tail", id)
     }
 
     private fun ensureStarted(): Int? = synchronized(lock) {
@@ -298,27 +389,40 @@ object NativeStreamProxy {
 
     private fun serve(socket: Socket) {
         socket.soTimeout = KEEP_ALIVE_SECONDS * 1000
-        val input = BufferedInputStream(socket.getInputStream())
-        // One reader per socket: a fresh BufferedReader would read ahead into
-        // the request that follows on a kept-alive connection and swallow it.
-        val reader = input.bufferedReader(Charsets.ISO_8859_1)
-        val output = BufferedOutputStream(socket.getOutputStream())
-        var first = true
-        while (true) {
-            val request = runCatching { readRequest(reader) }.getOrNull()
-            if (request == null) {
-                // An idle kept-alive socket closes here once its timeout
-                // expires; only a first request that never arrives is a fault.
-                if (first) {
-                    // Native engines drop a connection without answering when
-                    // their request is malformed; naming that here beats a
-                    // silent retry loop.
-                    Log.w(TAG, "Unreadable request from ${socket.remoteSocketAddress}")
+        val link = ClientLink(socket)
+        clientLinks.add(link)
+        try {
+            val input = BufferedInputStream(socket.getInputStream())
+            // One reader per socket: a fresh BufferedReader would read ahead into
+            // the request that follows on a kept-alive connection and swallow it.
+            val reader = input.bufferedReader(Charsets.ISO_8859_1)
+            val output = BufferedOutputStream(ProgressOutput(link, socket.getOutputStream()))
+            var first = true
+            while (true) {
+                val request = runCatching { readRequest(reader) }.getOrNull()
+                if (request == null) {
+                    // An idle kept-alive socket closes here once its timeout
+                    // expires; only a first request that never arrives is a fault.
+                    if (first) {
+                        // Native engines drop a connection without answering when
+                        // their request is malformed; naming that here beats a
+                        // silent retry loop.
+                        Log.w(TAG, "Unreadable request from ${socket.remoteSocketAddress}")
+                    }
+                    return
                 }
-                return
+                first = false
+                link.lastWriteMs = System.currentTimeMillis()
+                link.wroteForRequest = false
+                link.serving = true
+                try {
+                    if (!handle(output, request)) return
+                } finally {
+                    link.serving = false
+                }
             }
-            first = false
-            if (!handle(output, request)) return
+        } finally {
+            clientLinks.remove(link)
         }
     }
 
@@ -415,8 +519,9 @@ object NativeStreamProxy {
         // backed CDNs deny anything that does not look like a page request.
         val targetUrl = target.toHttpUrlOrNull() ?: return writeText(output, 400, "Bad target URL")
 
+        var headWritten = false
         return try {
-            fetch(output, request, id, targetUrl, explicit, entry)
+            fetch(output, request, id, targetUrl, explicit, entry) { headWritten = true }
         } catch (error: LocalConnectionFailure) {
             // The player aborted the load — a seek, a re-tune or a live-edge
             // relocation closes the connection mid-body all the time. Counting
@@ -429,7 +534,10 @@ object NativeStreamProxy {
             noteUpstreamFailure(id)
             val host = targetUrl.host
             Log.w(TAG, "Upstream $host${targetUrl.encodedPath} failed: ${error.javaClass.simpleName}: ${error.message}")
-            runCatching { writeText(output, 502, "Upstream unavailable") }
+            // Only when nothing reached the player. Once the head is on the
+            // wire the body is being parsed; a second HTTP head spliced into
+            // it is worse than a clean close.
+            if (!headWritten) runCatching { writeText(output, 502, "Upstream unavailable") }
             false
         } finally {
             runCatching { output.flush() }
@@ -450,7 +558,8 @@ object NativeStreamProxy {
         id: String,
         targetUrl: HttpUrl,
         explicit: Map<String, String>,
-        entry: Upstream
+        entry: Upstream,
+        onHeadWritten: () -> Unit
     ): Boolean {
         val retryable = isPlaylistTarget(targetUrl.toString())
         var attempts = 0
@@ -460,6 +569,7 @@ object NativeStreamProxy {
             try {
                 return forwardOnce(output, request, id, targetUrl, explicit, entry) {
                     responded = true
+                    onHeadWritten()
                 }
             } catch (error: LocalConnectionFailure) {
                 throw error

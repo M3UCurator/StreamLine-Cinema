@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
@@ -265,6 +266,25 @@ data class StreamItem(
         }.toMap()
     }
 
+    /**
+     * Size from `behaviorHints.videoSize` (bytes) as a card label. Addons that
+     * publish it often leave the size out of `name`/`title`, so this is the only
+     * input the file-size cap can use for them.
+     */
+    fun hintSize(): String {
+        val bytes = when (val raw = behaviorHints?.get("videoSize")) {
+            is Number -> raw.toLong()
+            is String -> raw.toLongOrNull()
+            else -> null
+        } ?: return ""
+        if (bytes <= 0L) return ""
+        return if (bytes >= 1_000_000_000L) {
+            String.format(Locale.US, "%.1f GB", bytes / 1_000_000_000.0)
+        } else {
+            String.format(Locale.US, "%.0f MB", bytes / 1_000_000.0)
+        }
+    }
+
     companion object {
         private val EPISODE_RANGE_PATTERNS = listOf(
             // S01E01-E02, S01E01-02, S01E01~E02 and S01E01E02.
@@ -467,6 +487,9 @@ internal fun StreamItem.toPlaybackOption(label: String, logo: String = ""): Play
     val parsed = StreamUrls.parse(rawUrl)
     if (parsed.url.isBlank()) return null
     val meta = StreamPresentation.parse(label, name, title, logo)
+        .let { card ->
+            if (card.size.isNotBlank()) card else card.copy(size = hintSize())
+        }
     // Some addons leave `name` empty and describe the quality in `title`.
     val detail = name?.trim()?.takeIf { it.isNotEmpty() }
         ?: title?.trim()?.takeIf { it.isNotEmpty() }?.take(48)
@@ -523,8 +546,9 @@ object StremioAddons {
         }
 
     /**
-     * Ids to query, best match first: most stream/subtitle addons only accept IMDb ids
-     * (`idPrefixes: ["tt"]`), so `tt…` leads and the TMDB id stays as the fallback.
+     * Ids to query, best match first: the TMDB id is the identity every metadata
+     * record was resolved from, so it leads; the `tt…` id that TMDB translates for
+     * the same record follows for addons that only accept `idPrefixes: ["tt"]`.
      *
      * A series without an explicit episode has no single correct stream id, so the
      * list is empty instead of defaulting to S1E1 — that guess used to search a
@@ -539,7 +563,7 @@ object StremioAddons {
         val imdb = item.imdbId.trim().lowercase()
             .takeIf { IMDB_ID.matches(it) }
             ?.plus(suffix)
-        return listOfNotNull(imdb, "tmdb:${item.tmdbId}$suffix").distinct()
+        return listOfNotNull("tmdb:${item.tmdbId}$suffix", imdb).distinct()
     }
 
     private val IMDB_ID = Regex("^tt\\d{6,10}$")
@@ -547,9 +571,10 @@ object StremioAddons {
     fun isImdbId(value: String): Boolean = IMDB_ID.matches(value.trim().lowercase())
 
     /**
-     * A stored IMDb id is only safe to query when it came from the item's own TMDB
-     * record or was hand-typed as the item's id. Ids scraped from list markup, or
-     * attached to an item we never resolved, can belong to another title.
+     * Offline fallback only: TMDB normally translates the id at search time, but
+     * when it cannot be reached the id TMDB itself supplied for the record
+     * (`tmdbLoaded` + `source == "TMDB"`) may still be used. Ids scraped from list
+     * markup, or attached to an item we never resolved, never qualify.
      */
     fun canQueryStoredImdb(imdbId: String, tmdbLoaded: Boolean, source: String): Boolean =
         tmdbLoaded && source == "TMDB" && isImdbId(imdbId)

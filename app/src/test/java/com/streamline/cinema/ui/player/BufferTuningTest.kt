@@ -171,6 +171,111 @@ class BufferTuningTest {
         assertEquals(4, nativeCache(BufferTier.LEAN).mpvCacheSeconds)
     }
 
+    @Test
+    fun backBufferIsTrimmedToWhatTheBudgetRetains() {
+        val lowRam = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = true, lowRam = true)
+        // 48 MiB fits the 8 s forward window at the 20 Mbps reference with room
+        // left for part, but not all, of the 20 s rewind pin.
+        val budget = byteBudget(presetBytes = 48L * 1024 * 1024, maxMemoryBytes = 1024L * 1024 * 1024)
+
+        val plan = planBuffer(lowRam, budget, bandwidthCapBps = 0)
+
+        assertEquals(8_000, plan.window.maxBufferMs)
+        assertTrue(plan.window.backBufferMs < lowRam.backBufferMs)
+        assertTrue(plan.trimmedBackBufferMs > 0)
+        assertTrue(!plan.windowExceedsBudget)
+        val held = (plan.window.maxBufferMs + plan.window.backBufferMs).toLong() *
+            (REFERENCE_BITRATE_BPS / 8_000)
+        assertTrue("forward + back must fit the budget", held <= budget.effectiveBytes)
+    }
+
+    @Test
+    fun aLowBandwidthCapLeavesTheWindowUntouched() {
+        val lowRam = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = true, lowRam = true)
+        val budget = byteBudget(LOW_RAM_ADAPTIVE_BUFFER_BYTES, maxMemoryBytes = 256L * 1024 * 1024)
+
+        val plan = planBuffer(lowRam, budget, BandwidthCap.MBPS2.bitsPerSecond)
+
+        assertEquals(lowRam, plan.window)
+        assertEquals(0, plan.trimmedBackBufferMs)
+        assertTrue(!plan.windowExceedsBudget)
+    }
+
+    @Test
+    fun anOverBudgetWindowIsShortenedAndDropsTheBackBuffer() {
+        val pinned = bufferWindow(
+            BufferTier.BALANCED,
+            adaptive = false,
+            lowLatency = true,
+            lowRam = true,
+            highCapacityVod = true
+        )
+        val budget = byteBudget(LOW_RAM_ADAPTIVE_BUFFER_BYTES, maxMemoryBytes = 256L * 1024 * 1024)
+
+        val plan = planBuffer(pinned, budget, bandwidthCapBps = 0)
+
+        // 16 MiB at the 20 Mbps reference holds 6.7 s, so the requested 50 s
+        // window is never handed to the loader as-is.
+        assertTrue(plan.windowExceedsBudget)
+        assertEquals(0, plan.window.backBufferMs)
+        assertEquals(pinned.backBufferMs, plan.trimmedBackBufferMs)
+        assertEquals(6_710, plan.window.minBufferMs)
+        assertEquals(6_710, plan.window.maxBufferMs)
+        assertEquals(2_500, plan.window.bufferForPlaybackMs)
+        assertEquals(5_000, plan.window.bufferForPlaybackAfterRebufferMs)
+        val held = plan.window.maxBufferMs.toLong() * (REFERENCE_BITRATE_BPS / 8_000)
+        assertTrue(held <= budget.effectiveBytes)
+    }
+
+    @Test
+    fun unbudgetedDevicesKeepTheirWindow() {
+        val window = bufferWindow(BufferTier.GENEROUS, adaptive = false, lowLatency = false, lowRam = false)
+        val plan = planBuffer(window, budget = null, bandwidthCapBps = 0)
+        assertEquals(window, plan.window)
+        assertEquals(0, plan.trimmedBackBufferMs)
+        assertTrue(!plan.windowExceedsBudget)
+    }
+
+    @Test
+    fun everyPlannedWindowFitsOrReportsThatItCannot() {
+        BufferTier.entries.forEach { tier ->
+            listOf(true, false).forEach { adaptive ->
+                listOf(true, false).forEach { lowRam ->
+                    listOf(BandwidthCap.AUTO, BandwidthCap.MBPS2, BandwidthCap.MBPS20).forEach { cap ->
+                        val window = bufferWindow(
+                            tier,
+                            adaptive = adaptive,
+                            lowLatency = true,
+                            lowRam = lowRam
+                        )
+                        val budget = if (lowRam) {
+                            byteBudget(
+                                if (adaptive) LOW_RAM_ADAPTIVE_BUFFER_BYTES
+                                else LOW_RAM_PROGRESSIVE_BUFFER_BYTES,
+                                maxMemoryBytes = 256L * 1024 * 1024
+                            )
+                        } else null
+                        val plan = planBuffer(window, budget, cap.bitsPerSecond)
+                        if (budget == null) {
+                            assertEquals(window, plan.window)
+                            return@forEach
+                        }
+                        val bitrate = cap.bitsPerSecond.takeIf { it > 0 }?.toLong()
+                            ?: REFERENCE_BITRATE_BPS
+                        val held = (plan.window.maxBufferMs + plan.window.backBufferMs).toLong() *
+                            (bitrate / 8_000)
+                        if (plan.windowExceedsBudget) {
+                            assertEquals(0, plan.window.backBufferMs)
+                        }
+                        // Whether the window was trimmed or shortened, what the
+                        // loader receives must fit the budget it is given.
+                        assertTrue(held <= budget.effectiveBytes)
+                    }
+                }
+            }
+        }
+    }
+
     /** Every window DefaultLoadControl receives must be internally consistent. */
     @Test
     fun everyPresetSatisfiesTheLoadControlConstraints() {

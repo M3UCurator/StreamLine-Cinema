@@ -20,6 +20,13 @@ internal const val NATIVE_TUNE_WATCHDOG_MS = 60_000L
 internal const val PLAYBACK_STALL_WATCHDOG_MS = 15_000L
 internal const val PLAYBACK_STALL_POLL_MS = 1_000L
 internal const val PLAYBACK_MIN_PROGRESS_MS = 250L
+// A BUFFERING player is not a frozen one: the proxy allows a 20 s segment read
+// (plus one connection-stage retry), Media3's adaptive reads get 30 s and
+// progressive reads 45 s, so a stall reload before those deadlines expire
+// throws away a fill that was about to complete. Buffering therefore counts as
+// progress for as long as a native tune itself is allowed to take; a loader
+// that never leaves BUFFERING still surfaces the panel after this window.
+internal const val BUFFERING_PROGRESS_GRACE_MS = 60_000L
 // A stall is first retried in place, because most are the provider recycling a
 // session rather than a dead source. Live reconnects are cheap (no resume
 // point), a film spends fewer attempts because each one costs another window.
@@ -62,8 +69,8 @@ internal enum class TuneDecision {
     /** A player/native failure already owns the screen. */
     Aborted,
 
-    /** Deadline hit and the proxy has not been bypassed yet: retry direct. */
-    BypassProxy,
+    /** Deadline hit with another route still untried: retry through the proxy. */
+    TryProxy,
 
     /** Deadline hit with nothing left to try: surface the stall panel. */
     Failed
@@ -73,7 +80,8 @@ internal enum class TuneDecision {
  * Hard deadline for a live tune. A provider that accepts the connection and
  * then sends no manifest produces no error code, so Media3 would buffer
  * indefinitely; after [deadlineMs] the player is stopped and either retried
- * without the loopback proxy once, or reported as stalled.
+ * once through the proxy (when a direct attempt may run out of time on a
+ * UA-gated origin), or reported as stalled.
  */
 internal class TuneWatchdog(
     private val startedAtMs: Long,
@@ -83,13 +91,13 @@ internal class TuneWatchdog(
         player: WatchdogPlayer,
         nowMs: Long,
         nativeError: Boolean,
-        proxyBypassed: Boolean,
+        canTryProxy: Boolean,
         isHls: Boolean
     ): TuneDecision = when {
         player.playbackState == Player.STATE_READY -> TuneDecision.Ready
         player.hasError || nativeError -> TuneDecision.Aborted
         nowMs - startedAtMs < deadlineMs -> TuneDecision.Continue
-        !proxyBypassed && isHls -> TuneDecision.BypassProxy
+        canTryProxy && isHls -> TuneDecision.TryProxy
         else -> TuneDecision.Failed
     }
 }
@@ -121,15 +129,22 @@ internal enum class StallDecision {
  * slow-but-alive stream never trips the panel while a fully frozen one never
  * accumulates the window. A jump in either direction larger than
  * [minProgressMs] is a seek and re-baselines the anchors.
+ *
+ * Engines without a forward-buffer reading (VLC/MPV report the playhead as the
+ * buffered position) are judged by their buffering state instead, and so is
+ * every other engine: a refill is bounded by [bufferingGraceMs], which is what
+ * the transports above are already allowed to spend before giving up.
  */
 internal class StallWatchdog(
     private val stallMs: Long = PLAYBACK_STALL_WATCHDOG_MS,
-    private val minProgressMs: Long = PLAYBACK_MIN_PROGRESS_MS
+    private val minProgressMs: Long = PLAYBACK_MIN_PROGRESS_MS,
+    private val bufferingGraceMs: Long = BUFFERING_PROGRESS_GRACE_MS
 ) {
     private var armed = false
     private var anchorPosition = Long.MIN_VALUE
     private var anchorBuffered = Long.MIN_VALUE
     private var lastProgressAt = Long.MIN_VALUE
+    private var bufferingSince = Long.MIN_VALUE
 
     fun tick(player: WatchdogPlayer, nowMs: Long, scrubbing: Boolean): StallDecision {
         when (player.playbackState) {
@@ -144,6 +159,7 @@ internal class StallWatchdog(
             !scrubbing
         if (!tracking) {
             reset(nowMs)
+            bufferingSince = Long.MIN_VALUE
             return StallDecision.Idle
         }
         val position = player.currentPosition
@@ -155,8 +171,24 @@ internal class StallWatchdog(
             anchorPosition = position
             anchorBuffered = buffered
             lastProgressAt = nowMs
+            bufferingSince = Long.MIN_VALUE
             return StallDecision.Progress
         }
+        // A refill freezes the playhead (and, for the native engines, the
+        // buffered reading too). The transports below it are allowed 20-45 s
+        // per read plus retries, so a buffering player is only declared dead
+        // after that grace; the 15 s window applies to a READY player whose
+        // pipeline itself has stopped.
+        if (player.playbackState == Player.STATE_BUFFERING) {
+            if (bufferingSince == Long.MIN_VALUE) bufferingSince = nowMs
+            if (nowMs - bufferingSince >= bufferingGraceMs) return StallDecision.Stalled
+            // Once the refill ends, the READY freeze window starts from here
+            // rather than from the last byte that arrived.
+            lastProgressAt = nowMs
+            return StallDecision.Idle
+        }
+        // A READY tick ends the refill; a later one gets a fresh grace.
+        bufferingSince = Long.MIN_VALUE
         return if (nowMs - lastProgressAt >= stallMs) StallDecision.Stalled else StallDecision.Idle
     }
 

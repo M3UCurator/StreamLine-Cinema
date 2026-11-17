@@ -18,96 +18,81 @@ class PlaybackProfileTest {
     private val settings = AppSettings()
     private val headers = mapOf("Referer" to "https://example.test/watch")
 
+    // Explicit heap: the test JVM's own maxMemory varies by machine, and a
+    // small one would switch the normal-device byte ceiling on unexpectedly.
     private fun profile(
         settings: AppSettings = this.settings,
         engine: PlaybackEngine = settings.playbackEngine,
+        decoder: DecoderType = settings.decoderType,
         adaptive: Boolean = true,
         lowRam: Boolean = false,
+        headers: Map<String, String> = this.headers,
+        maxMemoryBytes: Long = ROOMY_HEAP_BYTES,
         forceBuiltIn: Boolean = false
     ) = playbackProfile(
         settings = settings.copy(playbackEngine = engine),
-        decoder = settings.decoderType,
+        decoder = decoder,
         adaptive = adaptive,
         lowRam = lowRam,
         headers = headers,
+        maxMemoryBytes = maxMemoryBytes,
         forceBuiltIn = forceBuiltIn
     )
+
+    private companion object {
+        const val ROOMY_HEAP_BYTES = 4L * 1024 * 1024 * 1024
+    }
 
     @Test
     fun bufferSettingsMoveTheRebuildKey() {
         val balanced = profile()
-        val lean = playbackProfile(
-            settings = settings.copy(bufferTier = BufferTier.LEAN),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
-        )
+        val lean = profile(settings = settings.copy(bufferTier = BufferTier.LEAN))
         assertNotEquals(balanced.rebuildKey, lean.rebuildKey)
     }
 
     @Test
     fun liveClassSettingsLeaveTheRebuildKeyAlone() {
         val base = profile()
-        val changed = playbackProfile(
+        val changed = profile(
             settings = settings.copy(
                 abrEnabled = !settings.abrEnabled,
                 bandwidthCap = BandwidthCap.MBPS10,
                 qualityLimit = QualityLimit.Q1080
-            ),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
+            )
         )
         assertEquals(base.rebuildKey, changed.rebuildKey)
         assertNotEquals(base.bandwidthCap, changed.bandwidthCap)
     }
 
     @Test
-    fun resolutionCapCapsA4KLadderAt1080p() {
-        assertEquals(ResolutionCap(1920, 1080), profileWithQuality(QualityLimit.OFF).maxResolution)
-        // A 4K setting may list 4K sources, but the selector never hands the
-        // decoder a rendition above 1080p.
-        assertEquals(ResolutionCap(1920, 1080), profileWithQuality(QualityLimit.Q4K).maxResolution)
+    fun resolutionCapFollowsTheQualityLimit() {
+        // No limit plays the full ladder, up to the 8K sources the labels detect.
+        assertEquals(ResolutionCap(7680, 4320), profileWithQuality(QualityLimit.OFF).maxResolution)
 
-        val hd = profileWithQuality(QualityLimit.Q1080).maxResolution
-        assertEquals(1920, hd.maxWidth)
-        assertEquals(1079, hd.maxHeight)
-
-        assertEquals(479, profileWithQuality(QualityLimit.Q480).maxResolution.maxHeight)
+        // The selected tier is a ceiling, not a floor: it and everything below
+        // it play, so "4K" admits a 2160p rendition and "1080p" a 1080p one.
+        assertEquals(ResolutionCap(4096, 2160), profileWithQuality(QualityLimit.Q4K).maxResolution)
+        assertEquals(ResolutionCap(2560, 1080), profileWithQuality(QualityLimit.Q1080).maxResolution)
+        assertEquals(ResolutionCap(1920, 720), profileWithQuality(QualityLimit.Q720).maxResolution)
+        assertEquals(ResolutionCap(854, 480), profileWithQuality(QualityLimit.Q480).maxResolution)
     }
 
     @Test
     fun resolutionCapRebuildsOnlyTheVlcEngine() {
-        val media3 = playbackProfile(
-            settings = settings.copy(qualityLimit = QualityLimit.Q720),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
-        )
+        val media3 = profile(settings = settings.copy(qualityLimit = QualityLimit.Q720))
         // Media3 applies the cap through the running selector, so no rebuild.
         assertEquals(profile().rebuildKey, media3.rebuildKey)
 
         val vlc = profile(engine = PlaybackEngine.VLC)
-        val vlcCapped = playbackProfile(
-            settings = settings.copy(playbackEngine = PlaybackEngine.VLC, qualityLimit = QualityLimit.Q720),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
+        val vlcCapped = profile(
+            settings = settings.copy(playbackEngine = PlaybackEngine.VLC, qualityLimit = QualityLimit.Q720)
         )
         assertNotEquals(vlc.rebuildKey, vlcCapped.rebuildKey)
 
         // MPV has no per-rendition resolution option, so it stays live-class.
         val mpv = profile(engine = PlaybackEngine.MPV)
-        val mpvCapped = playbackProfile(
-            settings = settings.copy(playbackEngine = PlaybackEngine.MPV, qualityLimit = QualityLimit.Q720),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
+        val mpvCapped = profile(
+            settings = settings.copy(playbackEngine = PlaybackEngine.MPV, qualityLimit = QualityLimit.Q720)
         )
         assertEquals(mpv.rebuildKey, mpvCapped.rebuildKey)
     }
@@ -117,54 +102,55 @@ class PlaybackProfileTest {
         assertEquals(SEGMENT_RETRIES, profile().segmentRetries)
     }
 
-    private fun profileWithQuality(limit: QualityLimit) = playbackProfile(
-        settings = settings.copy(qualityLimit = limit),
-        decoder = settings.decoderType,
-        adaptive = true,
-        lowRam = false,
-        headers = headers
-    )
+    private fun profileWithQuality(limit: QualityLimit) =
+        profile(settings = settings.copy(qualityLimit = limit))
 
     @Test
     fun headersRebuildNativeEnginesOnly() {
         val media3 = profile(engine = PlaybackEngine.AUTO)
-        val media3OtherHeaders = playbackProfile(
-            settings = settings,
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = emptyMap()
-        )
+        val media3OtherHeaders = profile(engine = PlaybackEngine.AUTO, headers = emptyMap())
         assertEquals(media3.rebuildKey, media3OtherHeaders.rebuildKey)
 
         val vlc = profile(engine = PlaybackEngine.VLC)
-        val vlcOtherHeaders = playbackProfile(
-            settings = settings.copy(playbackEngine = PlaybackEngine.VLC),
-            decoder = settings.decoderType,
-            adaptive = true,
-            lowRam = false,
-            headers = emptyMap()
-        )
+        val vlcOtherHeaders = profile(engine = PlaybackEngine.VLC, headers = emptyMap())
         assertNotEquals(vlc.rebuildKey, vlcOtherHeaders.rebuildKey)
     }
 
     @Test
     fun lowRamResolvesAByteBudgetAndTurnsOffTimePriority() {
-        val lowRam = profile(lowRam = true)
+        // 256 MiB leaves 16 MiB under the low-RAM divisor, so the adaptive
+        // preset is exactly the heap share and the progressive one is clamped.
+        val heap = 256L * 1024 * 1024
+        val lowRam = profile(lowRam = true, maxMemoryBytes = heap)
         assertTrue(lowRam.memoryBounded)
         val budget = requireNotNull(lowRam.byteBudget)
         assertTrue(budget.effectiveBytes > 0)
-        // The unit-test heap decides whether the preset survives the clamp,
-        // so assert the relationship rather than the exact number.
-        assertEquals(
-            minOf(budget.presetBytes, Runtime.getRuntime().maxMemory() / BYTE_BUDGET_HEAP_DIVISOR),
-            budget.effectiveBytes
-        )
+        assertEquals(LOW_RAM_ADAPTIVE_BUFFER_BYTES, budget.presetBytes)
+        assertEquals(heap / LOW_RAM_HEAP_DIVISOR, budget.effectiveBytes)
+        assertEquals(LOW_RAM_HEAP_DIVISOR, budget.heapDivisor)
 
         val fullRam = profile(lowRam = false)
         assertFalse(fullRam.memoryBounded)
         assertNull(fullRam.byteBudget)
         assertEquals("unbounded (time-prioritised)", describeMemoryBudget(fullRam))
+    }
+
+    @Test
+    fun normalDevicesOnlyCarryABudgetWhenTheHeapClampsIt() {
+        // A roomy box keeps the time-prioritised loader it always had.
+        assertNull(profile(maxMemoryBytes = ROOMY_HEAP_BYTES).byteBudget)
+
+        // 384 MiB gives a 96 MiB cap, below both normal presets.
+        val box = profile(maxMemoryBytes = 384L * 1024 * 1024)
+        val budget = requireNotNull(box.byteBudget)
+        assertTrue(budget.clamped)
+        assertEquals(NORMAL_ADAPTIVE_BUFFER_BYTES, budget.presetBytes)
+        assertEquals(384L * 1024 * 1024 / NORMAL_HEAP_DIVISOR, budget.effectiveBytes)
+        assertEquals(NORMAL_HEAP_DIVISOR, budget.heapDivisor)
+
+        // Exactly enough for the adaptive preset is not a clamp, so it stays
+        // off and the loader remains time-prioritised.
+        assertNull(profile(maxMemoryBytes = NORMAL_ADAPTIVE_BUFFER_BYTES * NORMAL_HEAP_DIVISOR).byteBudget)
     }
 
     @Test
@@ -194,13 +180,7 @@ class PlaybackProfileTest {
     @Test
     fun decoderLivesInTheRebuildKey() {
         val auto = profile()
-        val software = playbackProfile(
-            settings = settings,
-            decoder = DecoderType.SW,
-            adaptive = true,
-            lowRam = false,
-            headers = headers
-        )
+        val software = profile(decoder = DecoderType.SW)
         assertNotEquals(auto.rebuildKey, software.rebuildKey)
     }
 

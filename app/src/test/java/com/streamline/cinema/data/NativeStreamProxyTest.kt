@@ -362,6 +362,53 @@ class NativeStreamProxyTest {
         }
     }
 
+    /** A segment that dies mid-body must close cleanly, not gain a 502 head. */
+    @Test
+    fun midBodyUpstreamResetDoesNotSpliceA502IntoTheSegment() {
+        val server = java.net.ServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1"))
+        server.soTimeout = 10_000
+        val prefix = "TS-BYTES".toByteArray()
+        Thread {
+            runCatching {
+                server.accept().use { client ->
+                    client.getInputStream().bufferedReader(Charsets.ISO_8859_1).apply {
+                        readLine()
+                        while (readLine()?.isNotEmpty() == true) Unit
+                    }
+                    // Declare a longer body than is sent, then drop the socket.
+                    client.getOutputStream().apply {
+                        write(
+                            ("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n" +
+                                "Content-Length: 1048576\r\nConnection: close\r\n\r\n")
+                                .toByteArray(Charsets.US_ASCII)
+                        )
+                        write(prefix)
+                        flush()
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            start()
+        }
+        try {
+            val handle = NativeStreamProxy.proxyHls(
+                url = "http://localhost:${server.localPort}/media/token/seg-1.ts",
+                userAgent = "UA"
+            ) ?: error("proxy did not start")
+            val connection = java.net.URL(handle.url).openConnection()
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            val body = runCatching {
+                connection.getInputStream().use { it.readBytes() }
+            }.getOrElse { ByteArray(0) }
+            assertEquals("TS-BYTES", String(body, Charsets.UTF_8).take(prefix.size.coerceAtMost(8)))
+            assertTrue(!String(body, Charsets.ISO_8859_1).contains("502"))
+        } finally {
+            server.close()
+        }
+    }
+
     @Test
     fun streamIdIsStableAndHeaderSensitive() {
         val first = NativeStreamProxy.streamId(

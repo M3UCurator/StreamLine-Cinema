@@ -114,7 +114,7 @@ internal class AdaptiveMediaSourceFactory(
  * before the source is declared dead; after that the panel/failover path owns
  * it instead of grinding through the whole transport budget.
  */
-internal class StreamLoadErrorPolicy(minRetries: Int) :
+internal class StreamLoadErrorPolicy(private val minRetries: Int) :
     DefaultLoadErrorHandlingPolicy(minRetries) {
 
     override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
@@ -123,8 +123,11 @@ internal class StreamLoadErrorPolicy(minRetries: Int) :
         return streamRetryDelayMs(status, error as? ParserException, loadErrorInfo.errorCount)
     }
 
+    // Media segments take the resolved budget; manifests, keys and
+    // initialization sections get two more because each is a single small
+    // request and the player cannot start at all without them.
     override fun getMinimumLoadableRetryCount(dataType: Int): Int =
-        if (dataType == C.DATA_TYPE_MEDIA) 4 else 6
+        if (dataType == C.DATA_TYPE_MEDIA) minRetries else minRetries + 2
 }
 
 /**

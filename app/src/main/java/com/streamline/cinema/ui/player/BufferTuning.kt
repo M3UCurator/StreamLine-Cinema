@@ -15,8 +15,10 @@ internal data class BufferWindow(
     val backBufferMs: Int
 )
 
-// DefaultLoadControl's own start values, kept as literals so the mapping is
-// testable without loading Media3 on the JVM.
+// The 2.5 s start / 5 s re-buffer gates this app has always used. Media3
+// 1.11's own DefaultLoadControl defaults are 1 s / 2 s, so these are
+// deliberately more conservative. Kept as literals so the mapping is testable
+// without loading Media3 on the JVM.
 private const val START_MS = 2_500
 private const val REBUFFER_MS = 5_000
 
@@ -26,10 +28,21 @@ private const val REBUFFER_MS = 5_000
 internal const val LOW_RAM_ADAPTIVE_BUFFER_BYTES = 16L * 1024 * 1024
 internal const val LOW_RAM_PROGRESSIVE_BUFFER_BYTES = 24L * 1024 * 1024
 
+// Every device gets a byte ceiling, not just the low-RAM profile. Media3 leaves
+// the target byte size unset, so its loader is bounded only by time and by its
+// ~200 MiB allocation chunk; on a 32-bit TV box that chunk is most of the heap
+// even when the device does not declare itself low-RAM. These presets only bite
+// when the heap share is smaller than the preset, so a roomy box keeps the
+// time-prioritised behaviour it had before.
+internal const val NORMAL_ADAPTIVE_BUFFER_BYTES = 128L * 1024 * 1024
+internal const val NORMAL_PROGRESSIVE_BUFFER_BYTES = 192L * 1024 * 1024
+internal const val LOW_RAM_HEAP_DIVISOR = 16
+internal const val NORMAL_HEAP_DIVISOR = 4
+
 /**
- * The window the "High-capacity buffering" switch pins on MP4/MKV: a 15 s
+ * The window the "High-capacity buffering" switch requests on MP4/MKV: a 15 s
  * fill before playback may start, 50 s of forward buffer to ride out a line
- * that dips, and the default 2.5 s / 5 s start and re-buffer gates.
+ * that dips, and the app's 2.5 s / 5 s start and re-buffer gates.
  */
 internal val HIGH_CAPACITY_VOD_WINDOW = BufferWindow(
     minBufferMs = 15_000,
@@ -44,11 +57,12 @@ internal val HIGH_CAPACITY_VOD_WINDOW = BufferWindow(
  * keep their tuned window; LEAN and GENEROUS only move the forward window and
  * the rewind retention around it.
  *
- * [highCapacityVod] pins the progressive MP4/MKV window to
+ * [highCapacityVod] requests the progressive MP4/MKV window
  * [HIGH_CAPACITY_VOD_WINDOW] whatever the tier says, including on the low-RAM
- * profile: those boxes still enforce their byte budget through
- * `setTargetBufferBytes`, so the pin widens the time window without letting the
- * loader grow past the RAM the device reports.
+ * profile. It is a request, not a promise: the loader stops at
+ * `setTargetBufferBytes`, so on a box whose budget holds fewer than 50 s the
+ * window would never fill. `planBuffer` shortens it to the seconds the budget
+ * actually holds and drops the back buffer, and the build log says so.
  */
 internal fun bufferWindow(
     tier: BufferTier,
@@ -138,7 +152,7 @@ internal const val BYTE_BUDGET_HEAP_DIVISOR = 16
 
 /**
  * The loader's byte ceiling. A preset is a wish, not a promise: the budget is
- * capped at a sixteenth of the process heap, because Media3 counts every
+ * capped at a share of the process heap, because Media3 counts every
  * allocation against it and a preset larger than that share leaves a 32-bit
  * box without room for codecs and UI. The effective value is what the load
  * control receives; [clamped] records that the preset was not honoured.
@@ -146,20 +160,88 @@ internal const val BYTE_BUDGET_HEAP_DIVISOR = 16
 internal data class ByteBudget(
     val presetBytes: Long,
     val effectiveBytes: Long,
-    val heapLimitBytes: Long
+    val heapLimitBytes: Long,
+    val heapDivisor: Int = BYTE_BUDGET_HEAP_DIVISOR
 ) {
     val clamped: Boolean get() = effectiveBytes < presetBytes
 }
 
 internal fun byteBudget(
     presetBytes: Long,
-    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()
+    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
+    heapDivisor: Int = BYTE_BUDGET_HEAP_DIVISOR
 ): ByteBudget {
-    val limit = (maxMemoryBytes / BYTE_BUDGET_HEAP_DIVISOR).coerceAtLeast(1L)
+    val limit = (maxMemoryBytes / heapDivisor).coerceAtLeast(1L)
     return ByteBudget(
         presetBytes = presetBytes,
         effectiveBytes = minOf(presetBytes, limit),
-        heapLimitBytes = limit
+        heapLimitBytes = limit,
+        heapDivisor = heapDivisor
+    )
+}
+
+/**
+ * The nominal bitrate the budget arithmetic assumes when the user set no cap.
+ * It is not a guess at the stream: it converts bytes into a time bound. 20 Mbps
+ * is a 1080p rendition at the top of its range; a higher tier reaches the byte
+ * cap sooner, which shortens the planned window rather than overstating how
+ * much memory the loader may hold.
+ */
+internal const val REFERENCE_BITRATE_BPS = 20_000_000L
+
+/**
+ * A time window paired with the byte budget that will enforce it.
+ *
+ * Media3 counts the back buffer against the same allocation the forward fill
+ * uses, so a 120 s rewind pin on a 16 MiB budget leaves nothing for the
+ * forward window. [trimmedBackBufferMs] records what had to go;
+ * [windowExceedsBudget] means the requested forward window did not fit the
+ * budget, in which case [window] was shortened to the seconds the budget holds
+ * and the back buffer was dropped.
+ */
+internal data class BufferPlan(
+    val window: BufferWindow,
+    val budget: ByteBudget?,
+    val trimmedBackBufferMs: Int,
+    val windowExceedsBudget: Boolean
+)
+
+internal fun planBuffer(
+    window: BufferWindow,
+    budget: ByteBudget?,
+    bandwidthCapBps: Int
+): BufferPlan {
+    if (budget == null) return BufferPlan(window, null, 0, false)
+    val bitrateBps = bandwidthCapBps.takeIf { it > 0 }?.toLong() ?: REFERENCE_BITRATE_BPS
+    val bytesPerMs = (bitrateBps / 8_000).coerceAtLeast(1L)
+    val forwardBytes = window.maxBufferMs * bytesPerMs
+    val available = budget.effectiveBytes - forwardBytes
+    if (available < 0) {
+        // The loader stops at the byte cap, so a window larger than the budget
+        // is a request it can never honour: shorten it to the seconds that fit,
+        // start gates included, instead of reporting a span the buffer can't hold.
+        val fittingMs = (budget.effectiveBytes / bytesPerMs).coerceAtLeast(1L).toInt()
+        val fitted = window.copy(
+            minBufferMs = minOf(window.minBufferMs, fittingMs),
+            maxBufferMs = minOf(window.maxBufferMs, fittingMs),
+            bufferForPlaybackMs = minOf(window.bufferForPlaybackMs, fittingMs),
+            bufferForPlaybackAfterRebufferMs =
+                minOf(window.bufferForPlaybackAfterRebufferMs, fittingMs),
+            backBufferMs = 0
+        )
+        return BufferPlan(
+            window = fitted,
+            budget = budget,
+            trimmedBackBufferMs = window.backBufferMs,
+            windowExceedsBudget = true
+        )
+    }
+    val retained = minOf(window.backBufferMs.toLong(), available / bytesPerMs).toInt()
+    return BufferPlan(
+        window = window.copy(backBufferMs = retained),
+        budget = budget,
+        trimmedBackBufferMs = window.backBufferMs - retained,
+        windowExceedsBudget = false
     )
 }
 
@@ -167,7 +249,7 @@ internal fun byteBudget(
 internal fun describeByteBudget(budget: ByteBudget): String {
     val preset = mebibytes(budget.presetBytes)
     val effective = mebibytes(budget.effectiveBytes)
-    val heap = mebibytes(budget.heapLimitBytes * BYTE_BUDGET_HEAP_DIVISOR)
+    val heap = mebibytes(budget.heapLimitBytes * budget.heapDivisor)
     return if (budget.clamped) "$preset MiB preset clamped to $effective MiB (heap $heap MiB)"
     else "$effective MiB preset (heap $heap MiB)"
 }

@@ -226,6 +226,24 @@ class StreamSourceTest {
         assertEquals("a+b==", parsed.headers["X-Token"])
     }
 
+    @Test
+    fun originIsTheSchemeHostAndEffectivePort() {
+        assertEquals("https://cdn.example:443", StreamUrls.originOf("https://CDN.Example/master.m3u8?t=1"))
+        assertEquals("http://cdn.example:80", StreamUrls.originOf("http://cdn.example/live/index.m3u8"))
+        assertEquals("https://cdn.example:8443", StreamUrls.originOf("https://cdn.example:8443/a.m3u8"))
+        // A pipe-header suffix is not part of the origin.
+        assertEquals(
+            "https://cdn.example:443",
+            StreamUrls.originOf("https://cdn.example/a.m3u8|Referer=https://site/")
+        )
+        assertEquals("https://[2001:db8::1]:9443", StreamUrls.originOf("https://[2001:db8::1]:9443/a.m3u8"))
+        assertNull(StreamUrls.originOf("rtmp://cdn.example/live"))
+        assertNull(StreamUrls.originOf("udp://239.0.0.1:5000"))
+        assertNull(StreamUrls.originOf("https:///missing-host"))
+        assertNull(StreamUrls.originOf("  "))
+        assertNull(StreamUrls.originOf(null))
+    }
+
     private fun valueOf(pairs: Array<String>, name: String): String? =
         pairs.toList().chunked(2).firstOrNull { it[0].equals(name, true) }?.get(1)
 

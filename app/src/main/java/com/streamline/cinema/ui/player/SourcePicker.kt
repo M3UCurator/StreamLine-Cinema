@@ -72,7 +72,7 @@ internal fun SourcePicker(
     options: List<PlaybackOption>,
     steps: List<StreamSearchStep>,
     searchInProgress: Boolean,
-    hiddenByQuality: Int,
+    hiddenByLimits: Int,
     selectedIndex: Int,
     badges: StreamBadgeCatalog,
     onDismiss: () -> Unit,
@@ -242,10 +242,10 @@ internal fun SourcePicker(
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (hiddenByQuality > 0) {
-                            "${options.size} of ${options.size + hiddenByQuality} playable " +
-                                "sources · $hiddenByQuality skipped by the quality limit " +
-                                "in Settings"
+                        if (hiddenByLimits > 0) {
+                            "${options.size} of ${options.size + hiddenByLimits} playable " +
+                                "sources · $hiddenByLimits skipped by the quality or size " +
+                                "cap in Settings"
                         } else {
                             "Every playable source is listed · link details are available " +
                                 "in the player info panel"

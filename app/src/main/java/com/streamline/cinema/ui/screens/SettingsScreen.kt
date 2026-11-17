@@ -87,6 +87,7 @@ import com.streamline.cinema.data.PosterOrientation
 import com.streamline.cinema.data.PosterSize
 import com.streamline.cinema.data.PowerPolicy
 import com.streamline.cinema.data.QualityLimit
+import com.streamline.cinema.data.SourceSizeLimit
 import com.streamline.cinema.data.SortMode
 import com.streamline.cinema.data.StreamBadgeCatalog
 import com.streamline.cinema.data.StremioAddons
@@ -1085,23 +1086,82 @@ fun SettingsScreen(
                             }
                         )
                         }
+                        // Blank is the in-app player; a stored package that is no
+                        // longer installed stays selectable so the pick is visible.
+                        val vodPlayers = remember(players, settings.externalVodPlayer) {
+                            buildList {
+                                add("")
+                                players.forEach { add(it.packageName) }
+                                if (settings.externalVodPlayer.isNotBlank() &&
+                                    none { it == settings.externalVodPlayer }
+                                ) {
+                                    add(settings.externalVodPlayer)
+                                }
+                            }
+                        }
+                        fun vodPlayerLabel(packageName: String): String = when {
+                            packageName.isBlank() -> "IN-APP PLAYER"
+                            else -> players.firstOrNull { it.packageName == packageName }
+                                ?.label?.takeIf { it.isNotBlank() }
+                                ?: "$packageName (not installed)"
+                        }
+                        SettingsGroup(
+                            "External player",
+                            hint = if (settings.externalVodPlayer.isBlank()) "IN-APP" else "VOD AUTO"
+                        ) {
+                        SettingsSelectRow(
+                            title = "VOD default player",
+                            description = when {
+                                settings.externalVodPlayer.isNotBlank() ->
+                                    "Movies and episodes open in the selected app; live stays " +
+                                        "built-in and gated streams are relayed on-device"
+                                players.isEmpty() ->
+                                    "No external video players detected; install one to give " +
+                                        "movies and episodes a default player"
+                                else ->
+                                    "Movies and episodes stay in the built-in player; OPEN WITH " +
+                                        "still hands any stream out"
+                            },
+                            selected = settings.externalVodPlayer,
+                            options = vodPlayers,
+                            optionLabel = ::vodPlayerLabel,
+                            onSelect = { packageName ->
+                                vm.saveSettings { it.copy(externalVodPlayer = packageName) }
+                            }
+                        )
+                        }
                         SettingsGroup(
                             "Stream quality",
                             hint = if (settings.qualityLimit == QualityLimit.OFF) "NO LIMIT"
-                            else "BELOW ${settings.qualityLimit.label}"
+                            else "UP TO ${settings.qualityLimit.label}"
                         ) {
                         SettingsSelectRow(
                             title = "Quality exclusion",
                             description = if (settings.qualityLimit == QualityLimit.OFF) {
                                 "Every source plays, including 4K and 8K"
                             } else {
-                                "Skips ${settings.qualityLimit.label} and above; lower qualities play"
+                                "Plays ${settings.qualityLimit.label} and below; sources above are skipped"
                             },
                             selected = settings.qualityLimit,
                             options = QualityLimit.entries,
                             optionLabel = { it.label },
                             onSelect = { limit ->
                                 vm.saveSettings { it.copy(qualityLimit = limit) }
+                            }
+                        )
+                        SettingsSelectRow(
+                            title = "File size cap",
+                            description = if (settings.sourceSizeLimit == SourceSizeLimit.OFF) {
+                                "Every retrieved source plays, however large"
+                            } else {
+                                "Skips discovered sources above ${settings.sourceSizeLimit.label}; " +
+                                    "sources without a stated size still play"
+                            },
+                            selected = settings.sourceSizeLimit,
+                            options = SourceSizeLimit.entries,
+                            optionLabel = { it.label },
+                            onSelect = { limit ->
+                                vm.saveSettings { it.copy(sourceSizeLimit = limit) }
                             }
                         )
                         }
@@ -1194,7 +1254,7 @@ fun SettingsScreen(
                             checked = settings.highCapacityBuffer,
                             onChange = { vm.saveSettings { s -> s.copy(highCapacityBuffer = it) } },
                             description = "15 s fill · 50 s forward · 2.5 s start · 5 s re-buffer; " +
-                                "wins over the buffer tier for MP4/MKV, low-RAM boxes still cap memory by bytes"
+                                "wins over the buffer tier for MP4/MKV, shortened to what the byte budget holds"
                         )
                         SettingsInfoRow(
                             title = "MP4 / MKV load control",
@@ -1437,7 +1497,9 @@ fun SettingsScreen(
                             } else {
                                 "OPEN WITH inside the player lists the system chooser first, then " +
                                     players.joinToString { it.label } +
-                                    ". The app player stays paused until the hand-off completes."
+                                    ". The app player pauses and resumes where it left off when you " +
+                                    "come back. Streams carrying headers are relayed on-device so " +
+                                    "players that ignore the header list still play them."
                             },
                             color = Cinema.TextMuted,
                             fontSize = 11.sp,

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -51,6 +52,9 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -188,7 +192,6 @@ internal fun PlayerDock(
     qualityVisible: Boolean,
     subtitlesOn: Boolean,
     decoderLabel: String,
-    stereoActive: Boolean,
     skipLabel: String? = null,
     skipHint: String = "Skip intro",
     nextHighlight: Boolean = false,
@@ -215,7 +218,7 @@ internal fun PlayerDock(
     onQuality: () -> Unit,
     onSubtitles: () -> Unit,
     onCycleDecoder: () -> Unit,
-    onToggleStereo: () -> Unit,
+    onExternal: () -> Unit,
     onOverflow: () -> Unit,
     isLive: Boolean = false,
     liveProgram: LiveProgramInfo? = null,
@@ -232,7 +235,7 @@ internal fun PlayerDock(
     val qualityFocus = remember { FocusRequester() }
     val subtitlesFocus = remember { FocusRequester() }
     val decoderFocus = remember { FocusRequester() }
-    val stereoFocus = remember { FocusRequester() }
+    val externalFocus = remember { FocusRequester() }
     val moreFocus = remember { FocusRequester() }
 
     // The live OSD replaces the seek bar, so dock "up" stays on the transport row.
@@ -469,27 +472,26 @@ internal fun PlayerDock(
                 focusRequester = decoderFocus,
                 upTarget = upFocus,
                 leftTarget = subtitlesFocus,
-                rightTarget = stereoFocus,
+                rightTarget = externalFocus,
                 onFocusHint = ::hintFor,
                 onClick = onCycleDecoder
             )
             DockButton(
-                text = "2.0",
-                label = if (stereoActive) "Stereo downmix · On" else "Stereo downmix · Off",
-                active = stereoActive,
-                focusRequester = stereoFocus,
+                glyph = PlayerGlyph.EXTERNAL,
+                label = "Play in external player",
+                focusRequester = externalFocus,
                 upTarget = upFocus,
                 leftTarget = decoderFocus,
                 rightTarget = moreFocus,
                 onFocusHint = ::hintFor,
-                onClick = onToggleStereo
+                onClick = onExternal
             )
             DockButton(
                 glyph = PlayerGlyph.MORE,
                 label = "More",
                 focusRequester = moreFocus,
                 upTarget = upFocus,
-                leftTarget = stereoFocus,
+                leftTarget = externalFocus,
                 rightTarget = moreFocus,
                 onFocusHint = ::hintFor,
                 onClick = onOverflow
@@ -864,46 +866,54 @@ internal fun OsdMenuRow(
     label: String,
     value: String? = null,
     focusRequester: FocusRequester? = null,
+    compact: Boolean = false,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
+            .heightIn(min = if (compact) 30.dp else 48.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .clip(RoundedCornerShape(9.dp))
             .background(if (focused) Cinema.Gold else Color.Transparent)
             .onFocusChanged { focused = it.isFocused }
+            .semantics { role = Role.Button }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(
+                horizontal = if (compact) 10.dp else 14.dp,
+                vertical = if (compact) 4.dp else 10.dp
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         PlayerGlyphIcon(
             glyph = glyph,
             tint = if (focused) Cinema.Ink else Cinema.TextSecondary,
-            size = 20.dp
+            size = if (compact) 16.dp else 20.dp
         )
-        Spacer(Modifier.width(16.dp))
+        Spacer(Modifier.width(if (compact) 10.dp else 16.dp))
         Text(
             text = label,
             color = if (focused) Cinema.Ink else Cinema.TextPrimary,
-            fontSize = 15.sp,
+            fontSize = if (compact) 13.sp else 15.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
         if (!value.isNullOrBlank()) {
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(if (compact) 8.dp else 16.dp))
+            // The label wins the row: a long value used to take its intrinsic
+            // width and squeeze names into "I…" in the two-column sheet.
             Text(
                 text = value,
                 color = if (focused) Cinema.Ink.copy(alpha = 0.72f) else Cinema.TextMuted,
-                fontSize = 13.sp,
+                fontSize = if (compact) 11.sp else 13.sp,
+                modifier = Modifier.widthIn(max = if (compact) 132.dp else 180.dp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

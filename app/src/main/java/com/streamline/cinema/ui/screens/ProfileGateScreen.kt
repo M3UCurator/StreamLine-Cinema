@@ -1,10 +1,13 @@
 package com.streamline.cinema.ui.screens
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,17 +35,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -51,7 +56,6 @@ import com.streamline.cinema.data.AudioLanguage
 import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.MaturityLevel
 import com.streamline.cinema.data.SubtitleLanguageOption
-import com.streamline.cinema.ui.BrandMark
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
@@ -78,18 +82,25 @@ fun ProfileGateScreen(
     val active by vm.activeProfile.collectAsState()
     var managing by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<CinemaProfile?>(null) }
+    var gateFocused by remember { mutableStateOf(false) }
     val firstFocus = remember { FocusRequester() }
     // Editing or deleting the active Kids profile would bypass Kids Mode
     // without the PIN, so profile management stays closed while it is active.
     LaunchedEffect(active.isKids) {
         if (active.isKids) managing = false
     }
-    LaunchedEffect(profiles.size, managing) {
-        delay(180)
-        runCatching { firstFocus.requestFocus() }
+    // Opening the gate disposes whatever held focus behind it, and that detach
+    // can land after the first request, so keep asking briefly until a gate
+    // control owns focus instead of letting the D-pad go dead.
+    LaunchedEffect(profiles.size, managing, canDismiss) {
+        repeat(12) {
+            delay(if (it == 0) 180 else 100)
+            if (gateFocused) return@LaunchedEffect
+            runCatching { firstFocus.requestFocus() }
+        }
     }
 
-    Box(
+    BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .background(
@@ -100,47 +111,71 @@ fun ProfileGateScreen(
             // The gate is modal: swallow taps so they never reach the Home grid
             // rendered behind the overlay.
             .pointerInput(Unit) { detectTapGestures { } }
-            .padding(horizontal = 72.dp, vertical = 40.dp)
     ) {
-        Column(Modifier.fillMaxSize()) {
-            BrandMark(
-                subtitle = "WHO'S WATCHING?",
-                tileSize = 38.dp,
-                wordmarkStyle = CinemaType.Wordmark.copy(fontSize = 17.sp, letterSpacing = 3.sp),
-                subtitleStyle = CinemaType.WordmarkSub.copy(fontSize = 10.sp, letterSpacing = 3.sp)
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Every profile keeps its own Continue Watching, Favorites, ratings and languages.",
-                color = Cinema.TextMuted,
-                fontSize = 12.sp
-            )
+        // Edge gutters are a share of the screen, not fixed dp, so a panel
+        // that overscans by 5% cannot clip the row. The whole stack then
+        // centres inside that safe zone.
+        val gutterX = (maxWidth * 0.07f).coerceAtLeast(48.dp)
+        val gutterY = (maxHeight * 0.06f).coerceAtLeast(28.dp)
+        val gap = 24.dp
+        val slots = profiles.size + 1
+        val wide = LocalDensity.current.fontScale > 1.15f
+        // Size the tiles from the space actually available so five slots land
+        // in one centred row instead of scrolling on a 1080p panel.
+        val fitted = (maxWidth - gutterX * 2 - gap * (slots - 1)) / slots
+        val tileWidth = fitted.coerceIn(
+            if (wide) 156.dp else 132.dp,
+            if (wide) 196.dp else 176.dp
+        )
 
-            // Tiles take the space between header and footer, so a larger font
-            // scale can never overlap the subtitle or push the actions off-screen.
-            Box(
-                Modifier.weight(1f).fillMaxWidth().clipToBounds(),
-                contentAlignment = Alignment.CenterStart
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(horizontal = gutterX, vertical = gutterY)
+                .onFocusChanged { gateFocused = it.hasFocus },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "WHO'S WATCHING?",
+                color = Cinema.TextPrimary,
+                fontSize = 34.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 1.2.sp,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(40.dp))
+
+            // Tiles are drawn, never decoded: the avatar is a coloured circle
+            // and an initial, so the gate paints on its first frame and a
+            // profile switch never waits on artwork.
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally)
             ) {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
-                    items(profiles, key = { it.id }) { profile ->
-                        ProfileTile(
-                            profile = profile,
-                            active = profile.id == active.id,
-                            managing = managing,
-                            focusRequester = if (profile.id == profiles.first().id) firstFocus else null,
-                            onClick = {
-                                if (managing) editing = profile else onPicked(profile)
-                            }
-                        )
-                    }
-                    item(key = "add") {
-                        AddProfileTile(onClick = { editing = CinemaProfile(id = "", name = "") })
-                    }
+                items(profiles, key = { it.id }) { profile ->
+                    ProfileTile(
+                        profile = profile,
+                        active = profile.id == active.id,
+                        managing = managing,
+                        width = tileWidth,
+                        focusRequester = if (profile.id == profiles.first().id) firstFocus else null,
+                        onClick = {
+                            if (managing) editing = profile else onPicked(profile)
+                        }
+                    )
+                }
+                item(key = "add") {
+                    AddProfileTile(
+                        width = tileWidth,
+                        onClick = { editing = CinemaProfile(id = "", name = "") }
+                    )
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(32.dp))
+            // Secondary actions close the stack, so Down from any tile always
+            // lands on the same predictable row.
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -151,7 +186,7 @@ fun ProfileGateScreen(
                         managing -> "DONE MANAGING"
                         else -> "MANAGE PROFILES"
                     },
-                    glyph = if (managing) "✓" else "⚙",
+                    glyph = if (managing) "✓" else "＋",
                     style = if (managing) TvButtonStyle.PRIMARY else TvButtonStyle.SECONDARY,
                     compact = true,
                     enabled = !active.isKids,
@@ -165,15 +200,16 @@ fun ProfileGateScreen(
                         onClick = onClose
                     )
                 }
-                if (active.isKids) {
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        "KIDS PROFILE · rating lock uses your parental PIN",
-                        color = Cinema.Gold,
-                        fontSize = 10.sp,
-                        letterSpacing = 1.sp
-                    )
-                }
+            }
+            if (active.isKids) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "KIDS PROFILE · rating lock uses your parental PIN",
+                    color = Cinema.Gold,
+                    fontSize = 10.sp,
+                    letterSpacing = 1.sp,
+                    textAlign = TextAlign.Center
+                )
             }
         }
     }
@@ -204,19 +240,29 @@ private fun ProfileTile(
     profile: CinemaProfile,
     active: Boolean,
     managing: Boolean,
+    width: Dp,
     focusRequester: FocusRequester?,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
-    val tileShape = RoundedCornerShape(12.dp)
-    // Bigger labels need a wider tile and a smaller avatar, otherwise names wrap
-    // and the tile grows past the row box at 1.5x.
-    val wide = LocalDensity.current.fontScale > 1.15f
+    val tileShape = RoundedCornerShape(CinemaDimens.CardRadius)
+    // Focus is a short spring scale on top of the glass underline and edge
+    // light: it reads from three metres away and costs one animated layer.
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.07f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 650f),
+        label = "profileTileScale"
+    )
+    val avatar = (width * 0.70f).coerceIn(84.dp, 116.dp)
     Column(
         modifier = Modifier
-            .width(if (wide) 176.dp else 138.dp)
+            .width(width)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .glassSurface(
                 shape = tileShape,
                 focused = focused,
@@ -241,7 +287,7 @@ private fun ProfileTile(
     ) {
         Box(
             Modifier
-                .size(if (wide) 72.dp else 96.dp)
+                .size(avatar)
                 .clip(CircleShape)
                 .background(profileColor(profile.colorIndex)),
             contentAlignment = Alignment.Center
@@ -249,11 +295,11 @@ private fun ProfileTile(
             Text(
                 text = profile.initial,
                 color = Cinema.Ink,
-                fontSize = if (wide) 28.sp else 38.sp,
+                fontSize = (avatar.value * 0.40f).sp,
                 fontWeight = FontWeight.ExtraBold
             )
         }
-        Spacer(Modifier.height(if (wide) 8.dp else 10.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
             text = profile.name,
             color = if (focused) Cinema.Gold else Cinema.TextPrimary,
@@ -273,14 +319,23 @@ private fun ProfileTile(
 }
 
 @Composable
-private fun AddProfileTile(onClick: () -> Unit) {
+private fun AddProfileTile(width: Dp, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
-    val tileShape = RoundedCornerShape(12.dp)
-    val wide = LocalDensity.current.fontScale > 1.15f
+    val tileShape = RoundedCornerShape(CinemaDimens.CardRadius)
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.07f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 650f),
+        label = "addProfileTileScale"
+    )
+    val avatar = (width * 0.70f).coerceIn(84.dp, 116.dp)
     Column(
         modifier = Modifier
-            .width(if (wide) 176.dp else 138.dp)
+            .width(width)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
             .glassSurface(
                 shape = tileShape,
                 focused = focused,
@@ -301,7 +356,7 @@ private fun AddProfileTile(onClick: () -> Unit) {
     ) {
         Box(
             Modifier
-                .size(if (wide) 72.dp else 96.dp)
+                .size(avatar)
                 .glassSurface(
                     shape = CircleShape,
                     base = Glass.Control,
@@ -309,9 +364,9 @@ private fun AddProfileTile(onClick: () -> Unit) {
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Text("＋", color = Cinema.Gold, fontSize = if (wide) 26.sp else 34.sp)
+            Text("＋", color = Cinema.Gold, fontSize = (avatar.value * 0.36f).sp)
         }
-        Spacer(Modifier.height(if (wide) 8.dp else 10.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
             "Add profile",
             color = Cinema.TextPrimary,

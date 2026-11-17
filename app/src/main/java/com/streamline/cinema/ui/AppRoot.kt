@@ -216,8 +216,13 @@ fun AppRoot(vm: CinemaViewModel) {
         LocalUiSounds provides uiSounds
     ) {
         Box(Modifier.fillMaxSize().background(Cinema.Ink)) {
-            AmbientGlassBackdrop()
-            AnimatedContent(
+            // The gate is opaque and modal, so the shell behind it is not
+            // composed at all. That keeps its background screens from
+            // restoring focus while the gate is up (the D-pad would navigate
+            // an invisible page), and skips the ambient blur until it closes.
+            if (!profileGateOpen) {
+                AmbientGlassBackdrop()
+                AnimatedContent(
                 targetState = tab,
                 transitionSpec = {
                     fadeIn(tween(150)) togetherWith fadeOut(tween(120))
@@ -338,6 +343,7 @@ fun AppRoot(vm: CinemaViewModel) {
                         )
                     }
                 }
+            }
             }
 
             if (profileGateOpen) {

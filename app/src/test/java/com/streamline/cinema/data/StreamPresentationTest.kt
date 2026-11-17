@@ -50,6 +50,44 @@ class StreamPresentationTest {
     }
 
     @Test
+    fun videoSizeHintFillsTheSizeWhenTheLabelHasNone() {
+        val item = StreamItem(
+            name = "Torrentio\n1080p",
+            title = "BluRay HEVC",
+            url = "https://example.test/a.mkv",
+            externalUrl = null,
+            behaviorHints = mapOf("videoSize" to 7_812_345_678L)
+        )
+        assertEquals("7.8 GB", item.hintSize())
+        assertEquals("7.8 GB", item.toPlaybackOption("Torrentio")?.meta?.size)
+    }
+
+    @Test
+    fun labelSizeWinsOverTheVideoSizeHint() {
+        val item = StreamItem(
+            name = "Torrentio\n1080p",
+            title = "BluRay HEVC\n12.4 GB",
+            url = "https://example.test/a.mkv",
+            externalUrl = null,
+            behaviorHints = mapOf("videoSize" to 7_812_345_678L)
+        )
+        assertEquals("12.4 GB", item.toPlaybackOption("Torrentio")?.meta?.size)
+    }
+
+    @Test
+    fun missingVideoSizeHintLeavesTheSizeEmpty() {
+        val item = StreamItem(
+            name = "Addon",
+            title = "1080p",
+            url = "https://example.test/a.m3u8",
+            externalUrl = null,
+            behaviorHints = null
+        )
+        assertEquals("", item.hintSize())
+        assertEquals("", item.toPlaybackOption("Addon")?.meta?.size)
+    }
+
+    @Test
     fun ignoresProviderEchoLines() {
         val meta = StreamPresentation.parse(
             "AIOStreams",

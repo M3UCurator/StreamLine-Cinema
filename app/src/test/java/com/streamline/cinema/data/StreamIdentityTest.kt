@@ -38,13 +38,13 @@ class StreamIdentityTest {
     )
 
     @Test
-    fun imdbLeadsAndTmdbIsTheFallback() {
+    fun tmdbLeadsAndTranslatedImdbIsTheFallback() {
         assertEquals(
-            listOf("tt0137523", "tmdb:550"),
+            listOf("tmdb:550", "tt0137523"),
             StremioAddons.contentIds(movie(), null, null)
         )
         assertEquals(
-            listOf("tt0944947:3:4", "tmdb:1399:3:4"),
+            listOf("tmdb:1399:3:4", "tt0944947:3:4"),
             StremioAddons.contentIds(series(), 3, 4)
         )
     }
@@ -61,13 +61,13 @@ class StreamIdentityTest {
     @Test
     fun specialsSeasonIsSearchable() {
         assertEquals(
-            listOf("tt0944947:0:1", "tmdb:1399:0:1"),
+            listOf("tmdb:1399:0:1", "tt0944947:0:1"),
             StremioAddons.contentIds(series(), 0, 1)
         )
     }
 
     @Test
-    fun malformedStoredImdbIdsNeverLeadTheSearch() {
+    fun malformedStoredImdbIdsAreNeverQueried() {
         val stored = listOf(
             "tt",
             "tt12",
@@ -81,7 +81,7 @@ class StreamIdentityTest {
             val ids = StremioAddons.contentIds(movie(imdbId = imdb), null, null)
             if (imdb.trim() == "tt0137523") {
                 // Surrounding whitespace is harmless; the id is normalised.
-                assertEquals(listOf("tt0137523", "tmdb:550"), ids)
+                assertEquals(listOf("tmdb:550", "tt0137523"), ids)
             } else {
                 assertEquals("rejected: $imdb", listOf("tmdb:550"), ids)
             }
@@ -91,7 +91,7 @@ class StreamIdentityTest {
     @Test
     fun uppercaseImdbIdIsNormalised() {
         assertEquals(
-            listOf("tt0944947:1:1", "tmdb:1399:1:1"),
+            listOf("tmdb:1399:1:1", "tt0944947:1:1"),
             StremioAddons.contentIds(series(imdbId = "TT0944947"), 1, 1)
         )
     }

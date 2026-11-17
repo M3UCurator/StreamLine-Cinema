@@ -109,8 +109,9 @@ enum class PosterSize(val label: String) {
 enum class PlaybackEngine { AUTO, BUILT_IN, EXTERNAL, VLC, MPV }
 
 /**
- * Hides stream sources at or above the selected tier. OFF plays everything;
- * Q4K hides 4K and 8K, Q1080 hides 1080p and above, and so on.
+ * Ceiling for stream sources: the selected tier and everything below it play.
+ * OFF plays everything; Q4K hides 8K, Q1080 hides 4K and above, and so on, so
+ * picking "1080p" actually allows a 1080p rendition.
  */
 enum class QualityLimit(val label: String, val cutoffHeight: Int) {
     OFF("NO LIMIT", 0),
@@ -119,11 +120,33 @@ enum class QualityLimit(val label: String, val cutoffHeight: Int) {
     Q720("720p", 720),
     Q480("480p", 480);
 
-    /** True when a rendition of [height] must not be played at this setting. */
-    fun excludes(height: Int): Boolean = cutoffHeight > 0 && height >= cutoffHeight
+    /** True when a rendition of [height] is above this ceiling. */
+    fun excludes(height: Int): Boolean = cutoffHeight > 0 && height > cutoffHeight
 
     companion object {
         fun from(raw: String?): QualityLimit = entries.firstOrNull { it.name == raw } ?: OFF
+    }
+}
+
+/**
+ * Ceiling for a source's stated file size. Low-end boxes stall on remux-sized
+ * streams, so the cap skips anything heavier than the selected tier. Sources
+ * without a size tag still play, and the full list comes back when every source
+ * is above the cap, so a title never becomes unplayable.
+ */
+enum class SourceSizeLimit(val label: String, val maxBytes: Long) {
+    OFF("NO LIMIT", 0L),
+    GB2("2 GB", 2_000_000_000L),
+    GB4("4 GB", 4_000_000_000L),
+    GB8("8 GB", 8_000_000_000L),
+    GB15("15 GB", 15_000_000_000L),
+    GB25("25 GB", 25_000_000_000L);
+
+    /** True when a file of [bytes] is above this ceiling. */
+    fun excludes(bytes: Long): Boolean = maxBytes > 0 && bytes > maxBytes
+
+    companion object {
+        fun from(raw: String?): SourceSizeLimit = entries.firstOrNull { it.name == raw } ?: OFF
     }
 }
 
@@ -433,6 +456,13 @@ data class AppSettings(
     val parentalPinHash: String = "",
     val playbackEngine: PlaybackEngine = PlaybackEngine.AUTO,
     val qualityLimit: QualityLimit = QualityLimit.OFF,
+    /** Skips discovered sources above the stated file size; OFF keeps every source. */
+    val sourceSizeLimit: SourceSizeLimit = SourceSizeLimit.OFF,
+    /**
+     * Package that opens VOD movies and episodes by default. Blank keeps them in
+     * the built-in player; live tuning never uses this.
+     */
+    val externalVodPlayer: String = "",
     /** Fast-start buffers for HLS/DASH; it does not enable LL-HLS/LL-DASH part loading. */
     val lowLatency: Boolean = true,
     val abrEnabled: Boolean = true,
@@ -555,6 +585,7 @@ data class AppSettings(
             badgeSourceUrl = badgeSourceUrl.trim().takeIf {
                 it.startsWith("http://") || it.startsWith("https://")
             }.orEmpty(),
+            externalVodPlayer = externalVodPlayer.trim(),
             contentLanguage = cleanLanguage,
             contentCountry = ContentCountry.from(contentCountry).code,
             // Filtering by an unset language would erase every shelf.
@@ -570,6 +601,8 @@ data class AppSettings(
         put("parentalPinHash", parentalPinHash)
         put("playbackEngine", playbackEngine.name)
         put("qualityLimit", qualityLimit.name)
+        put("sourceSizeLimit", sourceSizeLimit.name)
+        put("externalVodPlayer", externalVodPlayer)
         put("lowLatency", lowLatency)
         put("abrEnabled", abrEnabled)
         put("bandwidthCap", bandwidthCap.name)
@@ -624,6 +657,8 @@ data class AppSettings(
                 playbackEngine = runCatching { PlaybackEngine.valueOf(o.optString("playbackEngine")) }
                     .getOrDefault(PlaybackEngine.AUTO),
                 qualityLimit = QualityLimit.from(o.stringOrNull("qualityLimit")),
+                sourceSizeLimit = SourceSizeLimit.from(o.stringOrNull("sourceSizeLimit")),
+                externalVodPlayer = o.optString("externalVodPlayer"),
                 lowLatency = o.optBoolean("lowLatency", true),
                 abrEnabled = o.optBoolean("abrEnabled", true),
                 bandwidthCap = BandwidthCap.from(o.stringOrNull("bandwidthCap")),

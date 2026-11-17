@@ -271,6 +271,34 @@ object StreamUrls {
     /** Stream URL without the pipe suffix — safe to show, log or hand to another app. */
     fun clean(raw: String): String = parse(raw).url
 
+    /**
+     * Normalised `scheme://host:port` for transport memory: the unit that
+     * gates a provider is the origin, not the individual token path. Returns
+     * null for non-http(s) or unparsable URLs, so such sources simply stay on
+     * the default route instead of being remembered under a bogus key.
+     */
+    fun originOf(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            val uri = java.net.URI(parse(raw).url)
+            val scheme = uri.scheme?.lowercase() ?: return null
+            if (scheme != "http" && scheme != "https") return null
+            val host = uri.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return null
+            val port = if (uri.port in 1..65535) {
+                uri.port
+            } else if (scheme == "https") {
+                443
+            } else {
+                80
+            }
+            // java.net.URI keeps the brackets on an IPv6 host; strip before
+            // deciding, or the key would end up double-bracketed.
+            val bareHost = host.removeSurrounding("[", "]")
+            val bracketed = if (bareHost.contains(':')) "[$bareHost]" else bareHost
+            "$scheme://$bracketed:$port"
+        }.getOrNull()
+    }
+
     /** Re-attaches pipe headers to a URL that was resolved elsewhere (redirects). */
     fun withHeaders(url: String, headers: Map<String, String>): String {
         val clean = sanitize(headers)

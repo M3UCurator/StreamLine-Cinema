@@ -56,8 +56,8 @@ class PlaybackProfileDeviceTest {
 
         assertEquals(cap.maxWidth, selector.parameters.maxVideoWidth)
         assertEquals(cap.maxHeight, selector.parameters.maxVideoHeight)
-        assertEquals(1920, selector.parameters.maxVideoWidth)
-        assertEquals(1080, selector.parameters.maxVideoHeight)
+        assertEquals(7680, selector.parameters.maxVideoWidth)
+        assertEquals(4320, selector.parameters.maxVideoHeight)
     }
 
     @Test
@@ -72,8 +72,8 @@ class PlaybackProfileDeviceTest {
             val running = player!!
 
             instrumentation.runOnMainSync {
-                assertEquals(1920, running.trackSelectionParameters.maxVideoWidth)
-                assertEquals(1080, running.trackSelectionParameters.maxVideoHeight)
+                assertEquals(7680, running.trackSelectionParameters.maxVideoWidth)
+                assertEquals(4320, running.trackSelectionParameters.maxVideoHeight)
 
                 val narrowed = resolve(QualityLimit.Q480).maxResolution
                 running.trackSelectionParameters = running.trackSelectionParameters
@@ -83,8 +83,8 @@ class PlaybackProfileDeviceTest {
             }
 
             instrumentation.runOnMainSync {
-                assertEquals(1920, running.trackSelectionParameters.maxVideoWidth)
-                assertEquals(479, running.trackSelectionParameters.maxVideoHeight)
+                assertEquals(854, running.trackSelectionParameters.maxVideoWidth)
+                assertEquals(480, running.trackSelectionParameters.maxVideoHeight)
                 assertEquals(Player.STATE_IDLE, running.playbackState)
                 assertNull(running.playerError)
             }

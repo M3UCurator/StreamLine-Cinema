@@ -17,6 +17,7 @@ import com.streamline.cinema.data.LivePrefsStore
 import com.streamline.cinema.data.ProfileStore
 import com.streamline.cinema.data.SettingsStore
 import com.streamline.cinema.data.StreamBadgeStore
+import com.streamline.cinema.data.TransportMemoryStore
 
 class AppContainer(context: Context) {
     val settingsStore = SettingsStore(context)
@@ -28,6 +29,7 @@ class AppContainer(context: Context) {
     val channelHealth = ChannelHealthStore(context)
     val livePrefs = LivePrefsStore(context)
     val badges = StreamBadgeStore(context)
+    val transportMemory = TransportMemoryStore(context)
     val introDb = IntroDbClient(context.filesDir)
     val repository = CinemaRepository(context, settingsStore, libraryStore, iptvStore, guideIndexStore)
 }

@@ -6,10 +6,10 @@ import android.net.Uri
 
 /**
  * Builds the ACTION_VIEW intents used to hand streams to external players.
- * Just Player (`com.brouken.player`), VLC and MX Player read the `headers`
- * extra as alternating key/value strings, which is where the CDN Referer has
- * to travel. Hand-off always goes through the system chooser so any installed
- * video player can be picked.
+ * The `headers` extra carries alternating key/value strings; JustPlayer and MX
+ * Player read it, while VLC and mpv ignore it and only open the URI. Callers
+ * must therefore hand header-gated streams to those players through the
+ * [NativeStreamProxy] loopback relay instead of relying on this extra.
  */
 object ExternalIntents {
 

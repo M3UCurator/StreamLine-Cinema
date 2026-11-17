@@ -16,11 +16,17 @@
  * and media segments all come back through the same proxy. Byte ranges are
  * forwarded untouched, so seeking still works.
  *
+ * Segments are piped, never buffered: backpressure runs from the player socket
+ * to the upstream body, the socket has Nagle disabled, and a client disconnect
+ * aborts the upstream read. Bodies are sent identity-encoded (fetch decodes on
+ * the way in), so nothing sits between the CDN and the player.
+ *
  * Set PROXY_TOKEN to require ?token=... (recommended for any public deploy);
  * the token is carried into rewritten playlist URLs automatically.
  */
 
 const { Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -236,6 +242,20 @@ function isPlaylist(response, target) {
 
 async function handler(req, res) {
   applyCors(res);
+  // Dispatch as soon as bytes exist. Nagle would coalesce small live chunks
+  // into a delayed packet, which the player sees as a late segment.
+  const socket = res.socket || res.connection;
+  if (socket && typeof socket.setNoDelay === 'function') socket.setNoDelay(true);
+  // A seek, channel change or app exit closes the response. Cancelling the
+  // upstream read then releases its pooled socket instead of draining a
+  // segment nobody will watch.
+  const abort = new AbortController();
+  let clientGone = false;
+  res.on('close', () => {
+    if (res.writableFinished) return;
+    clientGone = true;
+    abort.abort();
+  });
   if (req.method === 'OPTIONS') {
     res.statusCode = 204;
     res.end();
@@ -269,9 +289,12 @@ async function handler(req, res) {
     upstream = await fetch(parsed, {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       headers: upstreamHeaders(req, query),
-      redirect: 'follow'
+      redirect: 'follow',
+      signal: abort.signal
     });
   } catch (error) {
+    // An abort here is the client leaving before any byte went upstream.
+    if (clientGone) return;
     return sendError(res, 502, `Upstream unreachable: ${error.message}`);
   }
 
@@ -302,8 +325,17 @@ async function handler(req, res) {
     }
 
     res.statusCode = upstream.status;
+    // fetch has already decoded any compressed body, so a forwarded
+    // content-length would be the length of the encoded bytes and truncate
+    // what the player reads. Media segments are not compressed in practice,
+    // but a CDN can still label one.
+    const encoding = String(upstream.headers.get('content-encoding') || '')
+      .trim()
+      .toLowerCase();
+    const bodyWasDecoded = Boolean(encoding) && encoding !== 'identity';
     for (const name of PASS_THROUGH_HEADERS) {
       if (name === 'content-type') continue;
+      if (name === 'content-length' && bodyWasDecoded) continue;
       const value = upstream.headers.get(name);
       if (value) res.setHeader(name, value);
     }
@@ -320,12 +352,22 @@ async function handler(req, res) {
       return;
     }
 
+    // pipeline carries the response socket's backpressure straight to the
+    // fetch body and tears down both ends on failure, so a slow player never
+    // grows an in-memory copy of the segment. A client that seeks or switches
+    // channel closes the response (ERR_STREAM_PREMATURE_CLOSE) and that is
+    // routine; an upstream body that dies mid-segment destroys the response
+    // so the player's range retry re-fetches it instead of accepting a short
+    // read as a complete segment.
     const stream = Readable.fromWeb(upstream.body);
-    stream.on('error', () => res.destroy());
-    res.on('close', () => {
-      if (!stream.destroyed) stream.destroy();
-    });
-    stream.pipe(res);
+    try {
+      await pipeline(stream, res);
+    } catch (error) {
+      if (error && error.code !== 'ERR_STREAM_PREMATURE_CLOSE' && !clientGone) {
+        res.destroy(error);
+      }
+    }
+    return;
   } catch (error) {
     sendError(res, 502, `Proxy failed: ${error.message}`);
   }

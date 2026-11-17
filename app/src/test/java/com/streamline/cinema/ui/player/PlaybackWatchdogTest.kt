@@ -26,7 +26,7 @@ class PlaybackWatchdogTest {
             FakePlayer(playbackState = Player.STATE_BUFFERING),
             nowMs = 20_999L,
             nativeError = false,
-            proxyBypassed = false,
+            canTryProxy = true,
             isHls = true
         )
         assertEquals(TuneDecision.Continue, decision)
@@ -39,10 +39,10 @@ class PlaybackWatchdogTest {
             FakePlayer(playbackState = Player.STATE_BUFFERING),
             nowMs = 21_000L,
             nativeError = false,
-            proxyBypassed = false,
+            canTryProxy = true,
             isHls = true
         )
-        assertEquals(TuneDecision.BypassProxy, decision)
+        assertEquals(TuneDecision.TryProxy, decision)
     }
 
     @Test
@@ -63,16 +63,16 @@ class PlaybackWatchdogTest {
         )
         assertEquals(
             TuneDecision.Aborted,
-            watchdog.tick(FakePlayer(), 1_000L, nativeError = true, proxyBypassed = false, isHls = true)
+            watchdog.tick(FakePlayer(), 1_000L, nativeError = true, canTryProxy = true, isHls = true)
         )
     }
 
     @Test
-    fun tuneFailsWhenTheProxyWasAlreadyBypassed() {
+    fun tuneFailsWhenTheProxyWasAlreadyTried() {
         val watchdog = TuneWatchdog(startedAtMs = 0L, deadlineMs = 20_000L)
         assertEquals(
             TuneDecision.Failed,
-            watchdog.tick(FakePlayer(), 25_000L, false, proxyBypassed = true, isHls = true)
+            watchdog.tick(FakePlayer(), 25_000L, false, canTryProxy = false, isHls = true)
         )
     }
 
@@ -81,25 +81,25 @@ class PlaybackWatchdogTest {
         val watchdog = TuneWatchdog(startedAtMs = 0L, deadlineMs = VOD_TUNE_WATCHDOG_MS)
         assertEquals(
             TuneDecision.Continue,
-            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS - 1L, false, false, isHls = true)
+            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS - 1L, false, true, isHls = true)
         )
         assertEquals(
-            TuneDecision.BypassProxy,
-            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS, false, false, isHls = true)
+            TuneDecision.TryProxy,
+            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS, false, true, isHls = true)
         )
         assertEquals(
             TuneDecision.Failed,
-            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS, false, true, isHls = true)
+            watchdog.tick(FakePlayer(), VOD_TUNE_WATCHDOG_MS, false, false, isHls = true)
         )
         assertTrue(VOD_TUNE_WATCHDOG_MS > LIVE_TUNE_WATCHDOG_MS)
     }
 
     @Test
-    fun tuneOnlyBypassesTheProxyForHls() {
+    fun tuneOnlyFallsBackToTheProxyForHls() {
         val watchdog = TuneWatchdog(startedAtMs = 0L, deadlineMs = 20_000L)
         assertEquals(
             TuneDecision.Failed,
-            watchdog.tick(FakePlayer(), 25_000L, false, proxyBypassed = false, isHls = false)
+            watchdog.tick(FakePlayer(), 25_000L, false, canTryProxy = true, isHls = false)
         )
     }
 
@@ -189,6 +189,37 @@ class PlaybackWatchdogTest {
             player.bufferedPosition += 80L
             assertNotEquals(StallDecision.Stalled, watchdog.tick(player, now, scrubbing = false))
         }
+    }
+
+    @Test
+    fun bufferingGetsTheTransportGraceNotTheStallWindow() {
+        // VLC/mpv report the playhead as the buffered position, so a refill
+        // freezes both values; Media3 can freeze both too while a segment read
+        // is still inside its 20-45 s bound. Either way the stall window must
+        // not cut a fill the transport is still working on.
+        val watchdog = StallWatchdog(stallMs = 15_000L, bufferingGraceMs = 60_000L)
+        val player = FakePlayer(
+            playbackState = Player.STATE_READY,
+            currentPosition = 30_000L
+        )
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 0L, scrubbing = false))
+        player.playbackState = Player.STATE_BUFFERING
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 5_000L, scrubbing = false))
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 64_999L, scrubbing = false))
+        assertEquals(StallDecision.Stalled, watchdog.tick(player, 65_000L, scrubbing = false))
+    }
+
+    @Test
+    fun aBufferingPlayerIsNotDeclaredStalledInsideTheTransportBound() {
+        val watchdog = StallWatchdog(stallMs = 15_000L)
+        val player = FakePlayer(playbackState = Player.STATE_READY)
+        assertEquals(StallDecision.Progress, watchdog.tick(player, 0L, scrubbing = false))
+        player.playbackState = Player.STATE_BUFFERING
+        // A segment read is allowed 20 s through the proxy and 30-45 s on the
+        // Media3 path; the 15 s freeze window must not pre-empt either.
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 15_000L, scrubbing = false))
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 74_999L, scrubbing = false))
+        assertEquals(StallDecision.Stalled, watchdog.tick(player, 75_000L, scrubbing = false))
     }
 
     @Test
@@ -294,7 +325,7 @@ class PlaybackWatchdogTest {
     }
 
     @Test
-    fun bufferGrowthThatStopsStillStalls() {
+    fun bufferGrowthThatStopsStillStallsAfterTheTransportGrace() {
         val watchdog = StallWatchdog(stallMs = 15_000L, minProgressMs = 250L)
         val player = FakePlayer(
             playbackState = Player.STATE_READY,
@@ -305,8 +336,11 @@ class PlaybackWatchdogTest {
         player.playbackState = Player.STATE_BUFFERING
         player.bufferedPosition = 31_000L
         assertEquals(StallDecision.Progress, watchdog.tick(player, 1_000L, scrubbing = false))
-        assertEquals(StallDecision.Idle, watchdog.tick(player, 15_999L, scrubbing = false))
-        assertEquals(StallDecision.Stalled, watchdog.tick(player, 16_000L, scrubbing = false))
+        // The fill stalls, but a slow read still has the transport's own
+        // deadline to finish; only the grace running out ends it.
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 2_000L, scrubbing = false))
+        assertEquals(StallDecision.Idle, watchdog.tick(player, 61_999L, scrubbing = false))
+        assertEquals(StallDecision.Stalled, watchdog.tick(player, 62_000L, scrubbing = false))
     }
 
     // --- recovery budget -------------------------------------------------

@@ -87,9 +87,10 @@ class CinemaRepository(
     private val mergedEpgCap = DeviceProfile.mergedEpgProgramCap(DeviceProfile.isLowRam(appContext))
     private val failedItems: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
 
-    // IMDb ids confirmed against the item's own TMDB id. Stream lookups never use
-    // an unconfirmed id: a wrong `tt…` resolves to a different title's episodes.
-    private val verifiedImdbIds = ConcurrentHashMap<String, String>()
+    // Title identity used for addon lookups, keyed by the item's own key plus its
+    // stored id. Every entry is a TMDB-confirmed pair: the TMDB record the item
+    // resolved to and the IMDb id TMDB publishes for that same record.
+    private val verifiedIdentities = ConcurrentHashMap<String, CatalogItem>()
 
     // A resolved live channel stays warm for a short window so OSD prefetch and
     // the next tune share one round trip. Provider tokens expire quickly, so a
@@ -455,27 +456,51 @@ class CinemaRepository(
         playbackOptions(item, season, episode).firstOrNull()?.url
 
     /**
-     * IMDb id belonging to exactly this title. Ids scraped from list pages can
-     * carry a neighbouring card's `tt…`, so an id is only accepted when TMDB
-     * supplied it; otherwise it is re-resolved from the item's own TMDB id.
-     * When that fails the search stays TMDB-identified instead of querying
-     * another title's streams.
+     * The identity addon queries run on. TMDB is the authority for both ids: a
+     * title opened from TMDB is re-read from its own record so only the `tt…` id
+     * that record publishes is used, and an imported `tt…`-only record is
+     * translated through `/find` so the search runs on the TMDB id it really
+     * belongs to. A stored id is kept only when TMDB cannot be reached, and only
+     * for records TMDB itself enriched, so a borrowed id never becomes the query.
      */
-    private suspend fun verifiedImdbId(item: CatalogItem): String {
-        verifiedImdbIds[item.key]?.let { return it }
-        if (item.tmdbId <= 0) return ""
-        val own = item.imdbId.trim().lowercase()
-        if (StremioAddons.canQueryStoredImdb(own, item.tmdbLoaded, item.source)) return own
-        val resolved = runCatching { tmdb.details(item.tmdbId, item.type) }
-            .getOrNull()
-            ?.takeIf { it.tmdbId == item.tmdbId && it.type == item.type }
-            ?.imdbId
-            ?.trim()
-            ?.lowercase()
-            ?.takeIf(StremioAddons::isImdbId)
-            .orEmpty()
-        if (resolved.isNotEmpty()) verifiedImdbIds[item.key] = resolved
-        return resolved
+    private suspend fun verifiedIdentity(item: CatalogItem): CatalogItem {
+        val stored = item.imdbId.trim().lowercase()
+        val cacheKey = "${item.key}|$stored"
+        verifiedIdentities[cacheKey]?.let { return it }
+        val translated = if (item.tmdbId > 0) {
+            try {
+                tmdb.details(item.tmdbId, item.type)
+                    .takeIf { it.tmdbId == item.tmdbId && it.type == item.type }
+                    ?.let { detail -> item.copy(imdbId = detail.imdbId) }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                null
+            }
+        } else {
+            try {
+                tmdb.findByImdb(stored, item.type)
+                    // `/find` answered for this exact id, so it is the translation.
+                    ?.let { found -> item.copy(tmdbId = found.tmdbId, type = found.type, imdbId = stored) }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                null
+            }
+        }
+        val identity = (translated ?: item.copy(
+            imdbId = stored.takeIf {
+                StremioAddons.canQueryStoredImdb(it, item.tmdbLoaded, item.source)
+            }.orEmpty()
+        )).let { settled ->
+            settled.copy(
+                imdbId = settled.imdbId.trim().lowercase()
+                    .takeIf(StremioAddons::isImdbId)
+                    .orEmpty()
+            )
+        }
+        verifiedIdentities[cacheKey] = identity
+        return identity
     }
 
     /**
@@ -538,18 +563,23 @@ class CinemaRepository(
             return@channelFlow
         }
 
-        val type = if (item.isSeries) "series" else "movie"
-        val searchItem = item.copy(imdbId = verifiedImdbId(item))
+        val identity = verifiedIdentity(item)
+        val type = if (identity.isSeries) "series" else "movie"
         val searchUserAgent = settingsStore.settings.value.userAgentString
-        val ids = StremioAddons.contentIds(searchItem, season, episode)
-        // A series without an episode cannot be searched without inventing S1E1.
+        val ids = StremioAddons.contentIds(identity, season, episode)
+        // A series without an episode cannot be searched without inventing S1E1,
+        // and a title TMDB cannot place has no trustworthy id to search at all.
         if (ids.isEmpty()) {
             report(
                 StreamSearchStep(
                     key = "addons",
                     label = "Stremio addons",
                     phase = StreamSearchPhase.EMPTY,
-                    detail = "series episode not selected"
+                    detail = if (identity.tmdbId <= 0) {
+                        "title not found on TMDB"
+                    } else {
+                        "series episode not selected"
+                    }
                 )
             )
             send(StreamSearchEvent.Finished(emptyList(), steps.toList()))
@@ -576,7 +606,7 @@ class CinemaRepository(
                                 // A source that names another season/episode is a
                                 // different title's link and never reaches the player.
                                 val matched = streams.filter {
-                                    StremioAddons.streamMatchesRequest(it, item.isSeries, season, episode)
+                                    StremioAddons.streamMatchesRequest(it, identity.isSeries, season, episode)
                                 }
                                 mismatched += streams.size - matched.size
                                 if (matched.isNotEmpty()) {
@@ -688,11 +718,11 @@ class CinemaRepository(
         // A viewer who has not added a subtitle addon still gets captions: the
         // built-in OpenSubtitles endpoint joins whatever is configured.
         val sources = StremioAddons.subtitleSources(addons.map { it.url })
-        val type = if (item.isSeries) "series" else "movie"
         // Subtitle ids must belong to this title too; an unverified stored `tt…`
         // would list another title's tracks over the video.
-        val searchItem = item.copy(imdbId = verifiedImdbId(item))
-        val ids = StremioAddons.contentIds(searchItem, season, episode)
+        val identity = verifiedIdentity(item)
+        val type = if (identity.isSeries) "series" else "movie"
+        val ids = StremioAddons.contentIds(identity, season, episode)
         if (ids.isEmpty()) return emptyList()
         val collected = coroutineScope {
             sources.map { source ->
@@ -1361,14 +1391,24 @@ class CinemaRepository(
         kind: StreamKind? = null
     ): Boolean {
         val settings = settingsStore.settings.value
+        val streamKind = kind ?: StreamUrls.kindOf(url)
+        // VLC and mpv ignore the `headers` extra, so a header- or UA-gated
+        // origin is handed to the chooser through the loopback relay, which
+        // re-sends every request with the addon's pipe headers.
+        val gated = headers.isNotEmpty() || settings.playerUserAgent != PlayerUaPreset.DEFAULT
+        val relay = if (gated && streamKind != StreamKind.DASH && streamKind != StreamKind.SMOOTH) {
+            NativeStreamProxy.proxyStream(url, settings.userAgentString, headers)?.url
+        } else {
+            null
+        }
         return ExternalIntents.launchIn(
             context = appContext,
             packageName = null,
-            url = url,
+            url = relay ?: url,
             referer = referer,
             headers = headers,
             userAgent = settings.userAgentString,
-            kind = kind ?: StreamUrls.kindOf(url)
+            kind = streamKind
         )
     }
 

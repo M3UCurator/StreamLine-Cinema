@@ -102,6 +102,24 @@ class TmdbClient(private val settingsStore: SettingsStore) {
     suspend fun details(tmdbId: Int, type: MediaType): CatalogItem =
         if (type == MediaType.MOVIE) movieDetail(tmdbId) else tvDetail(tmdbId)
 
+    /**
+     * Translates an IMDb id into the one TMDB record it belongs to. Imports and
+     * scraped ids can carry a neighbouring card's `tt…`, so an id the app did not
+     * receive from TMDB itself is checked here before any addon query runs on it.
+     */
+    suspend fun findByImdb(imdbId: String, type: MediaType? = null): CatalogItem? {
+        val id = imdbId.trim().lowercase()
+        if (!StremioAddons.isImdbId(id)) return null
+        val o = requestJson("find/$id", mapOf("external_source" to "imdb_id"))
+        val movies = parseResults(o.optJSONArray("movie_results"), MediaType.MOVIE, "TMDB Find")
+        val shows = parseResults(o.optJSONArray("tv_results"), MediaType.TV, "TMDB Find")
+        return when (type) {
+            MediaType.MOVIE -> movies.firstOrNull()
+            MediaType.TV -> shows.firstOrNull()
+            null -> movies.firstOrNull() ?: shows.firstOrNull()
+        }
+    }
+
     suspend fun seasonEpisodes(tvId: Int, seasonNumber: Int): List<Episode> {
         val o = requestJson("tv/$tvId/season/$seasonNumber", emptyMap())
         val arr = o.optJSONArray("episodes") ?: return emptyList()

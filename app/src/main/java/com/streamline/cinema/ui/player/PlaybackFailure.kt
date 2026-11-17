@@ -227,6 +227,15 @@ internal fun PlaybackException.isHttpAuthorizationFailure(): Boolean =
 internal fun isProviderLimitStatus(code: Int?): Boolean =
     code == 401 || code == 403 || code == 429
 
+/**
+ * 401/403/407/451 from the origin: the request itself was refused (UA, Referer
+ * or geo gating) rather than the account throttled. The loopback proxy re-sends
+ * the same URL with the browser profile, so these are worth one proxy retry.
+ * 429 stays out: a rate limit is not fixed by changing headers.
+ */
+internal fun PlaybackException.isOriginDenial(): Boolean =
+    httpStatus().let { it == 401 || it == 403 || it == 407 || it == 451 }
+
 internal fun PlaybackException.httpStatus(): Int? =
     cause.httpResponse()?.responseCode
 

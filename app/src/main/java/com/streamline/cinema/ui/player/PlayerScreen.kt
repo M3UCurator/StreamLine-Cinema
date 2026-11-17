@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -70,7 +71,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -142,8 +142,10 @@ import com.streamline.cinema.data.PlaybackEngine
 import com.streamline.cinema.data.PlaybackLocks
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
+import com.streamline.cinema.data.PlayerUaPreset
 import com.streamline.cinema.data.SkipKind
 import com.streamline.cinema.data.SkipSegments
+import com.streamline.cinema.data.SourceResolution
 import com.streamline.cinema.data.StreamBadgeCatalog
 import com.streamline.cinema.data.StreamKind
 import com.streamline.cinema.data.StreamMeta
@@ -152,6 +154,7 @@ import com.streamline.cinema.data.StreamSearchPhase
 import com.streamline.cinema.data.StreamSearchStep
 import com.streamline.cinema.data.StreamUrls
 import com.streamline.cinema.data.StremioAddons
+import com.streamline.cinema.data.TransportVerdict
 import com.streamline.cinema.data.WatchProgress
 import com.streamline.cinema.data.await
 import com.streamline.cinema.data.rankSources
@@ -177,19 +180,18 @@ import java.util.Locale
 
 private enum class AspectMode(
     val label: String,
-    val short: String,
     val resizeMode: Int,
     val ratio: Float? = null
 ) {
-    ORIGINAL("Original", "ORIG", AspectRatioFrameLayout.RESIZE_MODE_FIT),
-    FIT("Fit", "FIT", AspectRatioFrameLayout.RESIZE_MODE_FIT),
-    R16_9("16:9", "16:9", AspectRatioFrameLayout.RESIZE_MODE_FILL, 16f / 9f),
-    R18_9("18:9", "18:9", AspectRatioFrameLayout.RESIZE_MODE_FILL, 18f / 9f),
-    STRETCH("Stretch", "STRETCH", AspectRatioFrameLayout.RESIZE_MODE_FILL),
-    CROP("Crop", "CROP", AspectRatioFrameLayout.RESIZE_MODE_ZOOM)
+    ORIGINAL("Original", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    FIT("Fit", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    R16_9("16:9", AspectRatioFrameLayout.RESIZE_MODE_FILL, 16f / 9f),
+    R18_9("18:9", AspectRatioFrameLayout.RESIZE_MODE_FILL, 18f / 9f),
+    STRETCH("Stretch", AspectRatioFrameLayout.RESIZE_MODE_FILL),
+    CROP("Crop", AspectRatioFrameLayout.RESIZE_MODE_ZOOM)
 }
 
-private enum class OsdPanel { AUDIO, SUBTITLES, OVERFLOW, TOOLS, TOGGLES, SPEED, PICTURE, QUALITY, INFO, STATS }
+private enum class OsdPanel { AUDIO, SUBTITLES, OVERFLOW, TOOLS, TOGGLES, QUALITY, TRANSPORT, INFO, STATS }
 
 private enum class OsdFocus { PLAY, TIMELINE, SKIP, BACK }
 
@@ -226,9 +228,10 @@ private const val CREDITS_END_MARGIN_S = 2
 // While the finger is on the seek bar the picture is re-seeked at this pace so
 // the user can see the frame they are choosing without flooding the loader.
 private const val SCRUB_PREVIEW_INTERVAL_MS = 250L
-// A direct-URL fallback that has played this long is considered stable; the
-// next prepare returns to the proxy so header injection is restored.
-private const val PROXY_RESTORE_MS = 60_000L
+// A direct route that has played this long is considered proof the origin
+// serves the player as-is; AUTO remembers it and skips the proxy on the next
+// tune for that origin.
+private const val TRANSPORT_LEARN_MS = 60_000L
 // A live stream that has played this long clears a dead-channel mark.
 private const val CHANNEL_HEALTH_SUCCESS_MS = 20_000L
 // A D-pad sweep through the buffer rows saves several values back-to-back;
@@ -249,6 +252,16 @@ private data class TrackChoice(
     val label: String,
     val selected: Boolean,
     val language: String = ""
+)
+
+/**
+ * A viewer's explicit track pick, kept independent of the player instance.
+ * [TrackChoice] holds a [TrackGroup] from one player's snapshot; a rebuild
+ * parses fresh groups, so the pick is re-resolved by its label instead.
+ */
+private data class SavedTrackPick(
+    val label: String,
+    val language: String
 )
 
 private val hardwareFirstSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
@@ -435,10 +448,15 @@ fun PlayerScreen(
     ) {
         baseOptions + rankSources(addonOptions, preferredSourceLanguage)
     }
-    val options: List<PlaybackOption> = remember(offeredOptions, settings.qualityLimit) {
-        excludeHighQualitySources(offeredOptions, settings.qualityLimit)
+    val options: List<PlaybackOption> = remember(
+        offeredOptions, settings.qualityLimit, settings.sourceSizeLimit
+    ) {
+        excludeOversizedSources(
+            excludeHighQualitySources(offeredOptions, settings.qualityLimit),
+            settings.sourceSizeLimit
+        )
     }
-    val sourcesHiddenByQuality = offeredOptions.size - options.size
+    val sourcesHiddenByLimits = offeredOptions.size - options.size
 
     var optionIndex by remember { mutableIntStateOf(0) }
     var reloadToken by remember { mutableIntStateOf(0) }
@@ -456,17 +474,15 @@ fun PlayerScreen(
     var externalMessage by remember { mutableStateOf<String?>(null) }
     var autoHandoff by remember { mutableStateOf(false) }
     // Hand-off window. The local player is paused, never torn down, while this
-    // is open; a launched app is only considered in charge once it actually
-    // covers this activity.
+    // is open, and a launched app never closes it either: returning from that
+    // app resumes the same instance. The window only tracks whether a target
+    // has been picked so the OSD can say where the stream went.
     var openWithOpen by remember { mutableStateOf(false) }
     var openWithPlayers by remember { mutableStateOf<List<ExternalPlayerInfo>>(emptyList()) }
     var openWithError by remember { mutableStateOf<String?>(null) }
     var openWithTarget by remember { mutableStateOf<PlaybackOption?>(null) }
     var handoffLabel by remember { mutableStateOf<String?>(null) }
     var handoffAtMs by remember { mutableLongStateOf(0L) }
-    // True only for a named player; the chooser is a menu, not a player, so it
-    // may not be mistaken for a completed transfer.
-    var handoffDirect by remember { mutableStateOf(false) }
     var resumeAfterOpenWith by remember { mutableStateOf(false) }
 
     var osdVisible by remember { mutableStateOf(true) }
@@ -489,8 +505,6 @@ fun PlayerScreen(
 
     var decoderMode by remember { mutableStateOf(settings.decoderType) }
     var aspectMode by remember { mutableStateOf(AspectMode.FIT) }
-    var flipped by remember { mutableStateOf(false) }
-    var speed by remember { mutableFloatStateOf(1f) }
     var pendingSeekMs by remember { mutableStateOf<Long?>(null) }
     // Media3 reports position 0 once a fatal error drops the player to IDLE, so
     // the playhead is mirrored while it runs; failover, reloads and player
@@ -508,7 +522,7 @@ fun PlayerScreen(
     var saturation by remember { mutableFloatStateOf(1f) }
     var volumePercent by remember { mutableIntStateOf(100) }
     var nightMode by remember { mutableStateOf(false) }
-    var eqPreset by remember { mutableIntStateOf(0) }
+    var eqPreset by remember { mutableIntStateOf(EQ_CINEMA) }
     // Captions start off for every title: Media3 otherwise auto-selects the
     // first embedded text track and burns it over the opening frame. The
     // profile's subtitle language only biases which track a later caption
@@ -657,7 +671,11 @@ fun PlayerScreen(
             }
         }
     }
-    var languageAppliedFor by remember(item?.key, directUrl) { mutableStateOf<String?>(null) }
+    // Explicit audio/caption picks outlive a player rebuild (buffer settings,
+    // decoder cycle, native fallback) but not a change of source, whose track
+    // list is unrelated.
+    var audioPick by remember(playbackUrl, item?.key) { mutableStateOf<SavedTrackPick?>(null) }
+    var textPick by remember(playbackUrl, item?.key) { mutableStateOf<SavedTrackPick?>(null) }
 
     fun dismissNextUp() {
         nextUpCancelled = true
@@ -665,10 +683,19 @@ fun PlayerScreen(
         nextUpDueAtMs = null
     }
 
+    fun wake(target: OsdFocus = OsdFocus.PLAY) {
+        osdFocusTarget = target
+        osdVisible = true
+        interaction++
+    }
+
     BackHandler {
         when {
             locked -> osdVisible = true
-            panel != null -> panel = null
+            panel != null -> {
+                panel = null
+                if (!osdVisible) wake(OsdFocus.PLAY)
+            }
             showPicker -> {
                 showPicker = false
                 // Dismissing the manual picker starts the best source instead
@@ -683,12 +710,6 @@ fun PlayerScreen(
         }
     }
 
-    fun wake(target: OsdFocus = OsdFocus.PLAY) {
-        osdFocusTarget = target
-        osdVisible = true
-        interaction++
-    }
-
     fun cycleAspect() {
         aspectMode = AspectMode.entries[(aspectMode.ordinal + 1) % AspectMode.entries.size]
         interaction++
@@ -701,7 +722,11 @@ fun PlayerScreen(
     LaunchedEffect(current?.url) {
         val target = current ?: return@LaunchedEffect
         val repo = repository ?: return@LaunchedEffect
-        if (!autoHandoff && settings.playbackEngine == PlaybackEngine.EXTERNAL) {
+        // A named VOD player is the more explicit choice, so the chooser waits;
+        // live and direct-URL previews keep the plain EXTERNAL behavior.
+        val vodDefault = item != null && directUrl == null && !isLive &&
+            settings.externalVodPlayer.isNotBlank()
+        if (!autoHandoff && settings.playbackEngine == PlaybackEngine.EXTERNAL && !vodDefault) {
             autoHandoff = true
             // Closing waits for the chosen app to actually cover this screen;
             // a launch that never lands leaves the built-in player intact.
@@ -727,13 +752,41 @@ fun PlayerScreen(
     val playbackKind = remember(current) {
         current?.streamKind ?: StreamUrls.kindOf(current?.url)
     }
-    // HLS plays through the loopback proxy so playlists, keys and segments all
-    // carry the configured UA/Referer and survive redirects and mixed schemes.
-    // If the proxied URL fails, playback is retried once directly.
-    var proxyBypassed by remember(playbackUrl) { mutableStateOf(false) }
+    // HLS can play either from the origin or through the loopback proxy, which
+    // re-sends playlists, keys and segments with the configured browser profile.
+    // AUTO starts direct and falls back to the proxy when the origin refuses the
+    // request or the tune does not start; the answer is remembered per origin,
+    // so a header-gated provider is only learned once. The manual pin is kept
+    // for the current player session.
+    var transportMode by remember { mutableStateOf(TransportMode.AUTO) }
+    // Per source: the route this prepare actually took, and whether the direct
+    // attempt already failed, so AUTO falls back exactly once.
+    var directRoute by remember(playbackUrl) { mutableStateOf(false) }
+    var directFailed by remember(playbackUrl) { mutableStateOf(false) }
+    // A denial only proves the origin refused the direct route. The proxy
+    // verdict is written once that route actually plays, so a session-limit
+    // ban that denies both routes never pins the origin to the proxy for the
+    // whole verdict lifetime.
+    var pendingProxyVerdict by remember(playbackUrl) { mutableStateOf(false) }
+    // A proxy upstream trip may still leave the origin reachable directly, even
+    // after AUTO once chose the proxy; force that single attempt.
+    var proxyFallback by remember(playbackUrl) { mutableStateOf(false) }
     // A native engine that decodes audio but never creates a video output
     // leaves a black screen; the source is then rebuilt on the built-in player.
     var nativeFallback by remember(playbackUrl) { mutableStateOf(false) }
+    // The load path types an extensionless link by walking it once. Keeping the
+    // answer lets the adaptive window apply from the first prepare and stops a
+    // rebuild from resolving the same link a second time.
+    var discoveredSource by remember(playbackUrl) { mutableStateOf<SourceResolution?>(null) }
+    // Only HLS has a proxy alternative; a progressive MP4/Matroska link always
+    // plays from the origin, so the route control is hidden for it.
+    val proxyCapable = isHlsUrl(playbackUrl, playbackKind ?: discoveredSource?.kind)
+    // The verdict is per origin, not per link: every channel on a gated host
+    // benefits from the one denial that taught it.
+    val transportOrigin = remember(playbackUrl, discoveredSource) {
+        StreamUrls.originOf(discoveredSource?.url ?: playbackUrl)
+    }
+    val originVerdict = app?.container?.transportMemory?.verdict(transportOrigin)
     val lowRamDevice = remember { DeviceProfile.isLowRam(context) }
     // Buffer settings are rebuild-class: the load control and the native
     // engine caches are fixed at construction. They enter the build only after
@@ -749,23 +802,36 @@ fun PlayerScreen(
         delay(BUFFER_SETTLE_MS)
         settledBuffer = bufferSelection
     }
-    val profileAdaptive = remember(playbackUrl, playbackKind) {
-        isAdaptiveUrl(playbackUrl, playbackKind)
+    val profileAdaptive = remember(playbackUrl, playbackKind, discoveredSource) {
+        isAdaptiveUrl(playbackUrl, playbackKind ?: discoveredSource?.kind)
     }
     // One resolution for the build, the live re-apply paths and the panels.
     // Buffer fields come from the settled selection, so the player key only
     // moves once a sweep has finished; everything else is already live.
-    val profile = playbackProfile(
-        settings = settings,
-        decoder = decoderMode,
-        adaptive = profileAdaptive,
-        lowRam = lowRamDevice,
-        tier = settledBuffer.tier,
-        lowLatency = settledBuffer.lowLatency,
-        highCapacityVod = settledBuffer.highCapacity,
-        headers = playbackHeaders,
-        forceBuiltIn = nativeFallback
-    )
+    // Remembered because this composable also hosts the one-second playhead
+    // state: without the key it reallocated the profile and its rebuild-key
+    // list on every tick for no change.
+    val profile = remember(
+        settings,
+        decoderMode,
+        profileAdaptive,
+        lowRamDevice,
+        settledBuffer,
+        playbackHeaders,
+        nativeFallback
+    ) {
+        playbackProfile(
+            settings = settings,
+            decoder = decoderMode,
+            adaptive = profileAdaptive,
+            lowRam = lowRamDevice,
+            tier = settledBuffer.tier,
+            lowLatency = settledBuffer.lowLatency,
+            highCapacityVod = settledBuffer.highCapacity,
+            headers = playbackHeaders,
+            forceBuiltIn = nativeFallback
+        )
+    }
     // Reloads (retry timer, proxy bypass, RELOAD button) re-prepare the same
     // player instance instead of building a new one: tearing down Media3 or a
     // native engine costs a codec re-init and drops every buffered segment,
@@ -792,6 +858,9 @@ fun PlayerScreen(
         }
     }
     val playerOrNull: Player? = builtPlayer?.player
+    // VLC and Media3 open HTTPS themselves; MPV routes everything through the
+    // loopback proxy, so the DIRECT pin cannot change its route.
+    val engineCanDirect = playerOrNull?.canBypassProxy() ?: true
     // VOD resumes where the replaced player stopped; live re-tunes to the edge.
     var carryOverPositionMs by remember(playbackUrl) { mutableLongStateOf(0L) }
     DisposableEffect(playerOrNull, isLive) {
@@ -801,6 +870,24 @@ fun PlayerScreen(
                 carryOverPositionMs = leaving.currentPosition.coerceAtLeast(0L)
             }
             leaving?.release()
+        }
+    }
+    // A requested native engine can come back as the built-in player: its
+    // library is missing, the API floor is not met, or construction threw.
+    // Record the fallback so later rebuilds do not retry a dead engine on every
+    // settings change. DRM streams skip the engine by design and are excluded.
+    LaunchedEffect(playerOrNull, profile.engine, nativeFallback) {
+        if (nativeFallback || playbackDrm != null) return@LaunchedEffect
+        val requested = settings.playbackEngine
+        if (requested != PlaybackEngine.VLC && requested != PlaybackEngine.MPV) {
+            return@LaunchedEffect
+        }
+        if (playerOrNull != null && playerOrNull !is NativeEnginePlayer) {
+            Log.w(
+                "StreamLine:player",
+                "${requested.name} unavailable · staying on the built-in player"
+            )
+            nativeFallback = true
         }
     }
     // UA and headers are live-class for Media3: the factory hands every new
@@ -900,13 +987,17 @@ fun PlayerScreen(
     }
 
     var nativeError by remember { mutableStateOf<PlaybackFailure?>(null) }
-    var reconnectAttempt by remember { mutableIntStateOf(0) }
+    // Scoped to the source: a fresh stream must not inherit the previous one's
+    // spent retry budget, which otherwise opens the panel after the first error.
+    var reconnectAttempt by remember(playbackUrl) { mutableIntStateOf(0) }
     // Slips past the live edge are re-prepared straight to the edge; they are
     // counted apart from reconnectAttempt so a hiccup never spends the budget a
     // real reconnect needs.
     var liveEdgeRecoveries by remember(playbackUrl) { mutableIntStateOf(0) }
     var reconnectNotice by remember { mutableStateOf<String?>(null) }
-    var retryPlanMs by remember { mutableStateOf<Long?>(null) }
+    // Per source: a pending backoff for the old stream must not fire against
+    // the one the viewer just tuned to.
+    var retryPlanMs by remember(playbackUrl) { mutableStateOf<Long?>(null) }
     // Repeated transport failures at the proxy mean the upstream is gone; the
     // player is pushed out of its retry loop instead of waiting it out.
     val proxyTrips = remember(playbackUrl) { MutableSharedFlow<String>(extraBufferCapacity = 4) }
@@ -965,6 +1056,21 @@ fun PlayerScreen(
                 "stall · retries exhausted after $reconnectAttempt attempt(s); opening the panel"
             )
         }
+        // AUTO's last move before the panel: a frozen direct connection may be
+        // an origin that only answers the proxy's browser profile.
+        if (target != null && proxyCapable && directRoute && !directFailed &&
+            transportMode == TransportMode.AUTO
+        ) {
+            directFailed = true
+            pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 5_000 }
+            runCatching { target.stop() }
+            nativeError = null
+            failoverNote = null
+            reconnectNotice = "Stalled on the direct route · switching to the proxy"
+            retryPlanMs = null
+            reloadToken++
+            return
+        }
         nativeError = PlaybackFailure(
             kind = FailureKind.NETWORK,
             title = title,
@@ -978,7 +1084,11 @@ fun PlayerScreen(
     }
 
     fun recoverFromProxyFailure() {
-        if (nativeError != null || proxyBypassed) return
+        if (nativeError != null || directRoute || transportMode == TransportMode.PROXY) return
+        // AUTO already tried the origin on this tune; a second direct attempt
+        // would only re-run a route that just failed. A pinned PROXY never
+        // leaves the proxy.
+        if (directFailed) return
         val target = playerOrNull ?: return
         if (!target.canBypassProxy()) return
         // A provider that refused the configured agent refuses the direct
@@ -990,8 +1100,41 @@ fun PlayerScreen(
         pendingSeekMs = if (!isLive) resumePosition().takeIf { it > 5_000 } else null
         runCatching { target.stop() }
         reconnectNotice = "Provider unreachable · reconnecting directly"
-        proxyBypassed = true
+        proxyFallback = true
         reloadToken++
+    }
+
+    /**
+     * Applies a manual route choice. Pinned modes suppress the automatic
+     * fallbacks, so DIRECT really stays direct until the viewer changes it.
+     * Switching only re-prepares when the resulting route differs; flipping
+     * AUTO↔DIRECT while both already play direct must not restart the stream.
+     */
+    fun setTransportMode(mode: TransportMode) {
+        val currentVerdict = app?.container?.transportMemory?.verdict(transportOrigin)
+        val target = playerOrNull
+        val nextDirect = transportUsesDirect(
+            mode = mode,
+            verdict = if (mode == TransportMode.AUTO) currentVerdict else null,
+            canDirect = target?.canBypassProxy() ?: true,
+            autoDirectFailed = false
+        )
+        val routeChanges = proxyCapable && nextDirect != directRoute
+        transportMode = mode
+        if (routeChanges) {
+            directFailed = false
+            proxyFallback = false
+            pendingProxyVerdict = false
+            pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
+            runCatching { target?.stop() }
+            nativeError = null
+            failoverNote = null
+            reconnectAttempt = 0
+            reconnectNotice = null
+            retryPlanMs = null
+            reloadToken++
+            interaction++
+        }
     }
 
     // Channel switching resolves each tune through the addon that published the channel.
@@ -1036,6 +1179,12 @@ fun PlayerScreen(
         if (!osdVisible || !isLive) return@LaunchedEffect
         val repo = repository ?: return@LaunchedEffect
         delay(400)
+        // The neighbour resolve pulls manifests from the same CDN the channel
+        // on screen is still filling from. While the player is buffering (or
+        // has failed) that read is the one the viewer is waiting on, so leave
+        // the prefetch for the next OSD open instead of stealing its bytes.
+        val target = playerOrNull
+        if (target != null && target.playbackState != Player.STATE_READY) return@LaunchedEffect
         listOf(liveIndex - 1, liveIndex + 1).forEach { index ->
             channels.getOrNull(index)?.let { channel ->
                 runCatching { repo.prefetchLive(channel) }
@@ -1093,7 +1242,9 @@ fun PlayerScreen(
         failedIndices = emptySet()
         failoverNote = null
         nativeError = null
-        pendingSeekMs = 0L
+        // Null, not 0: a zero pending seek made the prepare gate issue a
+        // pointless seekTo(0) on the fresh episode and delay its first frame.
+        pendingSeekMs = null
         lastKnownPositionMs = 0L
         reloadToken++
         osdFocusTarget = OsdFocus.PLAY
@@ -1191,6 +1342,7 @@ fun PlayerScreen(
                 ?: 0f
             FrameRateMatching.apply(activity, rate)
         }
+        var audioLanguageApplied = false
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -1263,6 +1415,26 @@ fun PlayerScreen(
                     runCatching { target.prepare() }
                     return
                 }
+                // AUTO opens direct. A 401/403/407/451 there is the origin
+                // refusing the request itself, not the account being throttled,
+                // so hand the URL to the proxy once: it re-sends every playlist
+                // and segment with the browser profile this CDN accepts. The
+                // proxy verdict is remembered per origin once that route plays,
+                // so the next tune there starts on the proxy.
+                if (proxyCapable && directRoute && !directFailed &&
+                    transportMode == TransportMode.AUTO && error.isOriginDenial()
+                ) {
+                    directFailed = true
+                    pendingProxyVerdict = true
+                    if (!isLive) pendingSeekMs = resumePosition().takeIf { it > 5_000 }
+                    runCatching { target.stop() }
+                    nativeError = null
+                    failoverNote = null
+                    reconnectNotice = "Origin refused the direct request · retrying through the proxy"
+                    retryPlanMs = null
+                    reloadToken++
+                    return
+                }
                 // Flussonic-style token protection answers 401/403/429 when the
                 // account's session limit is hit. Reconnecting straight away (or
                 // bypassing the proxy) only adds sessions and refreshes the
@@ -1317,12 +1489,24 @@ fun PlayerScreen(
                     retryPlanMs = waitMs
                     return
                 }
-                // A bypass only helps transport faults. When the provider
-                // denies the direct request outright, the proxy is the side
-                // that can present a browser profile this CDN accepts.
-                if (proxyBypassed && error.isHttpAuthorizationFailure()) {
-                    proxyBypassed = false
+                // The retries above all ran on the direct route. A proxy retry
+                // is the last transport-level move before the panel: the proxy
+                // fetches through a different stack (its own resolver, cookie-
+                // less requests, browser masking), which rescues origins that
+                // drop or reset direct sockets. No verdict is recorded — a CDN
+                // hiccup is not gating, and the next tune still starts direct.
+                if (proxyCapable && directRoute && !directFailed &&
+                    transportMode == TransportMode.AUTO &&
+                    error.isRetryableInPlace() &&
+                    !error.isLicenceAcquisitionFailure()
+                ) {
+                    directFailed = true
+                    if (!isLive) pendingSeekMs = resumePosition().takeIf { it > 5_000 }
+                    runCatching { target.stop() }
                     nativeError = null
+                    failoverNote = null
+                    reconnectNotice = "Direct connection failed · retrying through the proxy"
+                    retryPlanMs = null
                     reloadToken++
                     return
                 }
@@ -1339,31 +1523,15 @@ fun PlayerScreen(
                 nativeError = failure
                 reconnectNotice = null
                 retryPlanMs = null
-                // Keep the panel up: a silent reload here only hides the failure
-                // and delays the next verdict by another loader timeout. RELOAD
-                // (or the next tune) then runs without the proxy.
-                // A deny on the direct URL spends another provider session and
-                // keeps the ban fresh, so only transport failures try the bypass.
-                // A behind-window stall is tune latency, not a proxy fault, and
-                // the proxy is often the only thing a UA-gated CDN will answer.
-                val proxyMaskRequired = proxyStreamId
-                    ?.let { NativeStreamProxy.requiresBrowserMask(it) } == true
-                if (!proxyBypassed &&
-                    !proxyMaskRequired &&
-                    !error.isHttpAuthorizationFailure() &&
-                    error.errorCode != PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW &&
-                    isHlsUrl(playbackUrl, playbackKind) &&
-                    target.canBypassProxy()
-                ) {
-                    proxyBypassed = true
-                }
             }
 
             override fun onTracksChanged(tracksSnapshot: Tracks) {
                 tracks = tracksSnapshot
-                val mediaKey = "${item?.key}:$activeSeason:$activeEpisode"
-                if (languageAppliedFor != mediaKey) {
-                    languageAppliedFor = mediaKey
+                // The preferred language is applied once per player instance: a
+                // rebuild parses fresh groups, so keying it to the title alone
+                // skipped the new instance and played the default track.
+                if (!audioLanguageApplied) {
+                    audioLanguageApplied = true
                     val audio = trackOverride(
                         tracksSnapshot, C.TRACK_TYPE_AUDIO, activeProfile.audioLanguage
                     )
@@ -1372,6 +1540,35 @@ fun PlayerScreen(
                             .buildUpon()
                             .setOverrideForType(audio)
                             .build()
+                    }
+                }
+                // Then the viewer's explicit picks, which the rebuilt instance
+                // would otherwise silently drop in favour of the defaults.
+                val explicit = target.trackSelectionParameters.buildUpon()
+                var hasExplicit = false
+                audioPick?.let { pick ->
+                    savedTrackOverride(tracksSnapshot, C.TRACK_TYPE_AUDIO, pick)?.let {
+                        explicit.setOverrideForType(it)
+                        hasExplicit = true
+                    }
+                }
+                // A saved caption pick must not outlive the viewer switching
+                // captions off: re-applying it here would re-enable the text
+                // renderer behind an "Off" label.
+                if (!dropSubtitles) {
+                    textPick?.let { pick ->
+                        savedTrackOverride(tracksSnapshot, C.TRACK_TYPE_TEXT, pick)?.let {
+                            explicit.setOverrideForType(it)
+                            hasExplicit = true
+                        }
+                    }
+                }
+                if (hasExplicit) {
+                    val updated = explicit.build()
+                    // Native engines publish Tracks on every ES change; setting
+                    // identical parameters again re-selects tracks for nothing.
+                    if (updated != target.trackSelectionParameters) {
+                        target.trackSelectionParameters = updated
                     }
                 }
                 val audit = AudioAuditProbe.inspect(
@@ -1421,13 +1618,15 @@ fun PlayerScreen(
     // Lifecycle guard: stop releasing playback when the activity leaves the screen
     // (PiP keeps ON_PAUSE only, so playback survives picture-in-picture). Live
     // streams get stop() instead of pause() — that drops the entire buffered
-    // back-buffer, and the next prepare starts from the live edge again.
+    // back-buffer, and the next prepare starts from the live edge again. A
+    // hand-off pauses the same instance and never closes it: the external player
+    // owns the foreground, and BACK from it lands on the paused frame instead of
+    // a destroyed activity.
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumeOnStart by remember { mutableStateOf(false) }
     val handoffInFlight by rememberUpdatedState(handoffLabel)
     val handoffStartedAt by rememberUpdatedState(handoffAtMs)
     val handoffResume by rememberUpdatedState(resumeAfterOpenWith)
-    val handoffIsDirect by rememberUpdatedState(handoffDirect)
     DisposableEffect(lifecycleOwner, playerOrNull) {
         val observer = LifecycleEventObserver { _, event ->
             val target = playerOrNull ?: return@LifecycleEventObserver
@@ -1439,11 +1638,6 @@ fun PlayerScreen(
                     } else {
                         target.pause()
                     }
-                    // A named player now owns the screen, so the transfer has
-                    // landed: only at this point may the built-in player close,
-                    // which leaves exactly one player running. The system
-                    // chooser is not a player, so it never triggers this.
-                    if (handoffInFlight != null && handoffIsDirect) onExit()
                 }
                 Lifecycle.Event.ON_START -> {
                     if (resumeOnStart) {
@@ -1460,9 +1654,15 @@ fun PlayerScreen(
                         SystemClock.elapsedRealtime() - handoffStartedAt > HANDOFF_SETTLE_MS
                     ) {
                         handoffLabel = null
-                        handoffDirect = false
                         externalMessage = "Back in the app player"
-                        if (handoffResume) target.play()
+                        if (handoffResume) {
+                            // Live streams were stopped on the way out, and a
+                            // stopped player needs a fresh prepare before play.
+                            if (target.playbackState == Player.STATE_IDLE) {
+                                runCatching { target.prepare() }
+                            }
+                            target.play()
+                        }
                     }
                 }
                 else -> Unit
@@ -1483,9 +1683,14 @@ fun PlayerScreen(
             lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
         ) {
             handoffLabel = null
-            handoffDirect = false
             externalMessage = "Hand-off to $label did not start · still in the app player"
-            if (resumeAfterOpenWith) playerOrNull?.play()
+            val target = playerOrNull
+            if (resumeAfterOpenWith && target != null) {
+                if (target.playbackState == Player.STATE_IDLE) {
+                    runCatching { target.prepare() }
+                }
+                target.play()
+            }
         }
     }
 
@@ -1516,17 +1721,42 @@ fun PlayerScreen(
         // URIs against the URL it is handed, and the final response names the
         // extractor, which otherwise defaults to progressive and throws
         // UnrecognizedInputFormatException on a playlist.
-        val discovered = if (playbackKind == null && StreamUrls.needsKindDiscovery(directUrl)) {
+        val cached = discoveredSource
+        val discovered = cached ?: if (
+            playbackKind == null && StreamUrls.needsKindDiscovery(directUrl)
+        ) {
             StremioAddons.resolveSource(directUrl, playbackHeaders, settings.userAgentString)
         } else {
             null
         }
+        if (cached == null && discovered != null) {
+            discoveredSource = discovered
+            // An adaptive kind moves the window, the byte budget and the native
+            // caches, all fixed at construction. Let the rebuild this state
+            // change triggers own the tune instead of preparing a progressive
+            // profile that is about to be discarded.
+            if (discovered.kind != null) return@LaunchedEffect
+        }
         val resolvedUrl = discovered?.url ?: directUrl
         val resolvedKind = discovered?.kind ?: playbackKind
-        // Proxy bypass is a per-attempt decision: it must not restart this
-        // effect on its own (it is always paired with a reload token bump),
-        // otherwise a restored proxy would interrupt healthy playback.
-        val proxied = if (!proxyBypassed &&
+        // The route is a per-attempt decision: it must not restart this effect
+        // on its own (it is always paired with a reload token bump), otherwise
+        // a fallback would interrupt healthy playback. AUTO opens direct,
+        // skips a route the origin already refused (learned verdict), and stays
+        // on the proxy once this tune's direct attempt failed. DIRECT and PROXY
+        // are pins: they ignore both the verdict and the fallbacks.
+        val canDirect = target.canBypassProxy()
+        val direct = proxyFallback || transportUsesDirect(
+            mode = transportMode,
+            verdict = if (transportMode == TransportMode.AUTO) {
+                app?.container?.transportMemory?.verdict(transportOrigin)
+            } else {
+                null
+            },
+            canDirect = canDirect,
+            autoDirectFailed = directFailed
+        )
+        val proxied = if (!direct &&
             (resolvedKind == StreamKind.HLS || isHlsUrl(resolvedUrl))
         ) {
             NativeStreamProxy.proxyHls(
@@ -1537,6 +1767,10 @@ fun PlayerScreen(
         } else {
             null
         }
+        directRoute = proxied == null
+        // The forced direct attempt is spent; a later reload follows the
+        // normal mode/verdict/directFailed policy again.
+        proxyFallback = false
         proxyStreamId = proxied?.streamId
         val sourceUrl = proxied?.url ?: resolvedUrl
         runCatching {
@@ -1590,19 +1824,28 @@ fun PlayerScreen(
             carryOverPositionMs = 0L
             val planSeek =
                 if (!startOverrideApplied && optionIndex == 0) plan?.startPositionMs ?: 0L else 0L
-            val seek = pendingSeekMs ?: override ?: carried.takeIf { it > 0 } ?: planSeek
+            val pending = pendingSeekMs
+            val seek = pending ?: override ?: carried.takeIf { it > 0 } ?: planSeek
             pendingSeekMs = null
-            if (seek > 5_000) target.seekTo(seek)
+            // An explicit resume point (retry, failover, native fallback,
+            // manual reload) is honoured even a few seconds in; only a plan
+            // start or a carried playhead skips the sub-5 s floor.
+            if (pending != null || override != null || seek > 5_000) target.seekTo(seek)
             target.playWhenReady = true
-            target.setPlaybackSpeed(speed)
             // The player is built with text tracks disabled. Every reload has to
             // re-assert the current choice, otherwise a side-loaded subtitle is
             // attached to the media item but the text renderer never starts, so
             // the cue file is never fetched.
-            target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
+            val textParams = target.trackSelectionParameters.buildUpon()
                 .clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, dropSubtitles)
-                .build()
+            if (!dropSubtitles) {
+                textPick?.let { pick ->
+                    tracks?.let { savedTrackOverride(it, C.TRACK_TYPE_TEXT, pick) }
+                        ?.let { textParams.setOverrideForType(it) }
+                }
+            }
+            target.trackSelectionParameters = textParams.build()
         }.onFailure {
             nativeError = PlaybackFailure(
                 kind = FailureKind.UNKNOWN,
@@ -1634,8 +1877,8 @@ fun PlayerScreen(
 
     // The retry policy can keep a tune buffering for minutes when the
     // provider accepts the request and then sends nothing. Give every tune a
-    // hard deadline: try the direct URL once (proxy bypass), then surface the
-    // usual "Stream interrupted" panel instead of an endless spinner. Live
+    // hard deadline: on the AUTO direct route, try the proxy once, then surface
+    // the usual "Stream interrupted" panel instead of an endless spinner. Live
     // gets the tighter window; a film may legitimately wait on a long manifest
     // chain, so it gets a few more seconds.
     LaunchedEffect(isLive, playerOrNull, playbackUrl, reloadToken) {
@@ -1654,16 +1897,29 @@ fun PlayerScreen(
                 watched,
                 SystemClock.elapsedRealtime(),
                 nativeError != null,
-                proxyBypassed,
-                isHlsUrl(playbackUrl, playbackKind) && target.canBypassProxy()
+                canTryProxy = proxyCapable && directRoute && !directFailed &&
+                    transportMode == TransportMode.AUTO,
+                isHls = proxyCapable
             )
             when (decision) {
-                TuneDecision.Ready, TuneDecision.Aborted -> return@LaunchedEffect
+                TuneDecision.Ready -> {
+                    // The proxy route reached READY after a direct denial: that
+                    // is the evidence the proxy actually rescues this origin.
+                    if (!directRoute && pendingProxyVerdict) {
+                        app?.container?.transportMemory?.record(
+                            transportOrigin, TransportVerdict.PROXY
+                        )
+                        pendingProxyVerdict = false
+                    }
+                    return@LaunchedEffect
+                }
+                TuneDecision.Aborted -> return@LaunchedEffect
                 TuneDecision.Continue -> delay(500)
-                TuneDecision.BypassProxy, TuneDecision.Failed -> {
+                TuneDecision.TryProxy, TuneDecision.Failed -> {
                     runCatching { target.stop() }
-                    if (decision == TuneDecision.BypassProxy) {
-                        proxyBypassed = true
+                    if (decision == TuneDecision.TryProxy) {
+                        directFailed = true
+                        reconnectNotice = "Direct tune timed out · retrying through the proxy"
                         reloadToken++
                     } else {
                         nativeError = PlaybackFailure(
@@ -1694,6 +1950,17 @@ fun PlayerScreen(
         val watched = target.asWatchdogPlayer()
         while (isActive) {
             if (target.playerError != null || nativeError != null) return@LaunchedEffect
+            // A proxied stream that needed the browser-mask retry proves the
+            // origin is UA-gated, even though direct playback never failed here
+            // (the verdict was learned earlier, or the mask only fired on a
+            // later segment). Teaching it keeps the next tune off the direct
+            // route. The store dedupes, so this is a no-op after the first hit.
+            val activeProxy = proxyStreamId
+            if (activeProxy != null && transportMode == TransportMode.AUTO &&
+                NativeStreamProxy.requiresBrowserMask(activeProxy)
+            ) {
+                app?.container?.transportMemory?.record(transportOrigin, TransportVerdict.PROXY)
+            }
             when (watchdog.tick(watched, SystemClock.elapsedRealtime(), isScrubbing)) {
                 StallDecision.Ended -> return@LaunchedEffect
                 StallDecision.Stalled -> {
@@ -1709,13 +1976,19 @@ fun PlayerScreen(
         }
     }
 
-    // A direct-URL fallback that plays cleanly for a sustained stretch is
-    // considered stable; restoring the flag only affects the next prepare, so
-    // the running stream is never interrupted.
-    LaunchedEffect(proxyBypassed, isPlaying, playbackUrl) {
-        if (!proxyBypassed || !isPlaying) return@LaunchedEffect
-        delay(PROXY_RESTORE_MS)
-        if (proxyBypassed && isPlaying) proxyBypassed = false
+    // A direct route that plays cleanly for a sustained stretch is evidence the
+    // origin serves this player as-is, so AUTO remembers it and stops paying
+    // for the proxy path's extra hop. Pinned modes teach nothing: a forced
+    // DIRECT run says the viewer chose it, not that AUTO should keep doing it.
+    // The running stream is never interrupted.
+    LaunchedEffect(directRoute, isPlaying, playbackUrl, transportMode, transportOrigin) {
+        if (!directRoute || !isPlaying) return@LaunchedEffect
+        if (transportMode != TransportMode.AUTO || transportOrigin == null) return@LaunchedEffect
+        if (originVerdict == TransportVerdict.DIRECT) return@LaunchedEffect
+        delay(TRANSPORT_LEARN_MS)
+        if (directRoute && isPlaying) {
+            app?.container?.transportMemory?.record(transportOrigin, TransportVerdict.DIRECT)
+        }
     }
 
     DisposableEffect(playerOrNull, playbackUrl) {
@@ -1737,11 +2010,11 @@ fun PlayerScreen(
             .build()
     }
 
-    // Video ceiling for every source, live and VOD alike: renditions within the
-    // resolved cap (1080p at the top), while ABR may still step further down.
-    // The exclusion setting is a hard ceiling: it hides its tier and everything
-    // above. A decoder that drops frames pulls this source down to 720p for the
-    // rest of playback. Rebuilt on the running player, never by a teardown.
+    // Video ceiling for every source, live and VOD alike: the quality setting's
+    // tier and everything below it, with ABR free to step further down. The
+    // exclusion setting is a hard ceiling: it hides everything above its tier.
+    // A decoder that drops frames pulls this source down to 720p for the rest
+    // of playback. Rebuilt on the running player, never by a teardown.
     LaunchedEffect(
         playerOrNull,
         qualityCap,
@@ -1760,10 +2033,6 @@ fun PlayerScreen(
             .applyBandwidthCap(profile.bandwidthCap)
         builder.setMaxVideoSize(cap.maxWidth, maxHeight)
         target.trackSelectionParameters = builder.build()
-    }
-
-    LaunchedEffect(playerOrNull, speed) {
-        playerOrNull?.setPlaybackSpeed(speed)
     }
 
     LaunchedEffect(playerOrNull, current?.url) {
@@ -1859,7 +2128,10 @@ fun PlayerScreen(
         nativeError = null
     }
 
-    LaunchedEffect(retryPlanMs, reloadToken) {
+    // Keyed on the backoff value, not on reloadToken: an unrelated reload
+    // (proxy bypass, an OSD action) must not restart the wait, and the plan is
+    // scoped to the source so a tuned channel never fires a stale retry.
+    LaunchedEffect(retryPlanMs, playbackUrl) {
         val waitMs = retryPlanMs ?: return@LaunchedEffect
         delay(waitMs)
         retryPlanMs = null
@@ -1870,9 +2142,12 @@ fun PlayerScreen(
 
     // Only a sustained session clears the backoff; a stream that plays for a
     // few seconds and drops again must keep escalating instead of resetting.
+    // Keyed on the stream and the playing state, not on reloadToken: a reload
+    // that keeps playing is not a new session, and re-keying it there would
+    // restart this clock on every rebuffer.
     // The live-edge budget is reset on the same clock: a channel that holds
     // the edge for 90 s has proven it can stay there.
-    LaunchedEffect(isPlaying, optionIndex, reloadToken) {
+    LaunchedEffect(isPlaying, optionIndex, playbackUrl) {
         if (!isPlaying || (reconnectAttempt == 0 && liveEdgeRecoveries == 0)) {
             return@LaunchedEffect
         }
@@ -2126,28 +2401,10 @@ fun PlayerScreen(
     } else null
 
     val audioChoices = remember(tracks) {
-        buildTrackChoices(tracks, C.TRACK_TYPE_AUDIO) { format, index ->
-            val language = format.language?.let { tag ->
-                runCatching { Locale.forLanguageTag(tag).displayLanguage }.getOrNull()
-            }
-            listOfNotNull(
-                language?.takeIf { it.isNotBlank() },
-                format.label,
-                if (format.channelCount > 0) "${format.channelCount} ch" else null
-            ).ifEmpty { listOf("Track ${index + 1}") }.joinToString(" · ")
-        }
+        buildTrackChoices(tracks, C.TRACK_TYPE_AUDIO, ::audioTrackLabel)
     }
     val textChoices = remember(tracks) {
-        buildTrackChoices(tracks, C.TRACK_TYPE_TEXT) { format, index ->
-            val language = format.language?.let { tag ->
-                runCatching { Locale.forLanguageTag(tag).displayLanguage }.getOrNull()
-            }
-            listOfNotNull(
-                language?.takeIf { it.isNotBlank() },
-                format.label,
-                if (format.sampleMimeType == MimeTypes.TEXT_VTT) "WebVTT" else null
-            ).ifEmpty { listOf("Subtitles ${index + 1}") }.joinToString(" · ")
-        }
+        buildTrackChoices(tracks, C.TRACK_TYPE_TEXT, ::textTrackLabel)
     }
 
     var infoRows by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
@@ -2197,6 +2454,7 @@ fun PlayerScreen(
 
     fun selectAudio(choice: TrackChoice) {
         val target = playerOrNull ?: return
+        audioPick = SavedTrackPick(choice.label, choice.language)
         target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
             .setOverrideForType(TrackSelectionOverride(choice.group, choice.index))
             .build()
@@ -2206,6 +2464,7 @@ fun PlayerScreen(
 
     fun autoAudio() {
         val target = playerOrNull ?: return
+        audioPick = null
         target.trackSelectionParameters = target.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
             .build()
@@ -2217,10 +2476,12 @@ fun PlayerScreen(
         val target = playerOrNull ?: return
         val builder = target.trackSelectionParameters.buildUpon()
         if (choice == null) {
+            textPick = null
             builder.clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             dropSubtitles = true
         } else {
+            textPick = SavedTrackPick(choice.label, choice.language)
             builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setOverrideForType(TrackSelectionOverride(choice.group, choice.index))
             dropSubtitles = false
@@ -2292,39 +2553,92 @@ fun PlayerScreen(
         wake(OsdFocus.PLAY)
     }
 
+    // Streams that carry pipe headers, ride on a spoofed UA, or already needed
+    // the on-device proxy cannot travel as a bare URL: VLC and mpv ignore the
+    // `headers` extra, so the origin would deny them. Those hand-offs get the
+    // loopback relay, which re-sends every request with the same headers while
+    // this process stays alive. DASH/SMOOTH manifests are left direct — their
+    // child URLs point back at the origin, where a relay cannot follow them.
+    fun relayedHandoff(target: PlaybackOption): Boolean {
+        val kind = target.streamKind ?: discoveredSource?.kind ?: StreamUrls.kindOf(target.url)
+        if (kind == StreamKind.DASH || kind == StreamKind.SMOOTH) return false
+        return target.headers.isNotEmpty() ||
+            settings.playerUserAgent != PlayerUaPreset.DEFAULT ||
+            proxyStreamId != null
+    }
+
     /**
      * Hands [target] to one app (or the chooser). The local player stays paused
-     * but alive; a named app that comes to the front then closes it (ON_STOP),
-     * and anything else drops back into the same paused instance.
+     * but alive for the whole hand-off, so BACK from the external player lands
+     * on the same frame instead of a destroyed activity. Returns false when no
+     * installed activity accepted the stream.
      */
-    fun handOffTo(target: PlaybackOption, packageName: String?) {
+    fun handOffTo(target: PlaybackOption, packageName: String?): Boolean {
         val label = if (packageName == null) {
             "the system chooser"
         } else {
             openWithPlayers.firstOrNull { it.packageName == packageName }
                 ?.label?.takeIf { it.isNotBlank() } ?: packageName
         }
+        // Hand over the URL this player actually reads, not the short link.
+        val sourceUrl = discoveredSource?.url ?: target.url
+        val kind = target.streamKind ?: discoveredSource?.kind ?: StreamUrls.kindOf(sourceUrl)
+        val relayUrl = if (relayedHandoff(target)) {
+            NativeStreamProxy.proxyStream(
+                url = sourceUrl,
+                userAgent = settings.userAgentString,
+                headers = target.headers
+            )?.url
+        } else {
+            null
+        }
         val ok = ExternalIntents.launchIn(
             context = context,
             packageName = packageName,
-            url = target.url,
+            url = relayUrl ?: sourceUrl,
             headers = target.headers,
             userAgent = settings.userAgentString,
-            kind = target.streamKind ?: StreamUrls.kindOf(target.url)
+            kind = kind
         )
         if (!ok) {
             openWithError =
                 "Nothing on this device accepted the stream. Install a video player or copy the URL."
-            return
+            externalMessage = "External hand-off unavailable · using built-in player"
+            return false
         }
         openWithOpen = false
         openWithError = null
         handoffLabel = label
         handoffAtMs = SystemClock.elapsedRealtime()
-        handoffDirect = packageName != null
         playerOrNull?.pause()
-        externalMessage = "Handing off to $label…"
+        externalMessage = if (relayUrl != null) {
+            "Handing off to $label · relayed with the stream headers…"
+        } else {
+            "Handing off to $label…"
+        }
         interaction++
+        return true
+    }
+
+    // VOD default: with an external package chosen in Settings, a movie or
+    // episode hands off as soon as its source is current. Live tuning and the
+    // direct-URL preview stay built-in; the per-URL flag hands each picked
+    // source off once, including a new episode or a pick from the list.
+    var vodHandoffDone by remember(current?.url) { mutableStateOf(false) }
+    LaunchedEffect(current?.url, settings.externalVodPlayer, isLive, directUrl) {
+        val target = current ?: return@LaunchedEffect
+        val packageName = settings.externalVodPlayer
+        if (packageName.isBlank() || isLive || item == null || directUrl != null ||
+            vodHandoffDone
+        ) {
+            return@LaunchedEffect
+        }
+        vodHandoffDone = true
+        // The picker normally fills this; the auto path needs the label too.
+        if (openWithPlayers.none { it.packageName == packageName }) {
+            openWithPlayers = repository?.installedExternalPlayers().orEmpty()
+        }
+        handOffTo(target, packageName)
     }
 
     fun enterPip() {
@@ -2371,7 +2685,7 @@ fun PlayerScreen(
         }
     }
     LaunchedEffect(equalizer, eqPreset, nightMode) {
-        applyEqualizer(equalizer, if (nightMode && eqPreset == 0) 3 else eqPreset)
+        applyEqualizer(equalizer, if (nightMode && eqPreset == EQ_FLAT) EQ_CINEMA else eqPreset)
     }
     // 0–100% attenuates the player output; 100–200% stays at unity gain and
     // adds loudness compensation for quiet film mixes. Applying both keeps the
@@ -2597,7 +2911,6 @@ fun PlayerScreen(
                                 factory = { nativeEngine.renderView },
                                 modifier = Modifier
                                     .size(frame.width, frame.height)
-                                    .graphicsLayer(scaleX = if (flipped) -1f else 1f)
                             )
                         }
                     } else {
@@ -2620,7 +2933,6 @@ fun PlayerScreen(
                             update = { view ->
                                 view.player = playerOrNull
                                 view.resizeMode = aspectMode.resizeMode
-                                view.scaleX = if (flipped) -1f else 1f
                                 view.subtitleView?.apply {
                                     setStyle(captionStyle)
                                     setFractionalTextSize(0.0533f * subtitleScale)
@@ -2874,7 +3186,6 @@ fun PlayerScreen(
                     qualityVisible = qualityVisible,
                     subtitlesOn = !dropSubtitles,
                     decoderLabel = decoderMode.label,
-                    stereoActive = settings.forceStereoDownmix,
                     skipLabel = skipLabel,
                     skipHint = skipHint,
                     nextHighlight = nextHighlight,
@@ -2970,7 +3281,7 @@ fun PlayerScreen(
                     },
                     onSubtitles = { panel = OsdPanel.SUBTITLES },
                     onCycleDecoder = { cycleDecoder() },
-                    onToggleStereo = { toggleStereoDownmix() },
+                    onExternal = { openOpenWith() },
                     onOverflow = { panel = OsdPanel.OVERFLOW },
                     isLive = isLive,
                     liveProgram = liveProgram,
@@ -3025,6 +3336,13 @@ fun PlayerScreen(
     val activePanel = panel
     val overflowFirstFocus = remember { FocusRequester() }
     val infoFirstFocus = remember { FocusRequester() }
+    // The OSD used to stay up behind the dialog. The right-hand sheet covers
+    // the player clock, which then showed through underneath its CLOSE button,
+    // so only the sheet steps the controls out; closing anything hidden brings
+    // them straight back.
+    LaunchedEffect(activePanel) {
+        if (activePanel == OsdPanel.OVERFLOW) hideOsd()
+    }
     if (activePanel != null) {
         OsdPanelDialog(
             title = when (activePanel) {
@@ -3033,13 +3351,16 @@ fun PlayerScreen(
                 OsdPanel.OVERFLOW -> "Playback options"
                 OsdPanel.TOOLS -> "Visuals & audio"
                 OsdPanel.TOGGLES -> "Disable / override"
-                OsdPanel.SPEED -> "Playback speed"
-                OsdPanel.PICTURE -> "Picture & aspect ratio"
                 OsdPanel.QUALITY -> "Stream quality"
+                OsdPanel.TRANSPORT -> "Stream route"
                 OsdPanel.INFO -> "Stream info"
                 OsdPanel.STATS -> "Playback stats"
             },
-            onDismiss = { panel = null },
+            onDismiss = {
+                panel = null
+                if (!osdVisible) wake(OsdFocus.PLAY)
+            },
+            sideSheet = activePanel == OsdPanel.OVERFLOW,
             initialFocus = when (activePanel) {
                 OsdPanel.OVERFLOW -> overflowFirstFocus
                 OsdPanel.INFO -> infoFirstFocus
@@ -3181,125 +3502,119 @@ fun PlayerScreen(
                     }
                 }
                 OsdPanel.OVERFLOW -> {
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.INFO,
-                        label = "Info",
-                        value = "Codec & bitrate",
-                        focusRequester = overflowFirstFocus,
-                        onClick = { panel = OsdPanel.INFO }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.DECODER,
-                        label = "Stats for nerds",
-                        value = "Live counters",
-                        onClick = { panel = OsdPanel.STATS }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.EXTERNAL,
-                        label = "Play in external player",
-                        onClick = {
-                            panel = null
-                            openOpenWith()
-                        }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.AUDIO,
-                        label = "Audio track",
-                        value = audioChoices.firstOrNull { it.selected }?.label ?: "Auto",
-                        onClick = { panel = OsdPanel.AUDIO }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.BOOST,
-                        label = "Volume / boost",
-                        value = "${volumePercent}%",
-                        onClick = { panel = OsdPanel.TOOLS }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.EQ,
-                        label = "Equalizer",
-                        value = EQ_NAMES.getOrElse(eqPreset) { EQ_NAME_FLAT },
-                        onClick = { panel = OsdPanel.TOOLS }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.SPEED,
-                        label = "Speed",
-                        value = "${speedLabel(speed)}×",
-                        onClick = { panel = OsdPanel.SPEED }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.DISPLAY,
-                        label = "Display / aspect ratio",
-                        value = aspectMode.short,
-                        onClick = { panel = OsdPanel.PICTURE }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.SUBTITLES,
-                        label = "Subtitles / captions",
-                        value = if (dropSubtitles) {
-                            "Off"
-                        } else {
-                            textChoices.firstOrNull { it.selected }?.label ?: "Auto"
-                        },
-                        onClick = { panel = OsdPanel.SUBTITLES }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.SOURCES,
-                        label = "Playback source",
-                        value = current?.name ?: "Auto",
-                        onClick = {
-                            panel = null
-                            showPicker = true
-                        }
-                    )
-                    if (qualityVisible) {
+                    // One rail, ordered by what people change mid-film: tracks
+                    // and loudness first, then the stream route, then the
+                    // diagnostics and session controls. Stereo downmix moved
+                    // here when the dock took over the external hand-off.
+                    Column(
+                        Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(1.dp)
+                    ) {
                         OsdMenuRow(
-                            glyph = PlayerGlyph.DECODER,
-                            label = "Stream quality",
-                            value = qualityLabel ?: "Auto",
-                            onClick = { panel = OsdPanel.QUALITY }
-                        )
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        OsdMenuRow(
-                            glyph = PlayerGlyph.PIP,
-                            label = "Picture in picture",
+                            glyph = PlayerGlyph.SOURCES,
+                            label = "Playback source",
+                            value = current?.name ?: "Auto",
+                            focusRequester = overflowFirstFocus,
+                            compact = true,
                             onClick = {
                                 panel = null
-                                enterPip()
+                                showPicker = true
+                            }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.AUDIO,
+                            label = "Audio track",
+                            value = audioChoices.firstOrNull { it.selected }?.label ?: "Auto",
+                            compact = true,
+                            onClick = { panel = OsdPanel.AUDIO }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.BOOST,
+                            label = "Volume / equalizer",
+                            value = "${volumePercent}% · ${EQ_NAMES.getOrElse(eqPreset) { EQ_NAMES[EQ_CINEMA] }}",
+                            compact = true,
+                            onClick = { panel = OsdPanel.TOOLS }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.STEREO,
+                            label = "Stereo downmix",
+                            value = if (settings.forceStereoDownmix) "On" else "Off",
+                            compact = true,
+                            onClick = { toggleStereoDownmix() }
+                        )
+                        if (qualityVisible) {
+                            OsdMenuRow(
+                                glyph = PlayerGlyph.DECODER,
+                                label = "Stream quality",
+                                value = qualityLabel ?: "Auto",
+                                compact = true,
+                                onClick = { panel = OsdPanel.QUALITY }
+                            )
+                        }
+                        if (proxyCapable) {
+                            OsdMenuRow(
+                                glyph = PlayerGlyph.SOURCES,
+                                label = "Stream route",
+                                value = when {
+                                    transportMode == TransportMode.DIRECT -> "Direct"
+                                    transportMode == TransportMode.PROXY -> "Proxy"
+                                    proxyStreamId != null -> "Auto · Proxy"
+                                    else -> "Auto · Direct"
+                                },
+                                compact = true,
+                                onClick = { panel = OsdPanel.TRANSPORT }
+                            )
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            OsdMenuRow(
+                                glyph = PlayerGlyph.PIP,
+                                label = "Picture in picture",
+                                compact = true,
+                                onClick = {
+                                    panel = null
+                                    enterPip()
+                                }
+                            )
+                        }
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.INFO,
+                            label = "Info",
+                            value = "Codec & bitrate",
+                            compact = true,
+                            onClick = { panel = OsdPanel.INFO }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.DECODER,
+                            label = "Stats for nerds",
+                            value = "Live counters",
+                            compact = true,
+                            onClick = { panel = OsdPanel.STATS }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.LOCK,
+                            label = "Lock controls",
+                            compact = true,
+                            onClick = {
+                                locked = true
+                                panel = null
+                                hideOsd()
+                            }
+                        )
+                        OsdMenuRow(
+                            glyph = PlayerGlyph.RELOAD,
+                            label = "Reload stream",
+                            compact = true,
+                            onClick = {
+                                pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
+                                reconnectAttempt = 0
+                                reconnectNotice = null
+                                retryPlanMs = null
+                                reloadToken++
+                                panel = null
+                                interaction++
                             }
                         )
                     }
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.LOCK,
-                        label = "Lock controls",
-                        onClick = {
-                            locked = true
-                            panel = null
-                            hideOsd()
-                        }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.FLIP,
-                        label = if (flipped) "Unflip picture" else "Flip picture",
-                        value = if (flipped) "On" else "Off",
-                        onClick = {
-                            flipped = !flipped
-                            interaction++
-                        }
-                    )
-                    OsdMenuRow(
-                        glyph = PlayerGlyph.RELOAD,
-                        label = "Reload stream",
-                        onClick = {
-                            pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
-                            reconnectAttempt = 0
-                            reconnectNotice = null
-                            retryPlanMs = null
-                            reloadToken++
-                            panel = null
-                            interaction++
-                        }
-                    )
                 }
                 OsdPanel.TOOLS -> {
                     StepperRow(
@@ -3362,7 +3677,7 @@ fun PlayerScreen(
                                 saturation = 1f
                                 volumePercent = 100
                                 nightMode = false
-                                eqPreset = 0
+                                eqPreset = EQ_CINEMA
                             }
                         )
                     }
@@ -3392,69 +3707,6 @@ fun PlayerScreen(
                     )
                     Text(
                         "Gestures drive tap-to-show and drag-to-seek. Locking hides every control until you hold the unlock key.",
-                        color = Cinema.TextMuted,
-                        fontSize = 12.sp
-                    )
-                }
-                OsdPanel.SPEED -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        SPEEDS.forEach { value ->
-                            Chip(
-                                label = "${speedLabel(value)}×",
-                                selected = speed == value,
-                                onClick = {
-                                    speed = value
-                                    panel = null
-                                    interaction++
-                                }
-                            )
-                        }
-                    }
-                    Text(
-                        "Audio pitch is preserved by the Media3 playback-parameter pipeline.",
-                        color = Cinema.TextMuted,
-                        fontSize = 12.sp
-                    )
-                }
-                OsdPanel.PICTURE -> {
-                    SectionRow("Aspect ratio")
-                    AspectMode.entries.chunked(3).forEach { rowModes ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            rowModes.forEach { mode ->
-                                Chip(
-                                    label = mode.label,
-                                    selected = mode == aspectMode,
-                                    onClick = {
-                                        aspectMode = mode
-                                        interaction++
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    SectionRow("Frame")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Chip(
-                            label = "Flip picture",
-                            selected = flipped,
-                            onClick = {
-                                flipped = !flipped
-                                interaction++
-                            }
-                        )
-                        Chip(
-                            label = "Reset aspect",
-                            selected = false,
-                            onClick = {
-                                aspectMode = AspectMode.FIT
-                                flipped = false
-                                interaction++
-                            }
-                        )
-                    }
-                    Text(
-                        "Original keeps the stream's coded pixel size · Fit letterboxes the full frame · " +
-                            "16:9 and 18:9 force those frames · Stretch distorts to the screen · Crop zooms to fill.",
                         color = Cinema.TextMuted,
                         fontSize = 12.sp
                     )
@@ -3508,6 +3760,59 @@ fun PlayerScreen(
                                 "Playback resumes at the current position.",
                             color = Cinema.TextMuted,
                             fontSize = 12.sp
+                        )
+                    }
+                }
+                OsdPanel.TRANSPORT -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TransportMode.entries.forEach { mode ->
+                            Chip(
+                                label = mode.label,
+                                selected = transportMode == mode,
+                                onClick = { setTransportMode(mode) }
+                            )
+                        }
+                    }
+                    Text(
+                        when (transportMode) {
+                            TransportMode.AUTO ->
+                                "Opens a direct connection first. Falls back to the on-device " +
+                                    "proxy when the origin refuses the request or the stream will " +
+                                    "not start, and remembers the answer for this host."
+                            TransportMode.DIRECT ->
+                                "Always asks the origin directly. The player still sends the " +
+                                    "configured User-Agent and the addon's headers."
+                            TransportMode.PROXY ->
+                                "Always fetches through the on-device proxy, which re-sends every " +
+                                    "playlist, key and segment with the configured browser profile."
+                        },
+                        color = Cinema.TextMuted,
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Playing ${if (proxyStreamId != null) "through the proxy" else "direct"}",
+                        color = Cinema.TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    if (!engineCanDirect) {
+                        Text(
+                            "This engine cannot fetch HTTPS streams itself, so playback stays " +
+                                "on the proxy in every mode.",
+                            color = Cinema.TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (transportOrigin != null) {
+                        Text(
+                            "Remembered for ${transportOrigin.substringAfter("://")}: " +
+                                when (originVerdict) {
+                                    TransportVerdict.DIRECT -> "direct works"
+                                    TransportVerdict.PROXY -> "needs the proxy"
+                                    null -> "nothing yet"
+                                },
+                            color = Cinema.TextMuted,
+                            fontSize = 11.sp
                         )
                     }
                 }
@@ -3585,8 +3890,16 @@ fun PlayerScreen(
                         add("Memory cap" to describeMemoryBudget(profile))
                         add(
                             "Delivery" to when {
-                                proxyBypassed -> "Direct · proxy bypassed"
-                                proxyStreamId != null -> "Native proxy"
+                                proxyStreamId != null -> buildString {
+                                    append("Native proxy")
+                                    when {
+                                        transportMode == TransportMode.PROXY -> {}
+                                        directFailed -> append(" · direct failed")
+                                        originVerdict == TransportVerdict.PROXY ->
+                                            append(" · remembered")
+                                    }
+                                }
+                                transportMode == TransportMode.AUTO -> "Direct · auto"
                                 else -> "Direct"
                             }
                         )
@@ -3645,7 +3958,7 @@ fun PlayerScreen(
             options = options,
             steps = searchSteps,
             searchInProgress = searchInProgress,
-            hiddenByQuality = sourcesHiddenByQuality,
+            hiddenByLimits = sourcesHiddenByLimits,
             // Nothing is loaded while the manual pick is pending, so no card
             // may claim to be the source in play.
             selectedIndex = if (awaitingPick) -1 else optionIndex,
@@ -3653,6 +3966,7 @@ fun PlayerScreen(
             onDismiss = {
                 showPicker = false
                 awaitingPick = false
+                if (!osdVisible) wake(OsdFocus.PLAY)
             },
             onSelect = { index ->
                 // Re-picking the source already playing must not restart it;
@@ -3660,6 +3974,7 @@ fun PlayerScreen(
                 val wasAwaiting = awaitingPick
                 showPicker = false
                 awaitingPick = false
+                if (!osdVisible) wake(OsdFocus.PLAY)
                 if (wasAwaiting || index != optionIndex) chooseOption(index, resume = false)
             }
         )
@@ -3671,6 +3986,7 @@ fun PlayerScreen(
             streamUrl = openWithTarget?.url ?: current?.url.orEmpty(),
             players = openWithPlayers,
             error = openWithError,
+            relayed = openWithTarget?.let { relayedHandoff(it) } == true,
             onDismiss = { closeOpenWith(resume = true) },
             onLaunch = { packageName ->
                 openWithTarget?.let { handOffTo(it, packageName) }
@@ -3680,8 +3996,11 @@ fun PlayerScreen(
 }
 
 private const val EQ_NAME_FLAT = "Flat"
-private val EQ_NAMES = listOf(EQ_NAME_FLAT, "Bass", "Vocal", "Cinema")
-private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+private val EQ_CINEMA = 0
+private val EQ_FLAT = 1
+private val EQ_BASS = 2
+private val EQ_VOCAL = 3
+private val EQ_NAMES = listOf("Cinema", EQ_NAME_FLAT, "Bass", "Vocal")
 private val QUALITY_ORDER = listOf(
     "8K", "4K", "2160p", "1440p", "1080p", "720p", "576p", "480p", "360p", "240p"
 )
@@ -3709,9 +4028,6 @@ private fun qualityHeightLabel(height: Int): String = when {
     height >= 2160 -> "4K"
     else -> "${height}p"
 }
-
-private fun speedLabel(value: Float): String =
-    if (value == value.toInt().toFloat()) value.toInt().toString() else value.toString()
 
 @Composable
 private fun SectionRow(label: String) {
@@ -3748,6 +4064,7 @@ private fun OsdPanelDialog(
     title: String,
     onDismiss: () -> Unit,
     initialFocus: FocusRequester? = null,
+    sideSheet: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val closeFocus = remember { FocusRequester() }
@@ -3762,34 +4079,79 @@ private fun OsdPanelDialog(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.82f))
+                .background(Color.Black.copy(alpha = if (sideSheet) 0.55f else 0.82f))
                 .pointerInput(Unit) {
                     detectTapGestures { onDismiss() }
                 },
-            contentAlignment = Alignment.Center
+            contentAlignment = if (sideSheet) Alignment.CenterEnd else Alignment.Center
         ) {
             Column(
                 Modifier
-                    .widthIn(max = 780.dp)
-                    .fillMaxWidth(0.8f)
-                    .heightIn(max = minOf(640.dp, (LocalConfiguration.current.screenHeightDp * 0.8f).dp))
-                    .glassSurface(shape = RoundedCornerShape(CinemaDimens.CardRadius), base = Glass.Sheet)
-                    .padding(22.dp)
+                    .then(
+                        if (sideSheet) {
+                            // Full-height right rail holding one column of compact
+                            // rows, so every overflow item stays on screen without
+                            // scrolling. The fraction has to be applied outside
+                            // widthIn — the other order takes the fraction of the
+                            // cap and the labels collapse to an ellipsis.
+                            Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(0.44f)
+                                .widthIn(max = 420.dp)
+                        } else {
+                            Modifier
+                                .widthIn(max = 780.dp)
+                                .fillMaxWidth(0.8f)
+                                .heightIn(max = minOf(640.dp, (LocalConfiguration.current.screenHeightDp * 0.8f).dp))
+                        }
+                    )
+                    .glassSurface(
+                        shape = if (sideSheet) {
+                            RoundedCornerShape(topStart = 20.dp, bottomStart = 20.dp)
+                        } else {
+                            RoundedCornerShape(CinemaDimens.CardRadius)
+                        },
+                        base = Glass.Sheet
+                    )
+                    .padding(if (sideSheet) 12.dp else 22.dp)
                     .verticalScroll(rememberScrollState())
                     .pointerInput(Unit) {
                         detectTapGestures { }
                     },
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(if (sideSheet) 6.dp else 10.dp)
             ) {
-                Text(title, color = Cinema.TextPrimary, style = CinemaType.SectionTitle)
+                if (sideSheet) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = title,
+                            color = Cinema.TextPrimary,
+                            style = CinemaType.SectionTitle,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TvButton(
+                            label = "CLOSE",
+                            style = TvButtonStyle.GHOST,
+                            compact = true,
+                            onClick = onDismiss,
+                            focusRequester = closeFocus
+                        )
+                    }
+                } else {
+                    Text(title, color = Cinema.TextPrimary, style = CinemaType.SectionTitle)
+                }
                 content()
-                Spacer(Modifier.height(4.dp))
-                TvButton(
-                    label = "CLOSE",
-                    style = TvButtonStyle.GHOST,
-                    onClick = onDismiss,
-                    focusRequester = closeFocus
-                )
+                if (!sideSheet) {
+                    Spacer(Modifier.height(4.dp))
+                    TvButton(
+                        label = "CLOSE",
+                        style = TvButtonStyle.GHOST,
+                        onClick = onDismiss,
+                        focusRequester = closeFocus
+                    )
+                }
             }
         }
     }
@@ -3998,6 +4360,7 @@ private fun buildPlayer(
                     profile.headers,
                     isLive,
                     profile.native.mpvCacheSeconds,
+                    profile.byteBudget,
                     profile.amlogicFix
                 )
             } else {
@@ -4134,8 +4497,13 @@ private fun buildExoPlayer(
 
     // The tier picks the forward window and the rewind retention; BALANCED is
     // the pre-tier profile, so existing installs keep their tuning. The
-    // high-capacity switch pins the MP4/MKV window to 15 s / 50 s.
-    val window = profile.window
+    // high-capacity switch requests the MP4/MKV window (15 s / 50 s) and the
+    // planner shortens it to what the byte budget holds.
+    // The back buffer is trimmed to what the byte budget can actually retain:
+    // Media3 counts both buffers against the same allocation, so a rewind pin
+    // larger than the budget would starve the forward fill.
+    val plan = planBuffer(profile.window, profile.byteBudget, profile.bandwidthCap.bitsPerSecond)
+    val window = plan.window
     Log.i(
         "StreamLine:player",
         "Load control · ${if (profile.adaptive) "adaptive" else "progressive"} · " +
@@ -4144,6 +4512,24 @@ private fun buildExoPlayer(
             "re-buffer ${window.bufferForPlaybackAfterRebufferMs} ms · " +
             "back ${window.backBufferMs} ms"
     )
+    plan.budget?.let { budget ->
+        if (budget.clamped) {
+            Log.i("StreamLine:player", "Byte cap · ${describeByteBudget(budget)}")
+        }
+        when {
+            plan.windowExceedsBudget -> Log.i(
+                "StreamLine:player",
+                "Buffer plan · window ${seconds(profile.window.maxBufferMs)} s exceeds " +
+                    "${describeByteBudget(budget)} · shortened to " +
+                    "${seconds(window.maxBufferMs)} s · back buffer dropped"
+            )
+            plan.trimmedBackBufferMs > 0 -> Log.i(
+                "StreamLine:player",
+                "Buffer plan · back ${seconds(profile.window.backBufferMs)} s trimmed to " +
+                    "${seconds(window.backBufferMs)} s (${describeByteBudget(budget)})"
+            )
+        }
+    }
 
     val loadControlBuilder = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
@@ -4157,9 +4543,6 @@ private fun buildExoPlayer(
         // the bytes at 4K. A byte budget makes the loader stop at the RAM
         // the device actually has, and disabling time priority is what
         // makes Media3 honour it. The tier only moves the time window.
-        if (budget.clamped) {
-            Log.i("StreamLine:player", "Byte cap · ${describeByteBudget(budget)}")
-        }
         loadControlBuilder.setTargetBufferBytes(
             budget.effectiveBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         )
@@ -4181,6 +4564,8 @@ private fun buildExoPlayer(
         downmixStereo = profile.downmixStereo,
         normalizeVolume = profile.normalizeVolume
     )
+        // HW is the only strict mode: no software fallback when the pinned
+        // hardware decoder refuses the stream. HW+ keeps the fallback.
         .setEnableDecoderFallback(profile.decoder != DecoderType.HW)
         .setEnableAudioTrackPlaybackParams(true)
     if (profile.amlogicFix) {
@@ -4192,9 +4577,13 @@ private fun buildExoPlayer(
     }
     when (profile.decoder) {
         DecoderType.SW -> renderersFactory.setMediaCodecSelector(MediaCodecSelector.PREFER_SOFTWARE)
-        // AUTO and HW both use hardware first; only explicit SW prefers software.
-        DecoderType.AUTO, DecoderType.HW, DecoderType.HW_PLUS ->
+        // AUTO keeps Media3's own decoder ranking; HW/HW+ pin a hardware
+        // decoder whenever one exists, and differ only in whether the software
+        // fallback (set above) is enabled — so the two switches no longer
+        // resolve to the same selector.
+        DecoderType.HW, DecoderType.HW_PLUS ->
             renderersFactory.setMediaCodecSelector(hardwareFirstSelector)
+        DecoderType.AUTO -> Unit
     }
 
     // Timeout-aware retries shared by progressive, HLS and DASH. The adaptive
@@ -4278,6 +4667,45 @@ private fun buildExoPlayer(
     return BuiltPlayer(player, liveHeaders)
 }
 
+private fun audioTrackLabel(format: androidx.media3.common.Format, index: Int): String {
+    val language = format.language?.let { tag ->
+        runCatching { Locale.forLanguageTag(tag).displayLanguage }.getOrNull()
+    }
+    return listOfNotNull(
+        language?.takeIf { it.isNotBlank() },
+        format.label,
+        if (format.channelCount > 0) "${format.channelCount} ch" else null
+    ).ifEmpty { listOf("Track ${index + 1}") }.joinToString(" · ")
+}
+
+private fun textTrackLabel(format: androidx.media3.common.Format, index: Int): String {
+    val language = format.language?.let { tag ->
+        runCatching { Locale.forLanguageTag(tag).displayLanguage }.getOrNull()
+    }
+    return listOfNotNull(
+        language?.takeIf { it.isNotBlank() },
+        format.label,
+        if (format.sampleMimeType == MimeTypes.TEXT_VTT) "WebVTT" else null
+    ).ifEmpty { listOf("Subtitles ${index + 1}") }.joinToString(" · ")
+}
+
+/**
+ * Re-resolves a saved pick against the track list a player instance reports.
+ * Matching on the picker's own label keeps menu and reload consistent, and a
+ * track that vanished in the new instance simply leaves the default in place.
+ */
+private fun savedTrackOverride(
+    tracks: Tracks,
+    trackType: Int,
+    pick: SavedTrackPick
+): TrackSelectionOverride? {
+    val labeler = if (trackType == C.TRACK_TYPE_AUDIO) ::audioTrackLabel else ::textTrackLabel
+    val match = buildTrackChoices(tracks, trackType, labeler)
+        .firstOrNull { it.label == pick.label }
+        ?: return null
+    return TrackSelectionOverride(match.group, match.index)
+}
+
 private fun buildTrackChoices(
     tracks: Tracks?,
     trackType: Int,
@@ -4309,17 +4737,17 @@ private fun applyEqualizer(equalizer: Equalizer?, preset: Int) {
         val max = range[1].toInt()
         for (index in 0 until bands) {
             val level = when (preset) {
-                1 -> when {
+                EQ_BASS -> when {
                     index == 0 -> max
                     index == 1 -> max * 2 / 3
                     else -> 0
                 }
-                2 -> when {
+                EQ_VOCAL -> when {
                     index >= bands - 2 -> max
                     index == bands / 2 -> max / 2
                     else -> 0
                 }
-                3 -> when (index) {
+                EQ_CINEMA -> when (index) {
                     0 -> max / 2
                     bands - 1 -> max / 2
                     else -> max / 4
@@ -4328,7 +4756,7 @@ private fun applyEqualizer(equalizer: Equalizer?, preset: Int) {
             }
             engine.setBandLevel(index.toShort(), level.coerceIn(min, max).toShort())
         }
-        engine.enabled = preset != 0
+        engine.enabled = preset != EQ_FLAT
     }
 }
 

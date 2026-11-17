@@ -108,8 +108,12 @@ private fun playerTarget(info: ExternalPlayerInfo): OpenWithTarget = when (info.
 
 /**
  * Hand-off window. It sits over the paused in-app player: picking a row hands
- * the stream to that app while the local player keeps its position, and
- * **Done (Back to Player)** drops back into the app player untouched.
+ * the stream to that app while the local player keeps its position and stays
+ * alive, so the external player's BACK returns to the same frame, and **Done
+ * (Back to Player)** drops back into it untouched. [relayed] is true when the
+ * stream carries headers (or a spoofed UA) and therefore travels through the
+ * on-device relay, which players that ignore the `headers` extra can still
+ * read.
  */
 @Composable
 internal fun OpenWithDialog(
@@ -117,6 +121,7 @@ internal fun OpenWithDialog(
     streamUrl: String,
     players: List<ExternalPlayerInfo>,
     error: String?,
+    relayed: Boolean,
     onDismiss: () -> Unit,
     onLaunch: (String?) -> Unit
 ) {
@@ -196,6 +201,16 @@ internal fun OpenWithDialog(
                 }
 
                 Spacer(Modifier.height(2.dp))
+                if (relayed) {
+                    Text(
+                        "Header-gated source · this stream is relayed on-device with its " +
+                            "headers so players that ignore the header list still play it. " +
+                            "Keep the app running until you are done.",
+                        color = Cinema.TextMuted,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp
+                    )
+                }
                 // The row list scrolls on short screens; the URL field and the
                 // switch-back action stay pinned so DONE is never off-screen.
                 Column(

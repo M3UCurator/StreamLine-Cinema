@@ -89,7 +89,7 @@ class StremioAddonTest {
     }
 
     @Test
-    fun contentIdsPreferImdbForAddonLookups() {
+    fun tmdbIdsLeadAndTheTranslatedImdbFollows() {
         val movie = CatalogItem(
             tmdbId = 414906,
             type = MediaType.MOVIE,
@@ -97,12 +97,12 @@ class StremioAddonTest {
             imdbId = "tt1877830"
         )
         assertEquals(
-            listOf("tt1877830", "tmdb:414906"),
+            listOf("tmdb:414906", "tt1877830"),
             StremioAddons.contentIds(movie, null, null)
         )
         val episode = movie.copy(type = MediaType.TV, imdbId = "tt0944947")
         assertEquals(
-            listOf("tt0944947:2:5", "tmdb:414906:2:5"),
+            listOf("tmdb:414906:2:5", "tt0944947:2:5"),
             StremioAddons.contentIds(episode, 2, 5)
         )
         // Items enriched without an IMDb id still query the TMDB id.
@@ -113,12 +113,12 @@ class StremioAddonTest {
     }
 
     @Test
-    fun subtitleAddonStopsAtTheIdThatAnswers() {
-        // OpenSubtitles matches `tt…` only; the TMDB id must not be queried first.
+    fun subtitleFallbackKeepsTheImdbIdForTtOnlyAddons() {
+        // OpenSubtitles matches `tt…` only, so the TMDB id alone would miss it.
         val item = CatalogItem(
             tmdbId = 414906, type = MediaType.MOVIE, title = "The Batman", imdbId = "tt1877830"
         )
-        assertEquals("tt1877830", StremioAddons.contentIds(item, null, null).first())
+        assertEquals(listOf("tmdb:414906", "tt1877830"), StremioAddons.contentIds(item, null, null))
     }
 
     @Test

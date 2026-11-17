@@ -66,22 +66,35 @@ internal data class PlaybackProfile(
 }
 
 /**
- * The selector's video ceiling. The source-quality setting picks the height
- * (its tier and everything above it are excluded); both axes are then clamped
- * so a 4K ladder never hands this device more than 1080p. The decoder, not
- * the display, is the binding constraint on a 32-bit box.
+ * The selector's video ceiling. The source-quality setting picks the height and
+ * the tier plus everything below it play; the width follows the widest common
+ * rendition at that height so an ultrawide master is not excluded by its width
+ * alone. With the limit off the ceiling is 8K, the highest tier the source
+ * labels detect.
  */
 internal data class ResolutionCap(val maxWidth: Int, val maxHeight: Int)
 
-internal const val SELECTOR_MAX_WIDTH = 1920
-internal const val SELECTOR_MAX_HEIGHT = 1080
+internal const val SELECTOR_MAX_WIDTH = 7680
+internal const val SELECTOR_MAX_HEIGHT = 4320
 
 /** Media read retries before the stream error policy gives up. */
 internal const val SEGMENT_RETRIES = 4
 
 internal fun resolutionCap(limit: QualityLimit): ResolutionCap {
-    val height = if (limit.cutoffHeight > 0) limit.cutoffHeight - 1 else SELECTOR_MAX_HEIGHT
-    return ResolutionCap(SELECTOR_MAX_WIDTH, minOf(height, SELECTOR_MAX_HEIGHT))
+    val height = if (limit.cutoffHeight > 0) {
+        minOf(limit.cutoffHeight, SELECTOR_MAX_HEIGHT)
+    } else {
+        SELECTOR_MAX_HEIGHT
+    }
+    return ResolutionCap(widthFor(height), height)
+}
+
+private fun widthFor(height: Int): Int = when {
+    height >= SELECTOR_MAX_HEIGHT -> SELECTOR_MAX_WIDTH
+    height >= 2160 -> 4096
+    height >= 1080 -> 2560
+    height >= 720 -> 1920
+    else -> 854
 }
 
 /**
@@ -90,6 +103,7 @@ internal fun resolutionCap(limit: QualityLimit): ResolutionCap {
  * settled buffer selection while the Settings UI passes the live values.
  * [forceBuiltIn] covers the native-engine fallback: the profile then names the
  * engine that will actually run, so its rebuild key stays truthful.
+ * [maxMemoryBytes] is injectable so tests resolve the same budget on any host.
  */
 internal fun playbackProfile(
     settings: AppSettings,
@@ -100,7 +114,8 @@ internal fun playbackProfile(
     lowLatency: Boolean = settings.lowLatency,
     highCapacityVod: Boolean = settings.highCapacityBuffer,
     headers: Map<String, String> = emptyMap(),
-    forceBuiltIn: Boolean = false
+    forceBuiltIn: Boolean = false,
+    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()
 ): PlaybackProfile = PlaybackProfile(
     engine = if (forceBuiltIn) PlaybackEngine.BUILT_IN else settings.playbackEngine,
     decoder = decoder,
@@ -109,13 +124,7 @@ internal fun playbackProfile(
     normalizeVolume = settings.normalizeVolume,
     amlogicFix = settings.amlogicFix,
     window = bufferWindow(tier, adaptive, lowLatency, lowRam, highCapacityVod),
-    byteBudget = if (lowRam) {
-        byteBudget(
-            if (adaptive) LOW_RAM_ADAPTIVE_BUFFER_BYTES else LOW_RAM_PROGRESSIVE_BUFFER_BYTES
-        )
-    } else {
-        null
-    },
+    byteBudget = resolveByteBudget(adaptive, lowRam, maxMemoryBytes),
     native = nativeCache(tier, highCapacityVod = highCapacityVod && !adaptive),
     abr = settings.abrEnabled,
     bandwidthCap = settings.bandwidthCap,
@@ -125,9 +134,49 @@ internal fun playbackProfile(
     headers = headers
 )
 
+/**
+ * A byte ceiling for every device, not only the low-RAM profile. Media3 leaves
+ * the target byte size unset, so a time-bounded loader can grow until its
+ * ~200 MiB allocation chunk, which is most of the heap on a 32-bit box that
+ * does not declare itself low-RAM. The normal preset is exposed only when the
+ * heap share actually clamps it, so a roomy device keeps its time-prioritised
+ * loader while a tight one gets the byte bound and the back-buffer trim.
+ */
+private fun resolveByteBudget(
+    adaptive: Boolean,
+    lowRam: Boolean,
+    maxMemoryBytes: Long
+): ByteBudget? = if (lowRam) {
+    byteBudget(
+        presetBytes = if (adaptive) {
+            LOW_RAM_ADAPTIVE_BUFFER_BYTES
+        } else {
+            LOW_RAM_PROGRESSIVE_BUFFER_BYTES
+        },
+        maxMemoryBytes = maxMemoryBytes,
+        heapDivisor = LOW_RAM_HEAP_DIVISOR
+    )
+} else {
+    byteBudget(
+        presetBytes = if (adaptive) {
+            NORMAL_ADAPTIVE_BUFFER_BYTES
+        } else {
+            NORMAL_PROGRESSIVE_BUFFER_BYTES
+        },
+        maxMemoryBytes = maxMemoryBytes,
+        heapDivisor = NORMAL_HEAP_DIVISOR
+    ).takeIf { it.clamped }
+}
+
 /** The resolved buffer row for Settings and the stats panel. */
 internal fun describeBuffer(profile: PlaybackProfile): String {
-    val window = profile.window
+    // The window and the byte budget are planned together, so report the window
+    // the loader will actually be built with, not the tier's request.
+    val window = planBuffer(
+        profile.window,
+        profile.byteBudget,
+        profile.bandwidthCap.bitsPerSecond
+    ).window
     val forward = if (window.minBufferMs == window.maxBufferMs) {
         "window ${seconds(window.minBufferMs)} s"
     } else {

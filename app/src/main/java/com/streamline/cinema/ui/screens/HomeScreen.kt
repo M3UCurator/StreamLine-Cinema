@@ -350,7 +350,7 @@ fun HomeScreen(
             item(key = "continueHeader", span = { GridItemSpan(maxLineSpan) }) {
                 SectionHeader(
                     title = "Continue Watching",
-                    subtitle = "${continueWatching.size} in progress · ✕ clears a card"
+                    subtitle = "${continueWatching.size} in progress"
                 )
             }
             item(key = "continueRow", span = { GridItemSpan(maxLineSpan) }) {
@@ -463,7 +463,7 @@ fun HomeScreen(
             item(key = "favorites", span = { GridItemSpan(maxLineSpan) }) {
                 PosterRow(
                     title = "Favorites",
-                    subtitle = "${favoriteItems.size} saved · one tap from Home",
+                    subtitle = "${favoriteItems.size} saved",
                     items = favoriteItems,
                     onItemClick = onOpenDetail,
                     modifier = Modifier.padding(top = 8.dp),
@@ -476,7 +476,6 @@ fun HomeScreen(
             item(key = "popularMovies", span = { GridItemSpan(maxLineSpan) }) {
                 PosterRow(
                     title = "Popular Movies",
-                    subtitle = "TMDB discover",
                     items = home.popularMovies,
                     onItemClick = onOpenDetail,
                     focusSurface = "home.popularMovies"
@@ -487,7 +486,6 @@ fun HomeScreen(
             item(key = "popularShows", span = { GridItemSpan(maxLineSpan) }) {
                 PosterRow(
                     title = "Popular TV Shows",
-                    subtitle = "TMDB discover",
                     items = home.popularShows,
                     onItemClick = onOpenDetail,
                     focusSurface = "home.popularShows"
@@ -859,14 +857,14 @@ private fun LibraryHint(onImport: () -> Unit) {
                 style = CinemaType.SectionTitle
             )
             Text(
-                "Import a TMDB preset or an MDBList collection — series are scaffolded into seasons and episodes automatically.",
+                "Import a TMDB list or an MDBList collection to start collecting.",
                 color = Cinema.TextMuted,
                 style = CinemaType.BodySmall
             )
         }
         Spacer(Modifier.width(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TvButton("IMPORT TERMINAL", onImport, style = TvButtonStyle.SECONDARY, compact = true)
+            TvButton("IMPORT TITLES", onImport, style = TvButtonStyle.SECONDARY, compact = true)
         }
     }
 }
@@ -894,9 +892,9 @@ private fun HomeFooter(
         Spacer(Modifier.width(8.dp))
         Text(
             text = when {
-                enriching != null -> "Lazy metadata · enriching “$enriching” · $pending queued"
-                pending > 0 -> "Lazy metadata queue · $pending titles waiting"
-                else -> "Catalog · $total titles · all metadata synced"
+                enriching != null -> "Syncing · “$enriching”"
+                pending > 0 -> "Syncing · $pending titles"
+                else -> "Catalog · $total titles"
             },
             color = Cinema.TextMuted,
             fontSize = 11.sp

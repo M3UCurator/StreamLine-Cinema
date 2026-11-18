@@ -188,4 +188,115 @@ class StreamIdentityTest {
         assertEquals("", StremioAddons.contentId(series(tmdbId = 0), 1, 1))
         assertEquals("", StremioAddons.contentId(movie(tmdbId = 0), null, null))
     }
+
+    @Test
+    fun aSameYearNeighbourTitleIsRejected() {
+        // The report: The Beast (2026) played Heart of the Beast (2026).
+        assertTrue(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Heart of the Beast (2026) 1080p"), "The Beast"
+            )
+        )
+        assertTrue(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Heart.of.the.Beast.2026.1080p.WEB-DL.DDP5.1.H.264-FLUX"), "The Beast"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("The Beast (2026) 1080p"), "The Beast"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("The.Beast.2026.1080p.WEB-DL"), "The Beast"
+            )
+        )
+    }
+
+    @Test
+    fun onlyAYearBackedTitleIsTreatedAsAClaim() {
+        assertTrue(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Beauty and the Beast 2017 1080p"), "The Beast"
+            )
+        )
+        // Without a year the words cannot be placed as a release title, so the
+        // stream keeps playing rather than being rejected on a guess.
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Heart of the Beast 1080p"), "The Beast"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Heart of the Beast · 4K"), "The Beast"
+            )
+        )
+    }
+
+    @Test
+    fun alternateTitlesFilesAndIndexerNoiseStillMatch() {
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Бойцовский клуб / Fight Club [1999 BDRemux 2160p]"), "Fight Club"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("YTS MX Fight Club 1999 1080p"), "Fight Club"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("www.uindex.org - Fight.Club.1999.1080p"), "Fight Club"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Fight.Club.1999.REPACK.2160p.UHD.Blu-ray.Remux.HDR.HEVC"), "Fight Club"
+            )
+        )
+    }
+
+    @Test
+    fun aTitleThatCarriesItsOwnYearStillMatches() {
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Blade Runner 2049 2017 2160p"), "Blade Runner 2049"
+            )
+        )
+    }
+
+    @Test
+    fun theFilenameHintIsCheckedWhenTheLabelIsTagOnly() {
+        val hinted = StreamItem(
+            name = "1080p · BluRay",
+            title = null,
+            url = "https://cdn.test/v.mp4",
+            externalUrl = null,
+            behaviorHints = mapOf("filename" to "Heart.of.the.Beast.2026.1080p.mkv")
+        )
+        assertTrue(StremioAddons.streamNamesAnotherTitle(hinted, "The Beast"))
+    }
+
+    @Test
+    fun unlabelledAndGroupOnlySourcesNeverMakeATitleClaim() {
+        listOf("1080p · BluRay", "YTS", "Torrentio\n4320p HDR", "Multi Subs").forEach { label ->
+            assertFalse(
+                "rejected: $label",
+                StremioAddons.streamNamesAnotherTitle(stream(label), "The Beast")
+            )
+        }
+    }
+
+    @Test
+    fun titlesWrittenInAnotherScriptAreNotJudged() {
+        // The label cannot be compared with the request, so it is not a claim.
+        assertFalse(
+            StremioAddons.streamNamesAnotherTitle(
+                stream("Бойцовский клуб 1999 BDRemux"), "Fight Club"
+            )
+        )
+    }
 }

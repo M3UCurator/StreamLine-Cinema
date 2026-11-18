@@ -773,7 +773,9 @@ fun PlayerScreen(
     var proxyFallback by remember(playbackUrl) { mutableStateOf(false) }
     // A native engine that decodes audio but never creates a video output
     // leaves a black screen; the source is then rebuilt on the built-in player.
-    var nativeFallback by remember(playbackUrl) { mutableStateOf(false) }
+    // Session-scoped: the fallback says the engine cannot run on this device, so
+    // the next zapped channel must not retry it again.
+    var nativeFallback by remember { mutableStateOf(false) }
     // The load path types an extensionless link by walking it once. Keeping the
     // answer lets the adaptive window apply from the first prepare and stops a
     // rebuild from resolving the same link a second time.
@@ -836,9 +838,14 @@ fun PlayerScreen(
     // player instance instead of building a new one: tearing down Media3 or a
     // native engine costs a codec re-init and drops every buffered segment,
     // which turns a transient network blip into a multi-second black screen.
+    // Live zapping is the same trade at channel granularity: the URL is not a
+    // build key there, so one engine lasts the session and each zap swaps the
+    // MediaItem. Only a changed engine profile (settings, native headers,
+    // adaptive class) or a DRM stream rebuilds it.
+    val playerInstanceKey = if (isLive) null else playbackUrl
     val builtPlayer: BuiltPlayer? = remember(
         nativeRequired,
-        playbackUrl,
+        playerInstanceKey,
         isLive,
         profile.rebuildKey,
         playbackDrm,
@@ -903,7 +910,10 @@ fun PlayerScreen(
 
     // Media3 keeps the counters (dropped frames, bandwidth, underruns) that the
     // old buffer-size bar hinted at. Attach once per player so a stats panel can
-    // read them on demand instead of paying attention to them continuously.
+    // read them on demand instead of paying attention to them continuously. The
+    // reads below use the per-session stats: a retained live engine opens a new
+    // session per channel, so the panel and the dropped-frame cap describe the
+    // channel on screen instead of the whole zapping session.
     val playbackStatsListener = remember { PlaybackStatsListener(false, null) }
     DisposableEffect(playerOrNull) {
         // Analytics counters only exist on the built-in engine; native engines
@@ -919,8 +929,8 @@ fun PlayerScreen(
     LaunchedEffect(panel, playerOrNull) {
         if (panel != OsdPanel.STATS) return@LaunchedEffect
         while (true) {
-            statsSnapshot = runCatching { playbackStatsListener.combinedPlaybackStats }
-                .getOrDefault(PlaybackStats.EMPTY)
+            statsSnapshot = runCatching { playbackStatsListener.playbackStats }
+                .getOrNull() ?: PlaybackStats.EMPTY
             liveBandwidthBps = PlaybackBandwidth.estimateBps()
             delay(1_000L)
         }
@@ -934,7 +944,7 @@ fun PlayerScreen(
         while (isActive) {
             delay(DROPPED_FRAME_WINDOW_MS)
             if (droppedFrameCapHeight > 0) return@LaunchedEffect
-            val stats = runCatching { playbackStatsListener.combinedPlaybackStats }.getOrNull()
+            val stats = runCatching { playbackStatsListener.playbackStats }.getOrNull()
                 ?: continue
             if (stats.totalPlayTimeMs < DROPPED_FRAME_MIN_PLAY_MS) continue
             val rate = stats.droppedFramesRate
@@ -1342,7 +1352,10 @@ fun PlayerScreen(
                 ?: 0f
             FrameRateMatching.apply(activity, rate)
         }
-        var audioLanguageApplied = false
+        // A retained live engine carries the previous channel's overrides, so
+        // the preferred language and the saved picks are scoped to the item,
+        // not to the instance: every rebuild and every zap parses fresh groups.
+        var trackItem: MediaItem? = null
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
@@ -1527,25 +1540,28 @@ fun PlayerScreen(
 
             override fun onTracksChanged(tracksSnapshot: Tracks) {
                 tracks = tracksSnapshot
-                // The preferred language is applied once per player instance: a
-                // rebuild parses fresh groups, so keying it to the title alone
-                // skipped the new instance and played the default track.
-                if (!audioLanguageApplied) {
-                    audioLanguageApplied = true
-                    val audio = trackOverride(
-                        tracksSnapshot, C.TRACK_TYPE_AUDIO, activeProfile.audioLanguage
-                    )
-                    if (audio != null) {
-                        target.trackSelectionParameters = target.trackSelectionParameters
-                            .buildUpon()
-                            .setOverrideForType(audio)
-                            .build()
-                    }
-                }
-                // Then the viewer's explicit picks, which the rebuilt instance
-                // would otherwise silently drop in favour of the defaults.
+                // A new item (a rebuild or a live zap on the retained engine)
+                // starts from a clean slate: the previous channel's overrides
+                // no longer match these groups and would only mislead the
+                // selector, so they are dropped before the picks re-apply.
+                val itemNow = target.currentMediaItem
+                val newItem = itemNow != null && itemNow !== trackItem &&
+                    tracksSnapshot.groups.isNotEmpty()
+                if (newItem) trackItem = itemNow
                 val explicit = target.trackSelectionParameters.buildUpon()
-                var hasExplicit = false
+                var hasExplicit = newItem
+                if (newItem) {
+                    explicit.clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+                    explicit.clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                    // The preferred language is applied once per item: a zap
+                    // parses fresh groups, so keying this to the instance
+                    // played the new channel's default track.
+                    trackOverride(
+                        tracksSnapshot, C.TRACK_TYPE_AUDIO, activeProfile.audioLanguage
+                    )?.let { explicit.setOverrideForType(it) }
+                }
+                // Then the viewer's explicit picks, which the rebuilt item
+                // would otherwise silently drop in favour of the defaults.
                 audioPick?.let { pick ->
                     savedTrackOverride(tracksSnapshot, C.TRACK_TYPE_AUDIO, pick)?.let {
                         explicit.setOverrideForType(it)
@@ -1773,6 +1789,26 @@ fun PlayerScreen(
         proxyFallback = false
         proxyStreamId = proxied?.streamId
         val sourceUrl = proxied?.url ?: resolvedUrl
+        // A slow kind discovery or proxy rewrite must not overtake a newer zap.
+        if (!isActive) return@LaunchedEffect
+        // The live engine is retained across zaps: release the previous
+        // channel's loader and buffered segments before preparing the new one,
+        // so two sources never load side by side.
+        if (isLive) {
+            val previousUri = target.currentMediaItem
+                ?.localConfiguration?.uri?.toString()
+            if (previousUri != null && previousUri != sourceUrl) {
+                Log.i(
+                    "StreamLine:player",
+                    "Live zap · same ${target.javaClass.simpleName}, new item"
+                )
+                runCatching { target.stop() }
+            }
+        }
+        // A zap may carry another addon's headers, and the retained instance
+        // keeps its data source factories: refresh them before the first
+        // playlist read instead of waiting for the live-header effect.
+        builtPlayer?.liveHeaders?.update(profile.userAgent, profile.headers)
         runCatching {
             val builder = MediaItem.Builder().setUri(sourceUrl)
             val mime = resolvedKind?.media3Mime() ?: adaptiveMimeType(sourceUrl)

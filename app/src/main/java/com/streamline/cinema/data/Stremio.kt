@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -91,7 +92,9 @@ data class AddonManifest(
     val idPrefixes: List<String>?,
     val catalogs: List<AddonCatalog> = emptyList(),
     /** Provider artwork declared by the manifest (`logo`). */
-    val logo: String? = null
+    val logo: String? = null,
+    /** Optional focus marker; music addons send `music` here. */
+    val contentType: String? = null
 ) {
     val supportsStreams: Boolean
         get() = hasResource("stream")
@@ -134,7 +137,8 @@ data class AddonManifest(
             }.orEmpty(),
             logo = o.stringOrNull("logo")?.takeIf {
                 it.startsWith("http://") || it.startsWith("https://")
-            }
+            },
+            contentType = o.stringOrNull("contentType")
         )
 
         private fun parseCatalogExtras(entry: JSONObject): List<CatalogExtra> {
@@ -601,6 +605,159 @@ object StremioAddons {
         return isSeries && season != null && labelledSeason == season
     }
 
+    /**
+     * True when the source's own text names a different film than [title].
+     *
+     * Addons answer an id with whatever their indexer matched, and a similarly
+     * named neighbour can win: "Heart of the Beast (2026)" was served for
+     * "The Beast (2026)" and played because only episodes were checked. A label
+     * counts as a title claim only when it states one next to a release year in
+     * the same script; quality-only, group-only and unreadable labels pass
+     * because they make no claim either way. Alternate titles split by `/` or
+     * `|` are honoured — one matching segment clears the whole stream.
+     */
+    fun streamNamesAnotherTitle(stream: StreamItem, title: String): Boolean {
+        val expected = titleWords(title) ?: return false
+        var mismatched = false
+        for (text in stream.titleTexts()) {
+            for (segment in TITLE_SEGMENTS.split(text)) {
+                val claim = titleClaim(segment) ?: continue
+                if (claim.matches(expected)) return false
+                if (claim.namesAnother(expected)) mismatched = true
+            }
+        }
+        return mismatched
+    }
+
+    /** The text a source publishes about itself: tag lines, release line, filename. */
+    private fun StreamItem.titleTexts(): List<String> = listOfNotNull(
+        name,
+        title,
+        behaviorHints?.get("filename") as? String
+    ).filter { it.isNotBlank() }
+
+    /** A release line split into title claims: alternate titles and tag groups. */
+    private val TITLE_SEGMENTS = Regex("""[\r\n|/]+|\s+[-–—]\s+""")
+
+    /**
+     * Where a release name stops being a title: the release year or the first
+     * quality/source/codec/audio/channel token. Matching only the segment before
+     * it keeps `Fight.Club.1999.1080p.WEB-DL` from being read as one long title.
+     */
+    private val TITLE_CUT = Regex(
+        """(?i)\b(?:(?:19|20)\d{2}|8k|4320p|4k|2160p|1440p|1080p|720p|576p|480p|""" +
+            """360p|240p|sd|uhd|remux|blu[\s._-]?ray|bdremux|bdrip|web[\s._-]?dl|webdl|""" +
+            """web[\s._-]?rip|webrip|hdtv|dvd[\s._-]?rip|hdcam|web|hevc|h[\s._-]?265|""" +
+            """x265|avc|h[\s._-]?264|x264|av1|vp9|hdr10\+|hdr10|hdr|dolby\s*vision|dovi|""" +
+            """dv|hlg|sdr|atmos|truehd|ddp|dd\+|e-?ac-?3|ac-?3|dts|flac|aac|opus|multi""" +
+            """(?:sub|-sub)?|vostfr|truefrench|vff|vfq|vf2|vf|vo|vost|dual)\b"""
+    )
+    private val YEAR_WORD = Regex("""(?:19|20)\d{2}""")
+
+    /** Domains and URLs prefix release names on some indexers and clarify nothing. */
+    private val URL_TEXT = Regex("""(?i)https?://\S+""")
+    private val DOMAIN = Regex(
+        """(?i)\b(?:www\.)?[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|to|cc|me|io|tv|xyz|info|""" +
+            """mx|am|la|ws|is|si|re|su|pm|ch|li|nl|se|nu|ag|lt|cd|ac|uk|in)\b"""
+    )
+
+    /**
+     * Group, indexer and language words that may sit beside a title without
+     * being part of it: `YTS MX The Beast 2026`, `French The Beast 2026`.
+     * Articles are here because a title keeps its meaning without them.
+     */
+    private val TITLE_NOISE = setOf(
+        "the", "a", "an", "www", "http", "https", "com", "net", "org", "to", "cc",
+        "me", "io", "tv", "xyz", "info", "mx", "am", "la", "ws", "is", "si", "re",
+        "su", "pm", "ch", "li", "nl", "se", "nu", "ag", "lt", "cd", "ac", "uk", "in",
+        "yts", "yify", "rarbg", "eztv", "ettv", "torrentio", "stremio",
+        "torrent", "download", "magnet", "sub", "subs", "subbed", "dubbed",
+        "hindi", "tamil", "telugu", "malayalam", "kannada", "english",
+        "french", "spanish", "german", "italian", "japanese", "korean", "russian"
+    )
+    private val LEADING_ARTICLES = setOf("the", "a", "an")
+    private val LETTER_OR_DIGIT = Regex("""[\p{L}\p{N}]+""")
+    private val COMBINING_MARKS = Regex("""\p{M}+""")
+
+    private enum class Script { LATIN, OTHER, MIXED }
+
+    /** What one release line says about the title, before and with its year. */
+    private data class TitleClaim(
+        val head: List<String>,
+        val throughYear: List<String>,
+        val hasYear: Boolean
+    ) {
+        fun matches(expected: List<String>): Boolean =
+            head.matchesTitle(expected) || (hasYear && throughYear.matchesTitle(expected))
+
+        /**
+         * A claim this matcher could not place: it has a year and at least two
+         * words written in the requested title's script, and those words are
+         * not the requested title, so it names another release.
+         */
+        fun namesAnother(expected: List<String>): Boolean =
+            hasYear && head.size >= 2 && scriptOf(head) == scriptOf(expected)
+    }
+
+    /**
+     * The expected title appears in [words], possibly with group/indexer words
+     * and articles around it. `YTS The Beast` clears; `Heart of the Beast`
+     * does not, because `heart` and `of` are not noise.
+     */
+    private fun List<String>.matchesTitle(expected: List<String>): Boolean {
+        if (isEmpty() || expected.isEmpty()) return false
+        if (this == expected) return true
+        val start = indexOfSlice(expected)
+        if (start < 0) return false
+        val before = subList(0, start)
+        val after = subList(start + expected.size, size)
+        return before.all { it in TITLE_NOISE } && after.all { it in TITLE_NOISE }
+    }
+
+    private fun List<String>.indexOfSlice(slice: List<String>): Int {
+        if (slice.size > size) return -1
+        for (start in 0..(size - slice.size)) {
+            if (subList(start, start + slice.size) == slice) return start
+        }
+        return -1
+    }
+
+    /** Normalised words of a title, without the leading article. */
+    private fun titleWords(text: String): List<String>? {
+        val folded = Normalizer.normalize(text, Normalizer.Form.NFD)
+            .replace(COMBINING_MARKS, "")
+            .replace("&", " and ")
+            .replace("'", "")
+            .replace("’", "")
+            .lowercase(Locale.US)
+        val words = LETTER_OR_DIGIT.findAll(folded).map { it.value }.toList()
+        return words.dropWhile { it in LEADING_ARTICLES }.takeIf { it.isNotEmpty() }
+    }
+
+    private fun titleClaim(segment: String): TitleClaim? {
+        val cleaned = DOMAIN.replace(URL_TEXT.replace(segment, " "), " ")
+        val cut = TITLE_CUT.find(cleaned)
+        val head = titleWords(cleaned.substring(0, cut?.range?.first ?: cleaned.length))
+            ?: return null
+        val year = cut?.value?.takeIf { YEAR_WORD.matches(it) } ?: return TitleClaim(head, head, false)
+        return TitleClaim(head, head + year, true)
+    }
+
+    private fun scriptOf(words: List<String>): Script {
+        var latin = false
+        var other = false
+        for (word in words) {
+            for (ch in word) {
+                if (ch in 'a'..'z') latin = true else if (ch.isLetter()) other = true
+            }
+        }
+        return when {
+            latin && other -> Script.MIXED
+            latin -> Script.LATIN
+            else -> Script.OTHER
+        }
+    }
+
     suspend fun loadManifest(baseUrl: String): AddonManifest {
         val url = AddonSource.normalize(baseUrl)
             ?: throw IOException("Enter an addon base URL starting with http:// or https://")
@@ -923,6 +1080,26 @@ object StremioAddons {
         // FayaTV repeats the same channel several times in one catalog; duplicate
         // ids also collide as Compose list keys.
         }.distinctBy { it.id }
+    }
+
+    /** Music catalogs share the `/catalog/...` path; only the meta shape differs. */
+    suspend fun fetchMusicCatalog(
+        baseUrl: String,
+        type: String,
+        catalogId: String,
+        extras: Map<String, String> = emptyMap(),
+        skip: Int = 0,
+        addonName: String = "",
+        idPrefixes: List<String> = emptyList()
+    ): List<MusicTrack> {
+        val url = catalogUrl(baseUrl, type, catalogId, extras, skip) ?: return emptyList()
+        return MusicMeta.parseCatalog(
+            getText(url, MAX_RESOURCE_BYTES),
+            baseUrl,
+            addonName,
+            type,
+            idPrefixes
+        )
     }
 
     private fun baseBuilder(baseUrl: String): okhttp3.HttpUrl? {

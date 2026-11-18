@@ -598,6 +598,7 @@ class CinemaRepository(
                 launch(Dispatchers.IO) {
                     var lastError: Throwable? = null
                     var mismatched = 0
+                    var otherTitle = 0
                     val playable = mutableListOf<PlaybackOption>()
                     val completed = withTimeoutOrNull(ADDON_SEARCH_TIMEOUT_MS) {
                         for (id in ids) {
@@ -609,8 +610,20 @@ class CinemaRepository(
                                     StremioAddons.streamMatchesRequest(it, identity.isSeries, season, episode)
                                 }
                                 mismatched += streams.size - matched.size
-                                if (matched.isNotEmpty()) {
-                                    playable += matched.mapNotNull {
+                                // Movies are also checked against the title the
+                                // addon printed: an indexer can answer an id with
+                                // a same-year neighbour ("Heart of the Beast" for
+                                // "The Beast") and that link must not auto-play.
+                                val verified = if (identity.isSeries) {
+                                    matched
+                                } else {
+                                    matched.filterNot {
+                                        StremioAddons.streamNamesAnotherTitle(it, identity.title)
+                                    }
+                                }
+                                otherTitle += matched.size - verified.size
+                                if (verified.isNotEmpty()) {
+                                    playable += verified.mapNotNull {
                                         it.toPlaybackOption(label, addon.logo)
                                     }.mapIndexed { index, option ->
                                         // A short link or token endpoint tells the
@@ -644,6 +657,11 @@ class CinemaRepository(
                             }
                         }
                     } != null
+
+                    val episodeNote = if (mismatched > 0) " · $mismatched wrong episode" else ""
+                    val titleNote = if (otherTitle > 0) {
+                        " · $otherTitle other " + (if (otherTitle == 1) "title" else "titles")
+                    } else ""
                     val step = when {
                         playable.isNotEmpty() -> {
                             foundOptions += playable
@@ -652,10 +670,7 @@ class CinemaRepository(
                                 label = label,
                                 phase = StreamSearchPhase.FOUND,
                                 found = playable.size,
-                                detail = buildString {
-                                    append("${playable.size} playable")
-                                    if (mismatched > 0) append(" · $mismatched wrong episode")
-                                }
+                                detail = "${playable.size} playable$episodeNote$titleNote"
                             )
                         }
                         lastError != null -> StreamSearchStep(
@@ -675,12 +690,9 @@ class CinemaRepository(
                             label = label,
                             phase = StreamSearchPhase.EMPTY,
                             // Naming the rejection keeps "no streams" from hiding
-                            // an addon that only had another episode's links.
-                            detail = if (mismatched > 0) {
-                                "no playable streams · $mismatched wrong episode"
-                            } else {
-                                "no playable streams"
-                            }
+                            // an addon that only had another episode's or another
+                            // title's links.
+                            detail = "no playable streams$episodeNote$titleNote"
                         )
                     }
                     report(step)
@@ -752,8 +764,12 @@ class CinemaRepository(
                         .fold(
                             onSuccess = { manifest ->
                                 val label = addon.name.ifBlank { manifest.name }
+                                val musicCatalogs = manifest.musicCatalogs.toSet()
                                 manifest.catalogs
-                                    .filter { it.type !in setOf("movie", "series") }
+                                    .filter {
+                                        it.type !in setOf("movie", "series") &&
+                                            it !in musicCatalogs
+                                    }
                                     .map { catalog ->
                                         LiveCatalog(
                                             addonName = label,
@@ -811,6 +827,153 @@ class CinemaRepository(
                     iptvResults.mapNotNull { it.second }
             )
         }
+    }
+
+    /**
+     * Music catalogs declared by the enabled addons. Manifests are already in the
+     * process cache after the startup sync, so this is a cheap pass in the common
+     * case; a failing addon is reported without hiding the others.
+     */
+    suspend fun musicCatalogs(): MusicCatalogLoad {
+        val addons = settingsStore.settings.value.addons.filter { it.enabled && it.url.isNotBlank() }
+        return coroutineScope {
+            val results = addons.map { addon ->
+                async(Dispatchers.IO) { loadMusicCatalogs(addon) }
+            }.awaitAll()
+            MusicCatalogLoad(
+                catalogs = results.flatMap { it.first }.distinctBy { it.key },
+                failures = results.flatMap { it.second }
+            )
+        }
+    }
+
+    private suspend fun loadMusicCatalogs(
+        addon: AddonSource
+    ): Pair<List<MusicCatalog>, List<String>> {
+        val addonLabel = addon.name.ifBlank { addon.url }
+        val manifest = try {
+            cachedManifest(addon)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return emptyList<MusicCatalog>() to
+                listOf("$addonLabel: ${error.message ?: "manifest failed"}")
+        }
+        val label = addon.name.ifBlank { manifest.name }
+        val failures = mutableListOf<String>()
+        val catalogs = manifest.musicCatalogs.mapNotNull { catalog ->
+            val music = MusicCatalog(
+                addonName = label,
+                addonUrl = addon.url,
+                id = catalog.id,
+                name = catalog.name,
+                type = catalog.type,
+                extras = catalog.extras,
+                idPrefixes = manifest.idPrefixes.orEmpty()
+            )
+            if (catalog.isMusicCatalog || catalog.declaresSearch) return@mapNotNull music
+            // A music-shaped catalog on a music manifest can still be a sponsor
+            // slot or an artist shell; one page of rows proves it has tracks.
+            try {
+                StremioAddons.fetchMusicCatalog(
+                    baseUrl = addon.url,
+                    type = music.type,
+                    catalogId = music.id,
+                    addonName = label,
+                    idPrefixes = music.idPrefixes
+                ).takeIf { it.isNotEmpty() }?.let { music }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                failures += "$label · ${catalog.name}: ${error.message ?: "catalog failed"}"
+                music
+            }
+        }
+        return catalogs to failures
+    }
+
+    suspend fun musicTracks(
+        catalog: MusicCatalog,
+        extras: Map<String, String> = emptyMap()
+    ): List<MusicTrack> = withContext(Dispatchers.IO) {
+        StremioAddons.fetchMusicCatalog(
+            baseUrl = catalog.addonUrl,
+            type = catalog.type,
+            catalogId = catalog.id,
+            extras = extras,
+            addonName = catalog.addonName,
+            idPrefixes = catalog.idPrefixes
+        )
+    }
+
+    /** Free-text search across every search-capable music catalog, merged by track id. */
+    suspend fun searchMusic(query: String, catalogs: List<MusicCatalog>): MusicSearchResult {
+        val term = query.trim()
+        if (term.isBlank()) return MusicSearchResult(emptyList())
+        val targets = catalogs.filter { it.supportsSearch }.distinctBy { it.key }
+        if (targets.isEmpty()) return MusicSearchResult(emptyList())
+        return coroutineScope {
+            val results = targets.map { catalog ->
+                async(Dispatchers.IO) {
+                    runCatching {
+                        StremioAddons.fetchMusicCatalog(
+                            baseUrl = catalog.addonUrl,
+                            type = catalog.type,
+                            catalogId = catalog.id,
+                            extras = mapOf("search" to term),
+                            addonName = catalog.addonName,
+                            idPrefixes = catalog.idPrefixes
+                        )
+                    }.fold(
+                        onSuccess = { it to null },
+                        onFailure = { error ->
+                            emptyList<MusicTrack>() to
+                                "${catalog.addonName}: ${error.message ?: "search failed"}"
+                        }
+                    )
+                }
+            }.awaitAll()
+            MusicSearchResult(
+                tracks = results.flatMap { it.first }
+                    .distinctBy { it.key }
+                    .take(MAX_MUSIC_SEARCH_RESULTS),
+                failures = results.mapNotNull { it.second }
+            )
+        }
+    }
+
+    /**
+     * First playable stream for a music track, resolved through the track's own
+     * addon. The media service calls this just in time, so a queue only pays for
+     * the items it actually reaches.
+     */
+    suspend fun musicStream(track: MusicTrack): PlaybackOption? = withContext(Dispatchers.IO) {
+        val attempts = linkedSetOf(track.streamType to track.streamId)
+        if (track.streamType != track.type) attempts += track.type to track.id
+        var failure: IOException? = null
+        for ((type, id) in attempts) {
+            try {
+                val option = StremioAddons.fetchStreams(track.addonUrl, type, id)
+                    .firstNotNullOfOrNull { stream ->
+                        stream.toPlaybackOption(track.addonName.ifBlank { "Music" })
+                            ?.takeIf { it.url.startsWith("http") }
+                    }
+                if (option != null) return@withContext option
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (io: IOException) {
+                // The addon's own failure (HTTP status, timeout) is the honest
+                // reason to show, not "no stream".
+                failure = io
+            } catch (error: Exception) {
+                failure = IOException(
+                    error.message ?: "Unreadable stream response from the addon.",
+                    error
+                )
+            }
+        }
+        failure?.let { throw it }
+        null
     }
 
     private fun iptvExtras(channels: List<LiveChannel>): List<CatalogExtra> {

@@ -94,6 +94,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.streamline.cinema.data.CatalogExtra
 import com.streamline.cinema.data.CatalogItem
 import com.streamline.cinema.data.WatchProgress
 import java.text.SimpleDateFormat
@@ -110,6 +111,10 @@ enum class AppTab(val label: String) {
     LIVE("Live"),
     FAVORITES("Favorites"),
     SETTINGS("Settings"),
+
+    // Rendered in the bar only while a music catalog is configured; the tab
+    // list is supplied by the caller instead of the fixed primary list.
+    MUSIC("Music"),
 
     // Reachable from the top-bar SEARCH button (and Import from the library
     // toolbars); never rendered in the tab bar.
@@ -1354,6 +1359,68 @@ fun Chip(
     }
 }
 
+/**
+ * One catalog `extra` rendered as a labelled row of chips, with an "All" chip
+ * that clears the group. [stateKeyPrefix] keeps each screen's scroll position.
+ */
+@Composable
+fun SelectionGroup(
+    extra: CatalogExtra,
+    selected: String?,
+    onSelect: (String) -> Unit,
+    stateKeyPrefix: String,
+    arranging: Boolean = false,
+    onMove: (String, Int) -> Unit = { _, _ -> }
+) {
+    // The group label is a fixed gutter, so it has to widen with the font or
+    // "GROUP TITLE" gets clipped at 1.5x.
+    val labelWidth = (88f * LocalDensity.current.fontScale.coerceIn(1f, 1.6f)).dp
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = extra.name.replace('-', ' ').uppercase(),
+            color = Cinema.TextMuted,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.9.sp,
+            maxLines = 1,
+            modifier = Modifier.width(labelWidth)
+        )
+        LazyRow(
+            state = rememberScreenListState("$stateKeyPrefix.${extra.name}"),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.weight(1f)
+        ) {
+            item(key = "all") {
+                Chip(label = "All", selected = selected == null, onClick = { onSelect("") })
+            }
+            items(extra.options.size, key = { index -> extra.options[index] }) { index ->
+                val value = extra.options[index]
+                Chip(
+                    label = value,
+                    selected = selected == value,
+                    onClick = { onSelect(value) },
+                    modifier = if (arranging) {
+                        Modifier.onKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            when (event.key) {
+                                Key.DirectionLeft -> {
+                                    onMove(value, -1); true
+                                }
+                                Key.DirectionRight -> {
+                                    onMove(value, 1); true
+                                }
+                                else -> false
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun ToggleRow(
     label: String,
@@ -1586,6 +1653,9 @@ fun TopTabBar(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
     modifier: Modifier = Modifier,
+    // Music joins the bar only when a music catalog exists, so the visible tabs
+    // are caller-supplied; neighbours and requesters follow this list.
+    tabs: List<AppTab> = primaryTabs,
     profileName: String = "",
     profileBadge: String = "",
     profileColor: Color = Cinema.Gold,
@@ -1626,10 +1696,10 @@ fun TopTabBar(
         ) {
             BrandMark()
             Spacer(Modifier.width(if (dense) 12.dp else 26.dp))
-            val tabRequesters = remember { primaryTabs.associateWith { FocusRequester() } }
+            val tabRequesters = remember(tabs) { tabs.associateWith { FocusRequester() } }
             val profileFocus = remember { FocusRequester() }
             val searchFocus = remember { FocusRequester() }
-            val lastTabFocus = tabRequesters.getValue(primaryTabs.last())
+            val lastTabFocus = tabRequesters.getValue(tabs.last())
             val view = LocalView.current
             LaunchedEffect(restoreTarget, restoreTick) {
                 if (restoreTick == 0 || restoreTarget.isNullOrBlank()) return@LaunchedEffect
@@ -1640,7 +1710,7 @@ fun TopTabBar(
                 val requester = if (restoreTarget == "profile") {
                     profileFocus
                 } else {
-                    primaryTabs.firstOrNull { it.name == restoreTarget }?.let { tabRequesters[it] }
+                    tabs.firstOrNull { it.name == restoreTarget }?.let { tabRequesters[it] }
                 }
                 requester?.let { runCatching { it.requestFocus() } }
             }
@@ -1655,9 +1725,9 @@ fun TopTabBar(
                     )
                     .padding(horizontal = 4.dp, vertical = 2.dp)
             ) {
-                primaryTabs.forEachIndexed { index, tab ->
-                    val left = primaryTabs.getOrNull(index - 1)
-                    val right = primaryTabs.getOrNull(index + 1)
+                tabs.forEachIndexed { index, tab ->
+                    val left = tabs.getOrNull(index - 1)
+                    val right = tabs.getOrNull(index + 1)
                     TabItem(
                         tab = tab,
                         selected = tab == selected,

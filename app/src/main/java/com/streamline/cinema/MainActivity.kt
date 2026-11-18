@@ -9,10 +9,15 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import com.streamline.cinema.data.CacheCleaner
 import com.streamline.cinema.ui.AppRoot
 import com.streamline.cinema.ui.CinemaTheme
 import com.streamline.cinema.ui.PinKeyCapture
+import com.streamline.cinema.ui.splash.SplashScreen
 
 class MainActivity : CinemaActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -22,7 +27,14 @@ class MainActivity : CinemaActivity() {
         enterImmersive()
         setContent {
             CinemaTheme {
-                AppRoot(vm = viewModel())
+                // Remembered so a configuration change does not replay the
+                // intro; only a fresh launch shows it.
+                var splashDone by rememberSaveable { mutableStateOf(false) }
+                if (splashDone) {
+                    AppRoot(vm = viewModel())
+                } else {
+                    SplashScreen(onFinished = { splashDone = true })
+                }
             }
         }
     }

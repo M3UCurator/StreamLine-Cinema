@@ -1,6 +1,7 @@
 package com.streamline.cinema
 
 import android.app.Application
+import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -30,6 +31,9 @@ import com.streamline.cinema.data.LivePrefsStore
 import com.streamline.cinema.data.LiveSourceKind
 import com.streamline.cinema.data.MaturityLevel
 import com.streamline.cinema.data.MediaType
+import com.streamline.cinema.data.MusicCatalog
+import com.streamline.cinema.data.MusicHistory
+import com.streamline.cinema.data.MusicTrack
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.Season
@@ -51,6 +55,7 @@ import com.streamline.cinema.data.rankingLanguage
 import com.streamline.cinema.data.todayStamp
 import com.streamline.cinema.data.visibleTo
 import com.streamline.cinema.data.watchedEpisodesFor
+import com.streamline.cinema.player.MusicPlaybackService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -167,6 +172,33 @@ data class LiveUiState(
     val resolving: String? = null,
     val message: String? = null
 )
+
+data class MusicUiState(
+    val catalogs: List<MusicCatalog> = emptyList(),
+    val selected: MusicCatalog? = null,
+    /** Active selection groups of the catalog (`genre` → `Jazz`, …). */
+    val filters: Map<String, String> = emptyMap(),
+    val tracks: List<MusicTrack> = emptyList(),
+    val query: String = "",
+    /** The trimmed query whose results are held in [results]; stale text hides them. */
+    val searchedQuery: String = "",
+    val results: List<MusicTrack> = emptyList(),
+    val loading: Boolean = false,
+    val searching: Boolean = false,
+    /** A manifest pass finished; distinguishes "no music addons" from "still loading". */
+    val loaded: Boolean = false,
+    val message: String? = null
+) {
+    val available: Boolean get() = catalogs.isNotEmpty()
+
+    val supportsSearch: Boolean get() = catalogs.any { it.supportsSearch }
+
+    /** Results only stand while the field still shows the query they answer. */
+    val showingResults: Boolean
+        get() = searchedQuery.isNotBlank() && query.trim() == searchedQuery
+
+    val visibleTracks: List<MusicTrack> get() = if (showingResults) results else tracks
+}
 
 data class EpgUiState(
     val guide: EpgGuide = EpgGuide.EMPTY,
@@ -294,6 +326,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     /** Unfiltered channels for the parental curation screen. */
     val liveAll: StateFlow<LiveUiState> = _live.asStateFlow()
 
+    private val _music = MutableStateFlow(MusicUiState())
+    val music: StateFlow<MusicUiState> = _music.asStateFlow()
+
+    /** Recently played tracks and the last queue for the active profile. */
+    val musicHistory: StateFlow<MusicHistory> = container.musicHistory.history
+
     private val _epg = MutableStateFlow(EpgUiState())
     val epg: StateFlow<EpgUiState> = _epg.asStateFlow()
 
@@ -335,9 +373,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         // The library loads off-main; setActiveProfile waits for that lock, so a
         // profile restored from the last session never sees the wrong bucket.
         container.libraryStore.setActiveProfile(container.profileStore.active.value.id)
+        container.musicHistory.setActiveProfile(container.profileStore.active.value.id)
         viewModelScope.launch {
             container.profileStore.active.drop(1).collect { profile ->
                 container.libraryStore.setActiveProfile(profile.id)
+                container.musicHistory.setActiveProfile(profile.id)
+                stopMusicPlayback()
                 refreshRecommendations(force = true)
                 if (_search.value.query.isBlank() && _search.value.genreIds.isEmpty()) {
                     loadPlayroomDefault()
@@ -516,6 +557,16 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun switchProfile(profileId: String) {
         container.profileStore.select(profileId)
+    }
+
+    /**
+     * Music belongs to the profile that started it, so a switch ends the
+     * session; the service saves that profile's queue and playhead on the way
+     * out, and the new profile's Musicbox opens clean.
+     */
+    private fun stopMusicPlayback() {
+        val app = getApplication<Application>()
+        app.stopService(Intent(app, MusicPlaybackService::class.java))
     }
 
     /** Kids Mode is the Kids profile: this switches to it (creating one if needed). */
@@ -1576,13 +1627,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         loadLiveCatalog(catalog, filters, reload = true)
     }
 
-    fun clearLiveFilters() {
-        val state = _live.value
-        val catalog = state.selected ?: return
-        if (state.filters.isEmpty()) return
-        loadLiveCatalog(catalog, emptyMap(), reload = true)
-    }
-
     private fun loadLiveCatalog(
         catalog: LiveCatalog,
         filters: Map<String, String>,
@@ -1650,6 +1694,174 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private fun withLiveOrder(catalog: LiveCatalog): LiveCatalog = catalog.copy(
         extras = catalog.extras.map { container.livePrefs.applyGroupOrder(catalog, it) }
     )
+
+    private var musicJob: Job? = null
+
+    /**
+     * [force] re-reads every enabled addon manifest; otherwise an existing catalog
+     * list is reused and only the selected catalog is (re)filled when empty.
+     */
+    fun refreshMusic(force: Boolean = false) {
+        val state = _music.value
+        if (state.loading && !force) return
+        if (!force && state.catalogs.isNotEmpty()) {
+            val selected = state.selected ?: state.catalogs.first()
+            loadMusicCatalog(selected, state.filters, reload = false)
+            return
+        }
+        musicJob?.cancel()
+        musicJob = viewModelScope.launch {
+            _music.update { it.copy(loading = true, searching = false, message = null) }
+            try {
+                val load = repository.musicCatalogs()
+                val previous = _music.value
+                val selected = load.catalogs.firstOrNull { it.key == previous.selected?.key }
+                    ?: load.catalogs.firstOrNull()
+                val keepFilters = selected?.key == previous.selected?.key
+                val filters = if (keepFilters) previous.filters else emptyMap()
+                _music.update {
+                    it.copy(
+                        catalogs = load.catalogs,
+                        selected = selected,
+                        filters = filters,
+                        tracks = emptyList(),
+                        query = "",
+                        searchedQuery = "",
+                        results = emptyList(),
+                        loaded = true,
+                        loading = selected == null,
+                        message = load.failures.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                    )
+                }
+                if (selected != null) loadMusicCatalog(selected, filters, reload = true)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _music.update {
+                    it.copy(
+                        loading = false,
+                        loaded = true,
+                        message = t.message ?: "Music catalogs failed"
+                    )
+                }
+            }
+        }
+    }
+
+    /** Selecting the current catalog again is the way back out of a search. */
+    fun selectMusicCatalog(catalog: MusicCatalog) {
+        if (_music.value.selected?.key == catalog.key) {
+            _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
+        }
+        loadMusicCatalog(catalog, emptyMap(), reload = false)
+    }
+
+    fun setMusicFilter(name: String, value: String) {
+        val state = _music.value
+        val catalog = state.selected ?: return
+        val filters = if (value.isBlank()) state.filters - name else state.filters + (name to value)
+        if (filters == state.filters) return
+        loadMusicCatalog(catalog, filters, reload = true)
+    }
+
+    /** Typing only updates the field; the search itself runs on the SEARCH button. */
+    fun setMusicQuery(text: String) {
+        if (_music.value.query == text) return
+        _music.update { it.copy(query = text) }
+    }
+
+    fun clearMusicSearch() {
+        _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
+        // A search can have cancelled the catalog fetch; if no tracks landed,
+        // pulling them back is the difference between a list and an empty page.
+        val state = _music.value
+        val catalog = state.selected
+        if (catalog != null && state.tracks.isEmpty() && !state.loading && !state.searching) {
+            loadMusicCatalog(catalog, state.filters, reload = false)
+        }
+    }
+
+    fun runMusicSearch() {
+        val state = _music.value
+        val term = state.query.trim()
+        if (term.isBlank() || state.searching) return
+        val targets = state.catalogs.filter { it.supportsSearch }
+        if (targets.isEmpty()) {
+            _music.update { it.copy(message = "No music catalog in this setup supports search.") }
+            return
+        }
+        musicJob?.cancel()
+        musicJob = viewModelScope.launch {
+            _music.update { it.copy(searching = true, loading = false, message = null) }
+            try {
+                val result = repository.searchMusic(term, targets)
+                _music.update {
+                    it.copy(
+                        searching = false,
+                        searchedQuery = term,
+                        results = result.tracks,
+                        message = result.failures.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                    )
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _music.update {
+                    it.copy(searching = false, message = t.message ?: "Music search failed")
+                }
+            }
+        }
+    }
+
+    private fun loadMusicCatalog(
+        catalog: MusicCatalog,
+        filters: Map<String, String>,
+        reload: Boolean
+    ) {
+        val state = _music.value
+        if (!reload && state.selected?.key == catalog.key &&
+            state.filters == filters && state.tracks.isNotEmpty()
+        ) {
+            return
+        }
+        musicJob?.cancel()
+        musicJob = viewModelScope.launch {
+            _music.update {
+                it.copy(
+                    selected = catalog,
+                    filters = filters,
+                    loading = true,
+                    searching = false,
+                    tracks = emptyList(),
+                    query = "",
+                    searchedQuery = "",
+                    results = emptyList(),
+                    message = null
+                )
+            }
+            try {
+                val tracks = repository.musicTracks(catalog, filters)
+                _music.update {
+                    it.copy(
+                        tracks = tracks,
+                        loading = false,
+                        message = if (tracks.isEmpty()) {
+                            "${catalog.name}: this selection returned no tracks."
+                        } else null
+                    )
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _music.update {
+                    it.copy(
+                        loading = false,
+                        message = "${catalog.name}: ${t.message ?: "catalog failed"}"
+                    )
+                }
+            }
+        }
+    }
 
     fun toggleLiveFavorite(channel: LiveChannel): Boolean =
         container.livePrefs.toggleFavorite(channel.key)
@@ -1949,7 +2161,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             ?: return "Enter an addon URL (https://host or …/manifest.json)"
         val id = normalized.trimEnd('/').lowercase()
         if (settings.value.addons.any { it.id == id }) return "That addon is already registered"
-        if (settings.value.addons.size >= 8) return "Limit reached · remove an addon first"
+        if (settings.value.addons.size >= 12) return "Limit reached · remove an addon first"
         saveSettings {
             it.copy(
                 addons = it.addons + AddonSource(
@@ -1959,15 +2171,20 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 )
             )
         }
+        // A newly added music addon is what makes the Musicbox tab appear.
+        refreshMusic(force = true)
         return null
     }
 
-    fun toggleAddon(id: String) = saveSettings {
-        it.copy(
-            addons = it.addons.map { addon ->
-                if (addon.id == id) addon.copy(enabled = !addon.enabled) else addon
-            }
-        )
+    fun toggleAddon(id: String) {
+        saveSettings {
+            it.copy(
+                addons = it.addons.map { addon ->
+                    if (addon.id == id) addon.copy(enabled = !addon.enabled) else addon
+                }
+            )
+        }
+        refreshMusic(force = true)
     }
 
     /** Reorders addons; the list order is the stream-search priority order. */
@@ -1984,8 +2201,9 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun deleteAddon(id: String) = saveSettings {
-        it.copy(addons = it.addons.filterNot { addon -> addon.id == id })
+    fun deleteAddon(id: String) {
+        saveSettings { it.copy(addons = it.addons.filterNot { addon -> addon.id == id }) }
+        refreshMusic(force = true)
     }
 
     fun removeProgressForItem(itemKey: String) = container.libraryStore.removeProgressForItem(itemKey)

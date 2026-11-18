@@ -1,4 +1,150 @@
-# StreamLine Cinema v12.89
+# StreamLine Cinema v12.113
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.113 — Musicbox recognises music-first manifests
+
+Some music addons never type a catalog `music`: they mark the manifest itself with `contentType: "music"` and publish their tracks under `artist`, `playlist`, `movie` or `series`. Those addons were invisible to Musicbox. The tab now follows the manifest as well as the catalog.
+
+- **Manifest-level detection.** An addon whose manifest declares `contentType: "music"` offers every music-shaped catalog — types `music`, `track`, `album`, `artist` and `playlist`, or any catalog that declares a `search` extra. A manifest without the flag behaves as before (only `type: "music"` catalogs), so a live addon's "Music" channel still stays a live catalog.
+- **A second row shape.** Catalog bodies are read from `metas` (the standard field) or from `items` (the field PencariMusic publishes). Row metadata honours `durationMs` (already milliseconds), `duration` (`1:12:30` or a bare number of seconds) and `runtime` (a bare number of minutes, Stremio convention), plus `artworkURL` for artwork.
+- **Streams in the video namespace.** A row in a non-`music` catalog is requested as `movie` with the manifest's declared id prefix, because that is where these addons serve audio — PencariMusic's `nIU2gC` resolves at `/stream/movie/pm_nIU2gC.json`. If that yields no playable URL, the row's own type is tried once. An id that already carries the prefix is not prefixed twice, and a catalog typed `music` still streams from `/stream/music/{id}`.
+- **Empty catalogs are dropped quietly.** Catalogs that are neither search-enabled nor music-typed are fetched once at load; an empty answer hides the chip instead of leaving a dead one. A failed request keeps the catalog and names the addon in the load error line.
+- **Live stays clean.** Catalogs that feed Musicbox no longer appear as Live channels on the Live tab.
+- **What still cannot work.** LastWave publishes no catalogs at all. Its `/search` answers with real Tidal metadata, but `/stream` returns an unrelated audio file from a prank CDN, so there is nothing to list and nothing to play — no MUSIC tab. An addon has to publish catalog rows and serve the audio for those rows.
+
+## Verified on 12.113
+
+- `./gradlew :app:testDebugUnitTest --tests com.streamline.cinema.data.MusicCatalogTest --tests com.streamline.cinema.data.MusicHistoryTest` — 24/24 with 0 failures; `MusicCatalogTest` 15/15 including six new cases (a `contentType: "music"` manifest contributes its own catalog types, a manifest without the flag is not widened, `items` rows resolve through `movie` + declared prefix, an already-prefixed id is not prefixed twice, a `music` catalog keeps its own id, stream coordinates survive JSON).
+- `./gradlew assembleRelease -PcinemaIteration=12.113` and `./gradlew assembleRelease -PcinemaIteration=12.113 -PallAbis=true` — both BUILD SUCCESSFUL; `aapt dump badging` reports `versionCode 120113` / `versionName 12.113` for both. The 32-bit package contains only `lib/armeabi-v7a`; the all-ABI package contains `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64`. The all-ABI build installed over 12.112 on emulator-5554 with app data kept (profile gate, per-profile music recents and the IPTV playlist were still there).
+- The PencariMusic manifest was registered through **Settings → Addons → VALIDATE + ADD**; the pane answered `PencariMusic (PencariMovie.Com) 3.2.0 registered` and the top bar gained **MUSIC**. The tab reads `2 catalogs · PencariMusic (PencariMovie.Com) · 99 tracks` and offers the `Artists` and `PencariMusic · Search` chips; the manifest's empty playlist and its series/movie sponsor catalogs did not become chips.
+- The first track played end to end through `/stream/movie/pm_nIU2gC.json`: the media session reported `PLAYING` with description *Trancemaster Vol. 02 (The Goa Gap), Various Artists*, the notification carried the same title and artist, and the position advanced to 0:30 while the music pane was still open.
+- Searching `weeknd` in the pane reported `100 results`, with `The Weeknd - The Weeknd Timeless` as the first row.
+- The Live tab listed only the registered IPTV playlist (*Zap Test*, 2 channels) — the PencariMusic catalogs did not leak in as live channels.
+- LastWave contributes nothing to the tab: its manifest carries no `catalogs` (only `search` and `stream` resources), and `/stream/movie/1440830.json` answers `{"error":"Not found."}`, so there is no row to list or play.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema181126v12.113.apk` | `armeabi-v7a` (TV boxes) | 76,800,093 bytes | `385caee6ab4517818231908cf49b084b529240a0d669335443913780df977ab3` |
+| `Cinema181126v12.113-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 329,998,767 bytes | `d074b1ce077459cf7d5a00888a3d5cc0c872121d1a37bcde057f005a0c60e29d` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema181126v12.113.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists, music recents and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.112 (previous)
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.112 — Addon sources that name another title are rejected
+
+Searching *The Beast (2026)* could play *Heart of the Beast (2026)*: the addon answered the correct TMDB/IMDb id, but its indexer had matched a same-year neighbour, and the app trusted every stream returned for that id. Movie sources are now checked against the title the addon printed.
+
+- **A label must claim a title to be judged.** Only a release line that carries a release year and at least two title words counts as a claim. The line is cut at the year or the first quality/source/codec/audio/channel token, so `Fight.Club.1999.1080p.WEB-DL` reads as *Fight Club*; alternate titles split by `/`, `|`, a newline or ` - ` are honoured; a name matches when the requested words appear as a contiguous run with only articles, indexer/group words or domain words around them, so `YTS MX The Beast 2026` clears while `Heart of the Beast 2026` does not. A title that carries its own year (`Blade Runner 2049`) matches before and with the year.
+- **Silence passes.** Quality-only (`1080p`), group-only, unlabelled and foreign-script labels make no claim and are never dropped, so an addon that publishes no title keeps working. `behaviorHints.filename` is checked when `name` and `title` carry only tags.
+- **Series are unchanged.** The guard is movies-only: episode labels already carry their own `SxxEyy` rules, and series labels often name only the episode.
+- **The search says what it dropped.** The source row reads `2 playable · 1 other title` (beside the existing `· 4 wrong episode`), so a filtered source is visible instead of silently missing.
+
+## Verified on 12.112
+
+- `./gradlew testDebugUnitTest` — `StreamIdentityTest` 22/22 with 7 new title-guard cases (same-year neighbour rejected, year-less label passes, alternate titles and filename/indexer noise match, a title carrying its own year matches, filename-only check, group-only passes, foreign script not judged), `StremioAddonTest` 13/13, full suite green.
+- End to end on emulator-5554 against a local fixture addon answering `tmdb:29256561` with three sources in order — `Heart of the Beast (2026) 1080p WEB-DL`, `The Beast (2026) 1080p WEB-DL` and a quality-only `Generic label`: the source picker showed 2 sources, the named *The Beast (2026) 1080p WEB-DL* and the generic row, and the uiautomator dump contains no `Heart` text.
+- `./gradlew assembleDebug -PallAbis=true`, `./gradlew assembleRelease -PallAbis=true` and `./gradlew assembleRelease` — both release builds BUILD SUCCESSFUL; `aapt dump badging` reports `versionCode 120112` / `versionName 12.112` for both. The 32-bit package contains only `lib/armeabi-v7a`; the all-ABI package contains `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64`. The all-ABI build installed over 12.111 on emulator-5554 with app data kept.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema181126v12.112.apk` | `armeabi-v7a` (TV boxes) | 76,800,077 bytes | `8a32b7a139633f76ddcaf9d4ed37a378cde6fb2ceaf32184e62045b005ec613f` |
+| `Cinema181126v12.112-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 329,998,764 bytes | `17d86864502f19ffe26fe3ce992a7fcef7ed63d7b22499c990c7e794dd15ce62` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema181126v12.112.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists, music recents and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.111
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.111 — Musicbox
+
+Any enabled Stremio addon that publishes a catalog whose `type` is `music` now feeds a **MUSIC** tab: catalogs, selection groups, search and tracks come from the addon, and audio plays through a Media3 media session with a notification, media keys and background playback.
+
+- **The tab follows the catalog** — Musicbox is recognized from the declared catalog type, never from a name, so a live addon's "Music" channel stays a live catalog. With no music catalog registered there is no **MUSIC** entry in the top bar at all. Catalogs and their `extra` groups render as chips (a fixture addon's `genre` group shows *All / Synthwave / Ambient*); a catalog answers the search box only when it declares a `search` extra, and hits from every such catalog merge, de-duplicate by addon URL + id and cap at 200.
+- **Playback** — a `MediaSessionService` owns one ExoPlayer playlist: system notification with track title and artist, media keys and Bluetooth, audio-only (video tracks are disabled), and next/previous over the queue. Music keeps playing with the screen off and keeps its place when the app UI is left.
+- **Skip non-music sections** (default on) uses SponsorBlock's `music_offtopic` category through the privacy-prefix API — only the first 16 bits of a hashed video id leave the device — and seeks past community-marked talking intros, interludes and outros when the track id is a YouTube video id. The song itself is never cut.
+- **Per-profile state** — recently played (50), the last queue and the playhead belong to the profile that started the session; switching profile ends it, and clearing caches does not lose the resume point.
+- **Kids profiles never get the tab** — music catalogs carry no rating metadata to filter on, so **MUSIC** (and **SEARCH**) is removed rather than filtered, and leaving Kids still requires the parental PIN.
+- **Audio cache** (OFF / 256 MB / 512 MB / 1 GB, default 512 MB) keeps recently played bytes on disk keyed by addon URL + id, not by the resolved URL, so a track survives its link expiring. It is a replay cache, not a download: the least recently played entry is evicted first and a budget change applies the next time Musicbox starts. **Settings → Playback → Storage** shows `MUSICBOX <size>` and clears it separately from artwork, channel lists and the guide index.
+- The addon contract, stream resolution rules and a self-hosted reference resolver are documented in [`docs/music-addons.md`](docs/music-addons.md).
+
+## Verified on 12.111
+
+- `./gradlew assembleRelease -PallAbis=true -PcinemaIteration=12.111` and `./gradlew assembleRelease -PcinemaIteration=12.111` — both BUILD SUCCESSFUL. `aapt dump badging` reports `versionCode 120111` / `versionName 12.111` for both APKs; the 32-bit package contains only `lib/armeabi-v7a`, the all-ABI package contains `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64`. The all-ABI build installed over 12.110 on emulator-5554 with app data kept; 12.110 stayed installed until the new build passed the checks below.
+- With no music source the top bar has no **MUSIC** tab. After registering a local fixture addon (`org.fixture.music`, 2 catalogs, 4 tracks) the tab reads `2 catalogs · Fixture Music · 4 tracks`, lists both catalogs as chips, shows the GENRE chips *All / Synthwave / Ambient*, and `genre=Synthwave` and `search=orbit` issue the encoded extra request and return only the matching tracks.
+- Playing *Midnight Intro Test* raised the media notification (`id=1001`, foreground service, `android.title` *Midnight Intro Test*, `android.text` *SoundHelix*); with the screen off the AudioTrack position kept advancing and playback resumed at the same playhead on return. SponsorBlock skipped the fixture's `music_offtopic` segment at 12.4 s.
+- Recents, queue and playhead stayed per profile, and Kids profiles showed neither **MUSIC** nor **SEARCH**; leaving Kids asked for the parental PIN.
+- **Cache budget:** Storage reported `MUSICBOX 5.0 MB` after a cached run and the **MUSICBOX** button cleared it to `0 B`; with the budget OFF, a 35 s playback left `MUSICBOX 0 B`; with 256 MB, playback past the 5 MiB cache-fragment boundary wrote `MUSICBOX 8.5 MB`. The setting was returned to the 512 MB default before finishing.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema181126v12.111.apk` | `armeabi-v7a` (TV boxes) | 76,800,086 bytes | `760b958ea52d3c6a0dfc234b5f99cad45e5a0836723e46734dbbadcaed3599c4` |
+| `Cinema181126v12.111-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 329,998,770 bytes | `1cb171dee74a0d1e97ac97e8ab80b052c0310c94b846d311e7dd9a5043c3638c` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema181126v12.111.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists, music recents and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.89 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

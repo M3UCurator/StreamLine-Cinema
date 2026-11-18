@@ -14,8 +14,10 @@ import com.streamline.cinema.data.IptvStore
 import com.streamline.cinema.data.KidsModeManager
 import com.streamline.cinema.data.LibraryStore
 import com.streamline.cinema.data.LivePrefsStore
+import com.streamline.cinema.data.MusicHistoryStore
 import com.streamline.cinema.data.ProfileStore
 import com.streamline.cinema.data.SettingsStore
+import com.streamline.cinema.data.SponsorBlockClient
 import com.streamline.cinema.data.StreamBadgeStore
 import com.streamline.cinema.data.TransportMemoryStore
 
@@ -30,7 +32,9 @@ class AppContainer(context: Context) {
     val livePrefs = LivePrefsStore(context)
     val badges = StreamBadgeStore(context)
     val transportMemory = TransportMemoryStore(context)
+    val musicHistory = MusicHistoryStore(context)
     val introDb = IntroDbClient(context.filesDir)
+    val sponsorBlock = SponsorBlockClient()
     val repository = CinemaRepository(context, settingsStore, libraryStore, iptvStore, guideIndexStore)
 }
 

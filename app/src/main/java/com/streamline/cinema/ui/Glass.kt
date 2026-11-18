@@ -1,23 +1,15 @@
 package com.streamline.cinema.ui
 
-import android.app.ActivityManager
-import android.os.Build
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
@@ -29,7 +21,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -159,61 +150,14 @@ fun Modifier.glassEdge(shape: RoundedCornerShape, focused: Boolean = false): Mod
     glassFrame(shape = shape, focused = focused, indicator = false)
 
 /**
- * Static ambient light behind the app. Heavy blur is applied only where the
- * platform supports it; older boxes still get the soft radial wash.
+ * Static backdrop: flat ink with a faint lift at the top edge. Posters and
+ * stills carry the colour, so no wash competes with them.
  */
 @Composable
 fun AmbientGlassBackdrop(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    val lowRam = context.getSystemService(ActivityManager::class.java)?.isLowRamDevice == true
-    val blurRadius: Dp = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !lowRam) 96.dp else 0.dp
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().background(Cinema.Ink))
-        AmbientBlob(
-            color = Cinema.Gold.copy(alpha = 0.13f),
-            diameter = 780.dp,
-            blurRadius = blurRadius,
-            modifier = Modifier.align(Alignment.TopStart).offset(x = (-260).dp, y = (-300).dp)
-        )
-        AmbientBlob(
-            color = Cinema.Crimson.copy(alpha = 0.09f),
-            diameter = 860.dp,
-            blurRadius = blurRadius,
-            modifier = Modifier.align(Alignment.BottomEnd).offset(x = 220.dp, y = 260.dp)
-        )
-        AmbientBlob(
-            color = Color(0xFF3E6BD8).copy(alpha = 0.10f),
-            diameter = 640.dp,
-            blurRadius = blurRadius,
-            modifier = Modifier.align(Alignment.CenterEnd).offset(x = 340.dp, y = (-60).dp)
-        )
-    }
-}
-
-@Composable
-private fun AmbientBlob(
-    color: Color,
-    diameter: Dp,
-    blurRadius: Dp,
-    modifier: Modifier = Modifier
-) {
     Box(
         modifier
-            .size(diameter)
-            .then(
-                if (blurRadius > 0.dp && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    Modifier.blur(blurRadius)
-                } else {
-                    Modifier
-                }
-            )
-            .clip(CircleShape)
-            .background(
-                Brush.radialGradient(
-                    0f to color,
-                    0.55f to color.copy(alpha = color.alpha * 0.45f),
-                    1f to Color.Transparent
-                )
-            )
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Cinema.InkSoft, Cinema.Ink), endY = 720f))
     )
 }

@@ -98,9 +98,9 @@ fun LibraryScreen(
                     )
                     Text(
                         text = if (isMoviePage) {
-                            "${countLabel(items.size, "film")} in your cinema hall · sources resolve at playback"
+                            countLabel(items.size, "film")
                         } else {
-                            "${countLabel(items.size, "series", "series")} · seasons and episodes scaffolded from TMDB"
+                            countLabel(items.size, "series", "series")
                         },
                         color = Cinema.TextMuted,
                         style = CinemaType.BodySmall
@@ -143,12 +143,6 @@ fun LibraryScreen(
                         onClick = { vm.saveSettings { it.copy(sortMode = mode) } }
                     )
                 }
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = "Catalogue sorted · ${settings.sortMode.label} · ← on a poster stars it",
-                    color = Cinema.TextMuted,
-                    fontSize = 10.sp
-                )
             }
             if (managing) {
                 Spacer(Modifier.height(10.dp))
@@ -176,18 +170,16 @@ fun LibraryScreen(
                         message = if (profile.isKids) {
                             "A parent can add approved movies and series to this profile."
                         } else {
-                            "Import a TMDB discover feed or an MDBList collection. Every TV import is " +
-                                "split into seasons and episodes with stills, titles and air dates."
+                            "Import a TMDB discovery list or an MDBList collection to start your library."
                         },
-                        actionLabel = if (profile.isKids) null else "OPEN IMPORT TERMINAL",
+                        actionLabel = if (profile.isKids) null else "IMPORT TITLES",
                         onAction = if (profile.isKids) null else onImport
                     )
                 }
                 if (discover.isNotEmpty()) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         SectionHeader(
-                            title = "Discover ${if (isMoviePage) "Movies" else "TV Shows"}",
-                            subtitle = "Live from TMDB · press a title to import"
+                            title = "Discover ${if (isMoviePage) "Movies" else "TV Shows"}"
                         )
                     }
                     itemsIndexed(discover, key = { _, item -> "d-${item.key}" }) { _, item ->
@@ -218,11 +210,11 @@ fun LibraryScreen(
                         subtitle = if (managing) {
                             "press a poster to remove it"
                         } else {
-                            "${countLabel(
+                            countLabel(
                                 items.size,
                                 if (isMoviePage) "title" else "series",
                                 if (isMoviePage) "titles" else "series"
-                            )} · ${settings.sortMode.label}"
+                            )
                         },
                         items = items,
                         onItemClick = onOpenDetail,
@@ -239,7 +231,7 @@ fun LibraryScreen(
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     SectionHeader(
                         title = if (isMoviePage) "All Movies" else "All TV Shows",
-                        subtitle = "${countLabel(items.size, "title")} · ${settings.sortMode.label}"
+                        subtitle = countLabel(items.size, "title")
                     )
                 }
                 itemsIndexed(items, key = { _, item -> item.key }) { _, item ->
@@ -257,8 +249,7 @@ fun LibraryScreen(
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         Column(Modifier.padding(top = 26.dp)) {
                             SectionHeader(
-                                title = "Popular ${if (isMoviePage) "Movies" else "TV Shows"}",
-                                subtitle = "TMDB discover · press a title to open it"
+                                title = "Popular ${if (isMoviePage) "Movies" else "TV Shows"}"
                             )
                         }
                     }

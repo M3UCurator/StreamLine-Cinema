@@ -14,6 +14,10 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- In-app updates: the signed release is handed to PackageInstaller. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Musicbox keeps playing from a media session, so the session service
+         must be allowed to run in the foreground while the queue downloads. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <uses-feature
         android:name="android.software.leanback"
@@ -83,6 +87,15 @@
             android:screenOrientation="landscape"
             android:supportsPictureInPicture="true"
             android:theme="@style/Theme.StreamLineCinema.Player" />
+
+        <service
+            android:name=".player.MusicPlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
 
         <receiver
             android:name=".UpdateInstallReceiver"

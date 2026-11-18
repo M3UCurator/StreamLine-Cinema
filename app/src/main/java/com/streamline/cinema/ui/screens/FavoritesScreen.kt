@@ -33,7 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -147,8 +146,6 @@ fun FavoritesScreen(
     val posterStyle = LocalPosterStyle.current
     val movieCount = saved.count { it.type == MediaType.MOVIE }
     val showCount = saved.count { it.type == MediaType.TV }
-    // The inline hint only fits beside the chips at the default font size.
-    val dense = LocalDensity.current.fontScale > 1.15f
 
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(start = 48.dp, end = 48.dp, top = 20.dp)) {
@@ -234,22 +231,6 @@ fun FavoritesScreen(
                         onClick = { filter = option }
                     )
                 }
-                Spacer(Modifier.weight(1f))
-                if (!dense) {
-                    Text(
-                        text = "← moves between posters · hold OK to star · new = aired episodes you have not watched",
-                        color = Cinema.TextMuted,
-                        fontSize = 10.sp
-                    )
-                }
-            }
-            if (dense) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "← moves between posters · hold OK to star · new = aired episodes you have not watched",
-                    color = Cinema.TextMuted,
-                    fontSize = 10.sp
-                )
             }
             if (managing) {
                 Spacer(Modifier.height(10.dp))
@@ -283,7 +264,7 @@ fun FavoritesScreen(
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         val (title, message) = when {
                             saved.isEmpty() -> "No favorites yet" to
-                                "Star a movie or TV show with a long OK press, or press ☆ FAVORITE on a detail page."
+                                "Star a movie or TV show to collect it here."
                             filter == FavoriteFilter.MOVIES -> "No favorite movies" to
                                 "Open Movies and add one to this list."
                             else -> "No favorite series" to

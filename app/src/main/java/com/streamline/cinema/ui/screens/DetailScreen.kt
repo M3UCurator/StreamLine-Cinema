@@ -641,15 +641,9 @@ fun DetailScreen(
                                 )
                             }
                             if (loading) {
-                                Text("Refreshing metadata…", color = Cinema.TextMuted, fontSize = 11.sp)
+                                Text("Refreshing details…", color = Cinema.TextMuted, fontSize = 11.sp)
                             }
                         }
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            text = "Native playback · direct catalog links and Stremio addon sources",
-                            color = Cinema.TextMuted,
-                            fontSize = 10.sp
-                        )
                     }
                 }
             }
@@ -767,7 +761,7 @@ fun DetailScreen(
                     item(key = "episodesEmpty") {
                         Box(Modifier.padding(horizontal = 48.dp, vertical = 8.dp)) {
                             Text(
-                                "Episode titles and stills will load when the queue finishes enriching this series.",
+                                "Episodes will appear as soon as details finish loading.",
                                 color = Cinema.TextMuted,
                                 fontSize = 12.sp
                             )

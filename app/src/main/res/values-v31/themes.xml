@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ launch window: black, with no app icon, so the OS splash is a
+     single black frame that hands straight to the Compose intro. -->
+<resources>
+    <style name="Theme.StreamLineCinema" parent="Theme.StreamLineCinema.Base">
+        <item name="android:windowSplashScreenBackground">@android:color/black</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+    </style>
+</resources>

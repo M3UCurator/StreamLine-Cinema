@@ -109,7 +109,7 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "IMPORT TERMINAL",
+                    "IMPORT",
                     color = Cinema.Gold,
                     style = CinemaType.Kicker
                 )
@@ -122,8 +122,8 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "TMDB discover feeds and public MDBList collections are parsed on the proxy, " +
-                    "then stored with artwork, ratings and episodic structures.",
+                "Add a TMDB list or a public MDBList collection. Artwork, ratings and " +
+                    "episode structure come along for the ride.",
                 color = Cinema.TextSecondary,
                 style = CinemaType.Body
             )
@@ -197,8 +197,7 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
             if (!settings.hasTmdbAccess) {
                 Spacer(Modifier.height(14.dp))
                 ErrorBanner(
-                    "TMDB is offline — presets will be parsed but enrichment will wait " +
-                        "until a key or proxy is configured in Settings."
+                    "TMDB is offline. Add a key or proxy in Settings to load artwork and details."
                 )
             }
 
@@ -259,7 +258,7 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
                 ) {
                     Column {
                         Text(
-                            "No sources registered yet",
+                            "No sources yet",
                             color = Cinema.TextPrimary,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold
@@ -299,7 +298,7 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
             Divider()
             Spacer(Modifier.height(14.dp))
             Text(
-                "Queue status",
+                "Import progress",
                 color = Cinema.TextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold
@@ -307,10 +306,9 @@ fun ImportScreen(vm: CinemaViewModel, onOpenPlayroom: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Text(
                 if (importState.pendingEnrichment > 0) {
-                    "${importState.pendingEnrichment} titles are waiting for background enrichment. " +
-                        "Artwork and episodes arrive one by one without freezing the interface."
+                    "${importState.pendingEnrichment} titles are still loading artwork and episodes."
                 } else {
-                    "Every imported title is fully enriched. New imports will queue automatically."
+                    "All imported titles are up to date."
                 },
                 color = Cinema.TextMuted,
                 fontSize = 11.sp,

@@ -89,6 +89,7 @@ import com.streamline.cinema.ui.LocalPosterStyle
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.RestoreSurfaceFocus
+import com.streamline.cinema.ui.SelectionGroup
 import com.streamline.cinema.ui.ShimmerBox
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
@@ -329,15 +330,6 @@ fun LiveScreen(
                     }
                     Spacer(Modifier.height(10.dp))
                 }
-                if (arranging) {
-                    Text(
-                        "ARRANGE · ▶ ◀ catalogs and groups · ▲ ▼ channels in list · hold OK stars a channel",
-                        color = Cinema.Gold,
-                        fontSize = 10.sp,
-                        letterSpacing = 0.3.sp
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
                 live.message?.let { message ->
                     ErrorBanner(message)
                     Spacer(Modifier.height(12.dp))
@@ -349,24 +341,11 @@ fun LiveScreen(
                             extra = extra,
                             selected = live.filters[extra.name],
                             onSelect = { value -> vm.setLiveFilter(extra.name, value) },
+                            stateKeyPrefix = "live.group",
                             arranging = arranging,
                             onMove = { group, delta -> vm.moveLiveGroup(extra.name, group, delta) }
                         )
                         Spacer(Modifier.height(6.dp))
-                    }
-                    if (live.filters.isNotEmpty()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "FILTERED · ${live.filters.values.joinToString(" · ")}",
-                                color = Cinema.Gold,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.8.sp
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Chip(label = "Clear all", selected = false, onClick = { vm.clearLiveFilters() })
-                        }
-                        Spacer(Modifier.height(8.dp))
                     }
                     Spacer(Modifier.height(2.dp))
                 }
@@ -526,63 +505,6 @@ fun LiveScreen(
                 details = statusDetails,
                 onClose = { showGuideStatus = false }
             )
-        }
-    }
-}
-
-@Composable
-private fun SelectionGroup(
-    extra: CatalogExtra,
-    selected: String?,
-    onSelect: (String) -> Unit,
-    arranging: Boolean = false,
-    onMove: (String, Int) -> Unit = { _, _ -> }
-) {
-    // The group label is a fixed gutter, so it has to widen with the font or
-    // "GROUP TITLE" gets clipped at 1.5x.
-    val labelWidth = (88f * LocalDensity.current.fontScale.coerceIn(1f, 1.6f)).dp
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            text = extra.name.replace('-', ' ').uppercase(),
-            color = Cinema.TextMuted,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.9.sp,
-            maxLines = 1,
-            modifier = Modifier.width(labelWidth)
-        )
-        LazyRow(
-            state = rememberScreenListState("live.group.${extra.name}"),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.weight(1f)
-        ) {
-            item(key = "all") {
-                Chip(label = "All", selected = selected == null, onClick = { onSelect("") })
-            }
-            items(extra.options.size, key = { index -> extra.options[index] }) { index ->
-                val value = extra.options[index]
-                Chip(
-                    label = value,
-                    selected = selected == value,
-                    onClick = { onSelect(value) },
-                    modifier = if (arranging) {
-                        Modifier.onKeyEvent { event ->
-                            if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                            when (event.key) {
-                                Key.DirectionLeft -> {
-                                    onMove(value, -1); true
-                                }
-                                Key.DirectionRight -> {
-                                    onMove(value, 1); true
-                                }
-                                else -> false
-                            }
-                        }
-                    } else {
-                        Modifier
-                    }
-                )
-            }
         }
     }
 }

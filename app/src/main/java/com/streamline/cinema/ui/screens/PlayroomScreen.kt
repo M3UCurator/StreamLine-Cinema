@@ -183,36 +183,13 @@ fun PlayroomScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        val smart = buildString {
-                            if (settings.contentLanguage.isNotBlank()) {
-                                append(ContentLanguage.from(settings.contentLanguage).label.uppercase())
-                            }
-                            if (settings.contentCountry.isNotBlank()) {
-                                if (isNotEmpty()) append(" · ")
-                                append(settings.contentCountry)
-                            }
-                        }
-                        if (smart.isNotEmpty()) {
-                            Text(
-                                "  SMART · $smart",
-                                color = Cinema.Gold,
-                                style = CinemaType.Meta,
-                                maxLines = 1
-                            )
-                        }
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Cinema Search Terminal",
+                    "Search",
                     color = Cinema.TextPrimary,
                     style = CinemaType.PageTitle
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Search the TMDB universe or browse by genre, preview instantly and import titles into your Cinema Hall.",
-                    color = Cinema.TextSecondary,
-                    style = CinemaType.Body
                 )
                 Spacer(Modifier.height(16.dp))
                 Row(
@@ -312,11 +289,6 @@ fun PlayroomScreen(
                                 letterSpacing = 1.6.sp,
                                 modifier = Modifier.padding(start = 4.dp, end = 2.dp)
                             )
-                        }
-                        if (search.genreIds.isNotEmpty()) {
-                            item(key = "genre-clear") {
-                                Chip("CLEAR", false, onClick = { vm.clearGenres() })
-                            }
                         }
                         items(
                             genreState.catalog.forScope(search.filter),
@@ -1045,7 +1017,7 @@ private fun ProgrammeBand(
     Column(Modifier.padding(bottom = 20.dp)) {
         SectionHeader(
             title = "On Now & Next",
-            subtitle = "${hits.size} guide match${if (hits.size == 1) "" else "es"} · tune straight from the guide"
+            subtitle = "${hits.size} guide match${if (hits.size == 1) "" else "es"}"
         )
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             items(hits, key = { "${it.channelId}|${it.program.startMs}|${it.program.title}" }) { hit ->

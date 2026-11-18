@@ -67,6 +67,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.streamline.cinema.BuildConfig
 import com.streamline.cinema.CinemaViewModel
 import com.streamline.cinema.data.AppSettings
+import com.streamline.cinema.data.AudioCacheBudget
 import com.streamline.cinema.data.BandwidthCap
 import com.streamline.cinema.data.BufferTier
 import com.streamline.cinema.data.CacheBreakdown
@@ -1180,6 +1181,31 @@ fun SettingsScreen(
                             } + " · live tunes directly"
                         )
                         }
+                        SettingsGroup(
+                            "Musicbox",
+                            hint = if (settings.sponsorBlock) "AUTO-SKIP" else "OFF"
+                        ) {
+                        SettingsToggleRow(
+                            label = "Skip non-music sections",
+                            checked = settings.sponsorBlock,
+                            onChange = { vm.saveSettings { s -> s.copy(sponsorBlock = it) } },
+                            description = "Seeks past community-marked talking intros, interludes " +
+                                "and outros in music videos (SponsorBlock music_offtopic); the " +
+                                "song itself is never cut"
+                        )
+                        SettingsSelectRow(
+                            title = "Audio cache",
+                            description = "Replay cache, not downloads: resolved source links " +
+                                "expire, so an evicted track is fetched again when played. " +
+                                "Applies the next time Musicbox starts.",
+                            selected = settings.audioCacheBudget,
+                            options = AudioCacheBudget.entries,
+                            optionLabel = { it.label },
+                            onSelect = { budget ->
+                                vm.saveSettings { it.copy(audioCacheBudget = budget) }
+                            }
+                        )
+                        }
                         // The same resolver the player builds from, so these
                         // rows report what a stream will actually get rather
                         // than re-deriving it beside the player.
@@ -1357,6 +1383,29 @@ fun SettingsScreen(
                                             CacheCleaner.clearGuideIndex(context)
                                         }
                                     }
+                                )
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TvButton(
+                                    label = "MUSICBOX ${formatCacheSize(breakdown.audioBytes)}",
+                                    glyph = "♫",
+                                    style = TvButtonStyle.GHOST,
+                                    compact = true,
+                                    enabled = breakdown.audioBytes > 0,
+                                    onClick = {
+                                        clearCachePart("Musicbox cache cleared") {
+                                            CacheCleaner.clearAudioCache(context)
+                                        }
+                                    }
+                                )
+                                Text(
+                                    "Replay cache, not downloads",
+                                    color = Cinema.TextMuted,
+                                    fontSize = 11.sp
                                 )
                             }
                         }

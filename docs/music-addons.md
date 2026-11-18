@@ -182,3 +182,22 @@ Operational notes:
 - `-g` returns one URL per request; with `bestaudio` there is normally a single line. Keep `--no-playlist` so a video id cannot expand into an album.
 - If the resolver needs headers or cookies, return them through `behaviorHints.proxyHeaders.request` rather than baking them into the URL.
 - A resolver that is down or rate-limited shows the addon's own failure in the tab; the other addons stay usable.
+
+## 7. Charts (no addon required)
+
+Musicbox also shows metadata charts from three public catalogues. Nothing here plays in-app: a row with a YouTube video id opens the official YouTube app, a row with a catalogue page opens the browser, and anything else opens a YouTube search for the artist and title.
+
+| Source | Country | Genre | Key |
+| --- | --- | --- | --- |
+| Apple Music (`rss.applemarketingtools.com`) | ISO 3166-1 storefront | filtered here from the source's own genre label | none |
+| Deezer | follows this device's country; the API takes no country parameter | Deezer's own per-genre charts | none |
+| YouTube Data API v3 | `regionCode` | one Music category, no music genres | required |
+
+- **Charts band** (Settings → Music charts, default on): source chips plus COUNTRY and GENRE pills. A pill appears only for a dimension the source honours, so Deezer shows no country control and YouTube no genre control.
+- Countries come from one ISO 3166-1 alpha-2 catalogue shared by Apple storefronts and YouTube `regionCode`. The default is the device's own country when it is listed, else the US.
+- Genres match by words, not exact spelling: "Hip-Hop/Rap", "Rap/Hip Hop" and "Hip Hop" all resolve to the same app id, and a row that carries several labels matches when any one of them matches. Apple rows are filtered after the fetch; Deezer uses its chart per genre.
+- YouTube stays out of the band until a key is entered (Settings → Music charts → **SAVE + VALIDATE**). Validation is the 1-unit `videoCategories.list` probe, while a chart read costs 1 unit and a search 100 units, so search is capped at 20 per session (2 000 of the 10 000-unit daily default); repeated queries are answered from the cache.
+- With the key empty, a stored YOUTUBE selection runs as APPLE instead of failing, and the stored choice returns as soon as a key is entered. The key is stored on the device and sent only to Google.
+- Rows are cached for six hours in one shared LRU keyed per source and selection; REFRESH on the tab drops every source's entries at once.
+- Kids profiles keep the tab hidden. The band needs no addon, so a MUSIC tab appears when charts are on even with no music addon registered.
+

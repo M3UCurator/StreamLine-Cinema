@@ -530,6 +530,14 @@ data class AppSettings(
     val sponsorBlock: Boolean = true,
     /** Disk ceiling for Musicbox's replay cache; OFF streams every play fresh. */
     val audioCacheBudget: AudioCacheBudget = AudioCacheBudget.MB512,
+    /** The metadata-only CHARTS band above the addon catalogs. */
+    val musicCharts: Boolean = true,
+    val musicChartSource: String = ChartSource.APPLE.name,
+    /** ISO 3166-1 alpha-2 storefront; blank follows the device's own country. */
+    val musicChartCountry: String = "",
+    val musicChartGenre: String = ANY_GENRE_ID,
+    /** Key for the YouTube Data API; blank hides the YouTube chart source. */
+    val youtubeApiKey: String = "",
     val playerUserAgent: PlayerUaPreset = PlayerUaPreset.DEFAULT,
     val dnsMode: DnsMode = DnsMode.SYSTEM,
     val customDnsServers: List<String> = emptyList(),
@@ -628,6 +636,11 @@ data class AppSettings(
             externalVodPlayer = externalVodPlayer.trim(),
             contentLanguage = cleanLanguage,
             contentCountry = ContentCountry.from(contentCountry).code,
+            // Stored names that no catalogue can honour fall back to the defaults.
+            musicChartSource = ChartSelection.source(musicChartSource).name,
+            musicChartCountry = ChartCountries.find(musicChartCountry)?.code.orEmpty(),
+            musicChartGenre = ChartSelection.genre(musicChartGenre).id,
+            youtubeApiKey = youtubeApiKey.trim(),
             // Filtering by an unset language would erase every shelf.
             languageRule = if (cleanLanguage.isBlank()) LanguageRule.PREFER
             else LanguageRule.from(languageRule.name)
@@ -660,6 +673,11 @@ data class AppSettings(
         put("uiSounds", uiSounds)
         put("sponsorBlock", sponsorBlock)
         put("audioCacheBudget", audioCacheBudget.name)
+        put("musicCharts", musicCharts)
+        put("musicChartSource", musicChartSource)
+        put("musicChartCountry", musicChartCountry)
+        put("musicChartGenre", musicChartGenre)
+        put("youtubeApiKey", youtubeApiKey)
         put("playerUserAgent", playerUserAgent.name)
         put("dnsMode", dnsMode.name)
         put("customDnsServers", JSONArray(customDnsServers))
@@ -718,6 +736,11 @@ data class AppSettings(
                 uiSounds = o.optBoolean("uiSounds", true),
                 sponsorBlock = o.optBoolean("sponsorBlock", true),
                 audioCacheBudget = AudioCacheBudget.from(o.stringOrNull("audioCacheBudget")),
+                musicCharts = o.optBoolean("musicCharts", true),
+                musicChartSource = o.optString("musicChartSource", ChartSource.APPLE.name),
+                musicChartCountry = o.optString("musicChartCountry"),
+                musicChartGenre = o.optString("musicChartGenre", ANY_GENRE_ID),
+                youtubeApiKey = o.optString("youtubeApiKey"),
                 playerUserAgent = PlayerUaPreset.from(o.stringOrNull("playerUserAgent")),
                 dnsMode = DnsMode.from(o.stringOrNull("dnsMode")),
                 customDnsServers = customDns,

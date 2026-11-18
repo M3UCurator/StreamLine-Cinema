@@ -7,8 +7,22 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.streamline.cinema.data.AddonSource
 import com.streamline.cinema.data.AppSettings
+import com.streamline.cinema.data.AppleChartsProvider
 import com.streamline.cinema.data.CatalogExtra
 import com.streamline.cinema.data.CatalogItem
+import com.streamline.cinema.data.ChartCache
+import com.streamline.cinema.data.ChartCountry
+import com.streamline.cinema.data.ChartGenre
+import com.streamline.cinema.data.ChartGenres
+import com.streamline.cinema.data.ChartHandoff
+import com.streamline.cinema.data.ChartProvider
+import com.streamline.cinema.data.ChartRequest
+import com.streamline.cinema.data.ChartSelection
+import com.streamline.cinema.data.ChartSource
+import com.streamline.cinema.data.ChartTrack
+import com.streamline.cinema.data.DeezerChartsProvider
+import com.streamline.cinema.data.KeyCheck
+import com.streamline.cinema.data.YouTubeChartsProvider
 import com.streamline.cinema.data.CinemaDns
 import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.DnsMode
@@ -200,6 +214,27 @@ data class MusicUiState(
     val visibleTracks: List<MusicTrack> get() = if (showingResults) results else tracks
 }
 
+/**
+ * The CHARTS band. [request] is the selection whose rows are held, so a pill
+ * change can be compared against what the screen is showing.
+ */
+data class ChartUiState(
+    val request: ChartRequest? = null,
+    val rows: List<ChartTrack> = emptyList(),
+    val note: String? = null,
+    val loading: Boolean = false,
+    val message: String? = null,
+    /** Charts are the visible surface; picking a catalog chip leaves them. */
+    val active: Boolean = false
+)
+
+/** Outcome of the Settings VALIDATE press for the YouTube key. */
+data class ChartKeyCheckState(
+    val busy: Boolean = false,
+    val message: String? = null,
+    val success: Boolean = false
+)
+
 data class EpgUiState(
     val guide: EpgGuide = EpgGuide.EMPTY,
     val loading: Boolean = false,
@@ -328,6 +363,27 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _music = MutableStateFlow(MusicUiState())
     val music: StateFlow<MusicUiState> = _music.asStateFlow()
+
+    private val _chart = MutableStateFlow(ChartUiState())
+    val chart: StateFlow<ChartUiState> = _chart.asStateFlow()
+
+    private val _chartKeyCheck = MutableStateFlow(ChartKeyCheckState())
+    val chartKeyCheck: StateFlow<ChartKeyCheckState> = _chartKeyCheck.asStateFlow()
+
+    /**
+     * One cache serves all three sources; the cache keys carry the source name,
+     * so a REFRESH can drop every entry through a single call.
+     */
+    private val chartCache = ChartCache()
+    private val youtubeCharts = YouTubeChartsProvider(
+        keyProvider = { settings.value.youtubeApiKey.trim() },
+        cache = chartCache
+    )
+    private val chartProviders: Map<ChartSource, ChartProvider> = mapOf(
+        ChartSource.APPLE to AppleChartsProvider(cache = chartCache),
+        ChartSource.DEEZER to DeezerChartsProvider(cache = chartCache),
+        ChartSource.YOUTUBE to youtubeCharts
+    )
 
     /** Recently played tracks and the last queue for the active profile. */
     val musicHistory: StateFlow<MusicHistory> = container.musicHistory.history
@@ -1696,6 +1752,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private var musicJob: Job? = null
+    private var chartJob: Job? = null
 
     /**
      * [force] re-reads every enabled addon manifest; otherwise an existing catalog
@@ -1733,7 +1790,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                         message = load.failures.takeIf { it.isNotEmpty() }?.joinToString(" · ")
                     )
                 }
-                if (selected != null) loadMusicCatalog(selected, filters, reload = true)
+                if (selected != null) {
+                    loadMusicCatalog(selected, filters, reload = true)
+                } else if (settings.value.musicCharts) {
+                    // Nothing to tune into: the band is the only content left.
+                    showCharts()
+                }
             } catch (c: CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -1750,6 +1812,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Selecting the current catalog again is the way back out of a search. */
     fun selectMusicCatalog(catalog: MusicCatalog) {
+        hideCharts()
         if (_music.value.selected?.key == catalog.key) {
             _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
         }
@@ -1761,6 +1824,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         val catalog = state.selected ?: return
         val filters = if (value.isBlank()) state.filters - name else state.filters + (name to value)
         if (filters == state.filters) return
+        hideCharts()
         loadMusicCatalog(catalog, filters, reload = true)
     }
 
@@ -1771,6 +1835,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearMusicSearch() {
+        hideCharts()
         _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
         // A search can have cancelled the catalog fetch; if no tracks landed,
         // pulling them back is the difference between a list and an empty page.
@@ -1790,6 +1855,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             _music.update { it.copy(message = "No music catalog in this setup supports search.") }
             return
         }
+        hideCharts()
         musicJob?.cancel()
         musicJob = viewModelScope.launch {
             _music.update { it.copy(searching = true, loading = false, message = null) }
@@ -1811,6 +1877,151 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    // ---- Charts -----------------------------------------------------------
+
+    /**
+     * The band is the surface the viewer picked, so a pill tap also leaves a
+     * search behind: the field would answer for rows that are no longer shown.
+     */
+    fun showCharts() {
+        if (_music.value.query.isNotBlank() || _music.value.showingResults) {
+            _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
+        }
+        _chart.update { it.copy(active = true) }
+        ensureChart()
+    }
+
+    fun hideCharts() {
+        if (_chart.value.active) _chart.update { it.copy(active = false) }
+    }
+
+    fun selectChartSource(source: ChartSource) {
+        if (settings.value.musicChartSource != source.name) {
+            saveSettings { it.copy(musicChartSource = source.name) }
+        }
+        showCharts()
+    }
+
+    fun setChartCountry(country: ChartCountry) {
+        if (settings.value.musicChartCountry != country.code) {
+            saveSettings { it.copy(musicChartCountry = country.code) }
+        }
+        showCharts()
+    }
+
+    fun setChartGenre(genre: ChartGenre) {
+        if (settings.value.musicChartGenre != genre.id) {
+            saveSettings { it.copy(musicChartGenre = genre.id) }
+        }
+        showCharts()
+    }
+
+    fun setMusicCharts(enabled: Boolean) {
+        if (settings.value.musicCharts == enabled) return
+        saveSettings { it.copy(musicCharts = enabled) }
+        if (enabled) showCharts() else hideCharts()
+    }
+
+    /**
+     * A new key is probed by the band on the next visit, so an active band
+     * reloads now: a removed key falls back to Apple, an added one unlocks
+     * YouTube if that is the stored source.
+     */
+    fun setYouTubeApiKey(key: String) {
+        if (settings.value.youtubeApiKey == key.trim()) return
+        saveSettings { it.copy(youtubeApiKey = key.trim()) }
+        _chartKeyCheck.value = ChartKeyCheckState()
+        if (_chart.value.active) ensureChart(force = true)
+    }
+
+    /** Asks Google's 1-unit videoCategories endpoint whether the key works. */
+    fun validateYouTubeKey() {
+        if (_chartKeyCheck.value.busy) return
+        viewModelScope.launch {
+            _chartKeyCheck.value = ChartKeyCheckState(busy = true)
+            val outcome = withContext(Dispatchers.IO) {
+                youtubeCharts.validateKey(settings.value.youtubeApiKey.trim())
+            }
+            _chartKeyCheck.value = when (outcome) {
+                KeyCheck.Valid -> ChartKeyCheckState(
+                    message = "Key accepted",
+                    success = true
+                )
+                KeyCheck.Missing -> ChartKeyCheckState(message = "Add a key first")
+                KeyCheck.Invalid -> ChartKeyCheckState(message = "Google rejected this key")
+                is KeyCheck.Failed -> ChartKeyCheckState(message = outcome.message)
+            }
+        }
+    }
+
+    /** [force] drops the six-hour cache first, for an explicit REFRESH. */
+    fun ensureChart(force: Boolean = false) {
+        val prefs = settings.value
+        if (!prefs.musicCharts) {
+            chartJob?.cancel()
+            _chart.update { it.copy(active = false, loading = false) }
+            return
+        }
+        val request = ChartSelection.request(
+            prefs.musicChartSource,
+            prefs.musicChartCountry,
+            prefs.musicChartGenre,
+            prefs.youtubeApiKey
+        )
+        val state = _chart.value
+        if (!force && state.request == request && (state.loading || state.rows.isNotEmpty())) return
+        if (force) chartCache.clear()
+        chartJob?.cancel()
+        chartJob = viewModelScope.launch {
+            _chart.update { it.copy(request = request, loading = true, message = null) }
+            try {
+                val result = chartProviders.getValue(request.source).chart(request)
+                _chart.update {
+                    it.copy(
+                        request = request,
+                        rows = result.rows,
+                        note = result.note,
+                        loading = false,
+                        // A provider that knows why it has no rows (Deezer's
+                        // missing genre) says so itself; only fill the gap.
+                        message = if (result.rows.isEmpty()) {
+                            result.note ?: "No chart rows for ${request.describe()}."
+                        } else {
+                            null
+                        }
+                    )
+                }
+            } catch (c: CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                _chart.update {
+                    it.copy(
+                        request = request,
+                        rows = emptyList(),
+                        note = null,
+                        loading = false,
+                        message = t.message ?: "The chart could not be loaded."
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Hands a chart row to another app: a video id goes to the official YouTube
+     * app, a source page to the browser, anything else to a search. Returns the
+     * failure message to show, or null when an app took it.
+     */
+    fun openChartTrack(track: ChartTrack): String? {
+        ChartHandoff.openTarget(track)?.let { if (repository.openInBrowser(it)) return null }
+        ChartHandoff.validVideoId(track.videoId)?.let {
+            if (repository.openInBrowser(ChartHandoff.watchUrl(it))) return null
+        }
+        val query = ChartHandoff.queryFor(track)
+        if (query.isNotBlank() && repository.openInBrowser(ChartHandoff.searchUrl(query))) return null
+        return "No app on this device could open \"${track.title}\"."
     }
 
     private fun loadMusicCatalog(

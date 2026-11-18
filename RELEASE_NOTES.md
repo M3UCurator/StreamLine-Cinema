@@ -1,4 +1,56 @@
-# StreamLine Cinema v12.113
+# StreamLine Cinema v12.114
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.114 — Music charts without an addon
+
+The Musicbox tab opens with a CHARTS band: Apple Music most-played, Deezer's chart and YouTube's Music most-popular. Chart rows are metadata only — ENTER hands the track to the official app instead of streaming it in-app, so playback stays addon-driven.
+
+- **Three sources, honest controls.** APPLE MUSIC and DEEZER need no key. Apple honours every ISO storefront and filters genres client-side (`rss.applemarketingtools.com` most-played). Deezer's chart takes only a genre and follows the caller's IP for country, so its band drops the country pill and says so in the line under it; Deezer also answers failures as HTTP 200 with an `error` body, which is now read as a failure. YouTube's Data API publishes one Music category rather than genres, so YouTube shows no genre pill.
+- **Fifty rows per chart.** Apple and Deezer are read as delivered; YouTube `videos.list?chart=mostPopular&videoCategoryId=10&regionCode=<ISO>` asks for the same 50, with ISO 8601 durations parsed (`P0D` live items carry none).
+- **Genre matching by words.** Catalogues spell the same genre differently ("Hip-Hop/Rap" vs "Rap/Hip Hop"), so a label matches when its words match regardless of order or punctuation. Deezer's genre ids are resolved against its own `/genre` list at runtime instead of a hard-coded table, and a genre Deezer does not publish answers with a named note ("Deezer has no "K-Pop" chart in its genre list.") instead of an empty-looking chart.
+- **The key stays local.** YouTube needs a Data API v3 key entered in Settings → Playback → Music charts (masked field, **SAVE + VALIDATE** runs a 1-unit `videoCategories.list` probe and reports accepted, rejected, missing, quota used up or API not enabled). Without a key YouTube is not offered as a source, and a stored YouTube choice runs as Apple. A chart call costs 1 unit; a search costs 100, so hand-off searches are capped at 20 per session (2 000 of a default key's 10 000 daily units).
+- **Hand-off, not playback.** ENTER tries `vnd.youtube:<id>`, then the watch page, then an artist + title search; Apple and Deezer rows open the source's own link. If the device has nothing to open it with, the row reports that instead of failing silently.
+- **One six-hour cache.** Every source shares an LRU cache (12 entries, six-hour TTL) keyed by source, country, genre and limit, so re-selecting pills does not hit the network; REFRESH clears every source. A failed fetch clears the rows and shows the reason instead of leaving stale ones.
+- **A MUSIC tab even without addons.** Charts are on by default and put MUSIC in the top bar when no music addon is registered. Kids profiles never see the tab.
+- **One picker for band and Settings.** The country and genre dialogs are shared, mark the current value with a check, and open scrolled to it — a tap leaves the window in touch mode, where requesting focus cannot scroll, so the list scrolls explicitly.
+
+## Verified on 12.114
+
+- `./gradlew :app:testDebugUnitTest` — the five chart suites (`AppleChartsTest`, `DeezerChartsTest`, `MusicChartSettingsTest`, `MusicChartsTest`, `YouTubeChartsTest`) run 43/43 with 0 failures; the rest of the suite stays green.
+- End to end on emulator-5554 with the production build: the band read `APPLE MUSIC · United States · All · 50 rows`; switching the country to Australia refetched (`APPLE MUSIC · Australia · All · 50 rows`, Apple AU #1 *Choosin' Texas* — Ella Langley); the Country genre filtered to 6 rows; DEEZER reported 50 rows with its IP-based-country caveat and no country pill.
+- Settings → Playback → Music charts mirrored the band's source, country and genre; YouTube stayed out of the source list while the key was empty, and **SAVE + VALIDATE** with an empty key answered `Add a key first`. Turning the toggle off removed the dependent rows and the band, and turning it back on restored both.
+- Kids profile: no MUSIC entry in the top bar. Adult profile: MUSIC present, charts band loaded.
+- The country picker opened on the highlighted **United States (US)** row instead of the top of the list.
+- `./gradlew :app:assembleRelease -PcinemaIteration=12.114` and `-PallAbis=true` — both BUILD SUCCESSFUL; `aapt dump badging` reports `versionCode 120114` / `versionName 12.114` for both. The 32-bit package contains only `lib/armeabi-v7a`; the all-ABI package contains `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64`. The all-ABI build installed over 12.113 on emulator-5554 with app data kept.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema181126v12.114.apk` | `armeabi-v7a` (TV boxes) | 76,865,631 bytes | `aaf77d16c9ce5fbdef8c24830f0654e86f319f67c26a3d508de9bb293300e2ed` |
+| `Cinema181126v12.114-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 330,064,312 bytes | `bbca27f58e583bdb72e256dd916c72a7375bd6eca2f28c359d064328d71d0fb2` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema181126v12.114.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists, music recents and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.113 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

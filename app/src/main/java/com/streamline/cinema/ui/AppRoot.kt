@@ -101,9 +101,10 @@ fun AppRoot(vm: CinemaViewModel) {
         if (detail != null) displayedDetail.value = detail
     }
 
-    // Music only joins the bar once an addon publishes a music catalog, and the
-    // Kids profile never gets the tab. The bar is handed the visible list.
-    val musicTabVisible = music.available && !profile.isKids
+    // Music joins the bar once an addon publishes a music catalog, or as soon as
+    // the metadata-only CHARTS band is on: charts need no addon. The Kids
+    // profile never gets the tab. The bar is handed the visible list.
+    val musicTabVisible = (music.available || settings.musicCharts) && !profile.isKids
     val tabs = remember(musicTabVisible) {
         if (musicTabVisible) {
             primaryTabs.toMutableList().apply { add(indexOf(AppTab.LIVE) + 1, AppTab.MUSIC) }

@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
@@ -84,6 +86,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
@@ -177,6 +180,8 @@ import okhttp3.Request
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private enum class AspectMode(
     val label: String,
@@ -522,7 +527,12 @@ fun PlayerScreen(
     var saturation by remember { mutableFloatStateOf(1f) }
     var volumePercent by remember { mutableIntStateOf(100) }
     var nightMode by remember { mutableStateOf(false) }
-    var eqPreset by remember { mutableIntStateOf(EQ_CINEMA) }
+    var eqPreset by remember { mutableIntStateOf(0) }
+    // Applied per hardware band, in the 0–63 preset scale. Loading a preset
+    // rewrites the list; nudging a slider marks the curve custom.
+    var eqLevels by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var eqBandLabels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var eqCustom by remember { mutableStateOf(false) }
     // Captions start off for every title: Media3 otherwise auto-selects the
     // first embedded text track and burns it over the opening frame. The
     // profile's subtitle language only biases which track a later caption
@@ -2720,8 +2730,14 @@ fun PlayerScreen(
             loudness = null
         }
     }
-    LaunchedEffect(equalizer, eqPreset, nightMode) {
-        applyEqualizer(equalizer, if (nightMode && eqPreset == EQ_FLAT) EQ_CINEMA else eqPreset)
+    LaunchedEffect(equalizer) {
+        val engine = equalizer ?: return@LaunchedEffect
+        eqBandLabels = bandLabels(engine)
+        eqLevels = presetLevels(engine, WinampEqPreset.AllPresets[eqPreset])
+    }
+    LaunchedEffect(equalizer, eqLevels, eqPreset) {
+        val preset = WinampEqPreset.AllPresets.getOrElse(eqPreset) { WinampEqPreset.Cinema }
+        applyEqualizer(equalizer, eqLevels, preset.preamp)
     }
     // 0–100% attenuates the player output; 100–200% stays at unity gain and
     // adds loudness compensation for quiet film mixes. Applying both keeps the
@@ -3567,7 +3583,13 @@ fun PlayerScreen(
                         OsdMenuRow(
                             glyph = PlayerGlyph.BOOST,
                             label = "Volume / equalizer",
-                            value = "${volumePercent}% · ${EQ_NAMES.getOrElse(eqPreset) { EQ_NAMES[EQ_CINEMA] }}",
+                            value = "${volumePercent}% · " + if (eqCustom) {
+                                "Custom"
+                            } else {
+                                WinampEqPreset.AllPresets
+                                    .getOrElse(eqPreset) { WinampEqPreset.Cinema }
+                                    .name
+                            },
                             compact = true,
                             onClick = { panel = OsdPanel.TOOLS }
                         )
@@ -3671,13 +3693,45 @@ fun PlayerScreen(
                         onDecrease = { saturation = (saturation - 0.1f).coerceIn(0.5f, 1.5f) },
                         onIncrease = { saturation = (saturation + 0.1f).coerceIn(0.5f, 1.5f) }
                     )
-                    SectionRow("Audio bands")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        EQ_NAMES.forEachIndexed { index, name ->
-                            Chip(
-                                label = name,
-                                selected = eqPreset == index,
-                                onClick = { eqPreset = index }
+                    SectionRow("Equalizer")
+                    WinampEqPreset.AllPresets.chunked(3).forEach { presetRow ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            presetRow.forEach { preset ->
+                                val index = WinampEqPreset.AllPresets.indexOf(preset)
+                                Chip(
+                                    label = preset.name,
+                                    selected = !eqCustom && eqPreset == index,
+                                    onClick = {
+                                        eqPreset = index
+                                        eqCustom = false
+                                        eqLevels = equalizer
+                                            ?.let { presetLevels(it, preset) }
+                                            ?: eqLevels
+                                    }
+                                )
+                            }
+                        }
+                    }
+                    if (eqBandLabels.isEmpty()) {
+                        Text(
+                            "Band sliders are unavailable on this device's audio output.",
+                            color = Cinema.TextMuted,
+                            fontSize = 10.sp
+                        )
+                    } else {
+                        SectionRow(if (eqCustom) "Bands · custom" else "Bands")
+                        eqBandLabels.forEachIndexed { index, bandLabel ->
+                            EqBandRow(
+                                label = bandLabel,
+                                level = eqLevels.getOrElse(index) { EQ_NEUTRAL_LEVEL },
+                                onAdjust = { delta ->
+                                    eqCustom = true
+                                    eqLevels = eqBandLabels.indices.map { band ->
+                                        val current = eqLevels.getOrElse(band) { EQ_NEUTRAL_LEVEL }
+                                        val next = if (band == index) current + delta else current
+                                        next.coerceIn(0, EQ_MAX_LEVEL)
+                                    }
+                                }
                             )
                         }
                     }
@@ -3705,7 +3759,7 @@ fun PlayerScreen(
                             onClick = { toggleVolumeNormalization() }
                         )
                         Chip(
-                            label = "Reset visuals",
+                            label = "Reset picture & audio",
                             selected = false,
                             onClick = {
                                 brightness = 1f
@@ -3713,7 +3767,11 @@ fun PlayerScreen(
                                 saturation = 1f
                                 volumePercent = 100
                                 nightMode = false
-                                eqPreset = EQ_CINEMA
+                                eqPreset = 0
+                                eqCustom = false
+                                eqLevels = equalizer
+                                    ?.let { presetLevels(it, WinampEqPreset.Cinema) }
+                                    ?: eqLevels
                             }
                         )
                     }
@@ -4031,12 +4089,6 @@ fun PlayerScreen(
     }
 }
 
-private const val EQ_NAME_FLAT = "Flat"
-private val EQ_CINEMA = 0
-private val EQ_FLAT = 1
-private val EQ_BASS = 2
-private val EQ_VOCAL = 3
-private val EQ_NAMES = listOf("Cinema", EQ_NAME_FLAT, "Bass", "Vocal")
 private val QUALITY_ORDER = listOf(
     "8K", "4K", "2160p", "1440p", "1080p", "720p", "576p", "480p", "360p", "240p"
 )
@@ -4092,6 +4144,90 @@ private fun StepperRow(
         TvButton("–", onDecrease, style = TvButtonStyle.SECONDARY, compact = true)
         Text(value, color = Cinema.Gold, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         TvButton("+", onIncrease, style = TvButtonStyle.SECONDARY, compact = true)
+    }
+}
+
+/**
+ * One equalizer band: a focusable bipolar track. Left/Right on the D-pad nudges
+ * the band, so the row needs no separate buttons.
+ */
+@Composable
+private fun EqBandRow(label: String, level: Int, onAdjust: (Int) -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val db = winampLevelToDb(level)
+    val normalized = when {
+        level >= EQ_NEUTRAL_LEVEL ->
+            (level - EQ_NEUTRAL_LEVEL).toFloat() / (EQ_MAX_LEVEL - EQ_NEUTRAL_LEVEL)
+        else -> (level - EQ_NEUTRAL_LEVEL).toFloat() / EQ_NEUTRAL_LEVEL
+    }.coerceIn(-1f, 1f)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassSurface(
+                shape = RoundedCornerShape(CinemaDimens.ControlRadius),
+                focused = focused,
+                base = Glass.Control,
+                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                sheen = 0.45f
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                when (event.key) {
+                    Key.DirectionLeft -> {
+                        onAdjust(-1)
+                        true
+                    }
+                    Key.DirectionRight -> {
+                        onAdjust(1)
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .semantics { contentDescription = "$label equalizer band" }
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = label,
+            color = Cinema.TextPrimary,
+            fontSize = 12.sp,
+            modifier = Modifier.width(72.dp)
+        )
+        BoxWithConstraints(
+            Modifier
+                .weight(1f)
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Cinema.PanelRaised)
+        ) {
+            val half = maxWidth / 2
+            Box(
+                Modifier
+                    .offset(x = if (normalized >= 0f) half else half + half * normalized)
+                    .width(half * abs(normalized).coerceAtLeast(0.02f))
+                    .fillMaxHeight()
+                    .background(if (focused) Cinema.Gold else Cinema.GoldDim)
+            )
+            Box(
+                Modifier
+                    .offset(x = half)
+                    .width(1.dp)
+                    .fillMaxHeight()
+                    .background(Cinema.TextMuted)
+            )
+        }
+        Text(
+            text = String.format(Locale.US, "%+.1f dB", db),
+            color = if (focused) Cinema.Gold else Cinema.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(64.dp)
+        )
     }
 }
 
@@ -4763,36 +4899,42 @@ private fun buildTrackChoices(
     }
 }
 
-private fun applyEqualizer(equalizer: Equalizer?, preset: Int) {
+private fun applyEqualizer(equalizer: Equalizer?, levels: List<Int>, preamp: Int) {
     val engine = equalizer ?: return
+    if (levels.isEmpty()) return
     runCatching {
-        val bands = engine.numberOfBands.toInt()
-        if (bands <= 0) return
         val range = engine.bandLevelRange
         val min = range[0].toInt()
         val max = range[1].toInt()
-        for (index in 0 until bands) {
-            val level = when (preset) {
-                EQ_BASS -> when {
-                    index == 0 -> max
-                    index == 1 -> max * 2 / 3
-                    else -> 0
-                }
-                EQ_VOCAL -> when {
-                    index >= bands - 2 -> max
-                    index == bands / 2 -> max / 2
-                    else -> 0
-                }
-                EQ_CINEMA -> when (index) {
-                    0 -> max / 2
-                    bands - 1 -> max / 2
-                    else -> max / 4
-                }
-                else -> 0
-            }
-            engine.setBandLevel(index.toShort(), level.coerceIn(min, max).toShort())
+        levels.forEachIndexed { index, level ->
+            val shifted = (level + preamp - EQ_NEUTRAL_LEVEL).coerceIn(0, EQ_MAX_LEVEL)
+            val millibels = (winampLevelToDb(shifted) * 100).roundToInt().coerceIn(min, max)
+            engine.setBandLevel(index.toShort(), millibels.toShort())
         }
-        engine.enabled = preset != EQ_FLAT
+        engine.enabled = preamp != EQ_NEUTRAL_LEVEL || levels.any { it != EQ_NEUTRAL_LEVEL }
+    }
+}
+
+/** Centre frequencies of the device's equalizer bands, in Hz. */
+private fun bandCenters(engine: Equalizer): List<Float> {
+    val bands = runCatching { engine.numberOfBands.toInt() }.getOrDefault(0)
+    val centers = (0 until bands).map { band ->
+        runCatching { engine.getCenterFreq(band.toShort()) / 1000f }.getOrDefault(0f)
+    }
+    return if (centers.any { it <= 0f }) emptyList() else centers
+}
+
+private fun presetLevels(engine: Equalizer, preset: WinampEqPreset): List<Int> =
+    bandCenters(engine).map(preset::levelAt)
+
+private fun bandLabels(engine: Equalizer): List<String> = bandCenters(engine).map { hz ->
+    when {
+        hz < 1000f -> "${hz.roundToInt()} Hz"
+        else -> {
+            val khz = hz / 1000f
+            if (khz % 1f == 0f) "${khz.roundToInt()} kHz"
+            else String.format(Locale.US, "%.1f kHz", khz)
+        }
     }
 }
 

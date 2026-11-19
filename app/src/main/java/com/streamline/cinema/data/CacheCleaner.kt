@@ -9,17 +9,16 @@ data class CacheBreakdown(
     val imagesBytes: Long = 0L,
     val scratchBytes: Long = 0L,
     val channelBytes: Long = 0L,
-    val guideIndexBytes: Long = 0L,
-    val audioBytes: Long = 0L
+    val guideIndexBytes: Long = 0L
 ) {
-    val totalBytes: Long get() = imagesBytes + scratchBytes + channelBytes + guideIndexBytes + audioBytes
+    val totalBytes: Long get() = imagesBytes + scratchBytes + channelBytes + guideIndexBytes
 }
 
 /**
- * Clears the disposable caches used by the UI: Coil's memory/disk image cache,
- * Musicbox's audio replay cache and everything under the app cache directories
- * (HTTP scratch files, decoded bitmaps written by the framework). Library data
- * and settings live in filesDir/SharedPreferences and are never touched.
+ * Clears the disposable caches used by the UI: Coil's memory/disk image cache
+ * and everything under the app cache directories (HTTP scratch files, decoded
+ * bitmaps written by the framework). Library data and settings live in
+ * filesDir/SharedPreferences and are never touched.
  */
 object CacheCleaner {
 
@@ -34,22 +33,19 @@ object CacheCleaner {
             channelBytes = runCatching { app?.container?.iptvStore?.channelCacheBytes() ?: 0L }
                 .getOrDefault(0L),
             guideIndexBytes = runCatching { app?.container?.guideIndexStore?.sizeBytes() ?: 0L }
-                .getOrDefault(0L),
-            audioBytes = MusicAudioCache.sizeBytes(context)
+                .getOrDefault(0L)
         )
     }
 
     fun clear(context: Context): Long {
-        val before = sizeBytes(context) + MusicAudioCache.sizeBytes(context)
+        val before = sizeBytes(context)
         clearImageFiles(context)
-        runCatching { MusicAudioCache.clear(context) }
         cacheDirs(context).forEach { dir ->
             dir.listFiles()?.forEach { child ->
-                if (child.name == MusicAudioCache.DIR_NAME) return@forEach
                 runCatching { child.deleteRecursively() }
             }
         }
-        val after = sizeBytes(context) + MusicAudioCache.sizeBytes(context)
+        val after = sizeBytes(context)
         return (before - after).coerceAtLeast(0)
     }
 
@@ -75,8 +71,6 @@ object CacheCleaner {
         return before.coerceAtLeast(0)
     }
 
-    fun clearAudioCache(context: Context): Long = MusicAudioCache.clear(context)
-
     fun clearIfEnabled(context: Context) {
         val app = context.applicationContext as? StreamLineApp ?: return
         if (!app.container.settingsStore.settings.value.clearCacheOnExit) return
@@ -96,8 +90,6 @@ object CacheCleaner {
 
     private fun dirSize(dir: File): Long =
         if (!dir.exists()) 0L else dir.walkTopDown()
-            // The audio cache writes through SimpleCache, which owns its own
-            // index; it is measured and cleared separately.
-            .filter { it.isFile && it.parentFile?.name != MusicAudioCache.DIR_NAME }
+            .filter { it.isFile }
             .sumOf { it.length() }
 }

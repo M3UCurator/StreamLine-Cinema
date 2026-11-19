@@ -67,14 +67,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.streamline.cinema.BuildConfig
 import com.streamline.cinema.CinemaViewModel
 import com.streamline.cinema.data.AppSettings
-import com.streamline.cinema.data.AudioCacheBudget
 import com.streamline.cinema.data.BandwidthCap
 import com.streamline.cinema.data.BufferTier
 import com.streamline.cinema.data.CacheBreakdown
 import com.streamline.cinema.data.CacheCleaner
-import com.streamline.cinema.data.ChartCountries
-import com.streamline.cinema.data.ChartGenres
-import com.streamline.cinema.data.ChartSelection
 import com.streamline.cinema.data.CinemaDns
 import com.streamline.cinema.data.ContentCountry
 import com.streamline.cinema.data.ContentLanguage
@@ -154,7 +150,6 @@ fun SettingsScreen(
     focusSignal: Int = 0
 ) {
     val settings by vm.settings.collectAsState()
-    val chartKeyCheck by vm.chartKeyCheck.collectAsState()
     val update by vm.update.collectAsState()
     val profile by vm.activeProfile.collectAsState()
     val kidsApproved by vm.kidsMode.approved.collectAsState()
@@ -165,10 +160,6 @@ fun SettingsScreen(
     var keyDraft by remember { mutableStateOf("") }
     var keyHidden by remember { mutableStateOf(true) }
     var proxyDraft by remember { mutableStateOf("") }
-    var ytKeyDraft by remember { mutableStateOf("") }
-    var ytKeyHidden by remember { mutableStateOf(true) }
-    // "COUNTRY" or "GENRE" while the chart catalogue picker is open.
-    var chartPicker by remember { mutableStateOf<String?>(null) }
     var dnsDraft by remember { mutableStateOf("") }
     var dnsError by remember { mutableStateOf<String?>(null) }
     var addonName by remember { mutableStateOf("") }
@@ -344,8 +335,6 @@ fun SettingsScreen(
                     vm.onTmdbSettingsChanged()
                     keyDraft = imported.tmdbApiKey
                     keyHidden = imported.tmdbApiKey.isNotBlank()
-                    ytKeyDraft = imported.youtubeApiKey
-                    ytKeyHidden = imported.youtubeApiKey.isNotBlank()
                     proxyDraft = imported.proxyBaseUrl
                     backupFailed = false
                     badgeDraft = imported.badgeSourceUrl
@@ -366,8 +355,6 @@ fun SettingsScreen(
     LaunchedEffect(Unit) {
         keyDraft = vm.settings.value.tmdbApiKey
         keyHidden = vm.settings.value.tmdbApiKey.isNotBlank()
-        ytKeyDraft = vm.settings.value.youtubeApiKey
-        ytKeyHidden = vm.settings.value.youtubeApiKey.isNotBlank()
         proxyDraft = vm.settings.value.proxyBaseUrl
         badgeDraft = vm.settings.value.badgeSourceUrl
     }
@@ -1193,140 +1180,6 @@ fun SettingsScreen(
                             } + " · live tunes directly"
                         )
                         }
-                        SettingsGroup(
-                            "Musicbox",
-                            hint = if (settings.sponsorBlock) "AUTO-SKIP" else "OFF"
-                        ) {
-                        SettingsToggleRow(
-                            label = "Skip non-music sections",
-                            checked = settings.sponsorBlock,
-                            onChange = { vm.saveSettings { s -> s.copy(sponsorBlock = it) } },
-                            description = "Seeks past community-marked talking intros, interludes " +
-                                "and outros in music videos (SponsorBlock music_offtopic); the " +
-                                "song itself is never cut"
-                        )
-                        SettingsSelectRow(
-                            title = "Audio cache",
-                            description = "Replay cache, not downloads: resolved source links " +
-                                "expire, so an evicted track is fetched again when played. " +
-                                "Applies the next time Musicbox starts.",
-                            selected = settings.audioCacheBudget,
-                            options = AudioCacheBudget.entries,
-                            optionLabel = { it.label },
-                            onSelect = { budget ->
-                                vm.saveSettings { it.copy(audioCacheBudget = budget) }
-                            }
-                        )
-                        }
-                        val chartRequest = ChartSelection.request(
-                            settings.musicChartSource,
-                            settings.musicChartCountry,
-                            settings.musicChartGenre,
-                            settings.youtubeApiKey
-                        )
-                        SettingsGroup(
-                            "Music charts",
-                            hint = if (settings.musicCharts) chartRequest.source.label else "OFF"
-                        ) {
-                        SettingsToggleRow(
-                            label = "Charts band",
-                            checked = settings.musicCharts,
-                            onChange = { vm.setMusicCharts(it) },
-                            description = "Top songs from Apple, Deezer or YouTube at the top " +
-                                "of Musicbox; ENTER opens the song in its official app"
-                        )
-                        if (settings.musicCharts) {
-                            SettingsSelectRow(
-                                title = "Default source",
-                                description = chartRequest.source.caveat
-                                    ?: "Most-played songs for the chosen storefront",
-                                selected = chartRequest.source,
-                                options = ChartSelection.available(settings.youtubeApiKey),
-                                optionLabel = { it.label },
-                                onSelect = { vm.selectChartSource(it) }
-                            )
-                            if (chartRequest.source.supportsCountry) {
-                                SettingsPickerRow(
-                                    title = "Default country",
-                                    value = "${chartRequest.country.name} (${chartRequest.country.code})",
-                                    description = "Apple storefronts and YouTube regions " +
-                                        "share the same ISO codes",
-                                    onClick = { chartPicker = "COUNTRY" }
-                                )
-                            }
-                            if (chartRequest.source.supportsGenre) {
-                                SettingsPickerRow(
-                                    title = "Default genre",
-                                    value = chartRequest.genre.label,
-                                    description = "Matched by name in the source's own catalogue",
-                                    onClick = { chartPicker = "GENRE" }
-                                )
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            val ytStored = settings.youtubeApiKey.isNotBlank()
-                            val ytMasked = ytStored && ytKeyHidden
-                            FieldLabel("YouTube Data API v3 key (YOUTUBE source only)")
-                            TvTextField(
-                                value = if (ytMasked) "*****" else ytKeyDraft,
-                                onValueChange = { if (!ytMasked) ytKeyDraft = it },
-                                placeholder = "e.g. AIzaSy…"
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TvButton(
-                                    label = if (chartKeyCheck.busy) "CHECKING" else "SAVE + VALIDATE",
-                                    glyph = "⌁",
-                                    style = TvButtonStyle.SECONDARY,
-                                    compact = true,
-                                    enabled = !chartKeyCheck.busy,
-                                    onClick = {
-                                        vm.setYouTubeApiKey(ytKeyDraft)
-                                        vm.validateYouTubeKey()
-                                        ytKeyHidden = ytKeyDraft.isNotBlank()
-                                    }
-                                )
-                                if (ytStored) {
-                                    TvButton(
-                                        label = if (ytKeyHidden) "REVEAL" else "HIDE",
-                                        glyph = if (ytKeyHidden) "◉" else "◌",
-                                        style = TvButtonStyle.GHOST,
-                                        compact = true,
-                                        onClick = { ytKeyHidden = !ytKeyHidden }
-                                    )
-                                    TvButton(
-                                        label = "CLEAR KEY",
-                                        glyph = "✕",
-                                        style = TvButtonStyle.DANGER,
-                                        compact = true,
-                                        onClick = {
-                                            ytKeyDraft = ""
-                                            ytKeyHidden = false
-                                            vm.setYouTubeApiKey("")
-                                        }
-                                    )
-                                }
-                                chartKeyCheck.message?.let {
-                                    InfoPill(
-                                        it,
-                                        if (chartKeyCheck.success) Cinema.Online else Cinema.Offline,
-                                        Cinema.InkSoft
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                "The key stays on this device and is sent only to Google. " +
-                                    "Apple and Deezer need no key; YouTube falls back to Apple " +
-                                    "while the key is empty.",
-                                color = Cinema.TextMuted,
-                                fontSize = 10.sp,
-                                lineHeight = 15.sp
-                            )
-                        }
-                        }
                         // The same resolver the player builds from, so these
                         // rows report what a stream will actually get rather
                         // than re-deriving it beside the player.
@@ -1504,29 +1357,6 @@ fun SettingsScreen(
                                             CacheCleaner.clearGuideIndex(context)
                                         }
                                     }
-                                )
-                            }
-                            Spacer(Modifier.height(8.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                TvButton(
-                                    label = "MUSICBOX ${formatCacheSize(breakdown.audioBytes)}",
-                                    glyph = "♫",
-                                    style = TvButtonStyle.GHOST,
-                                    compact = true,
-                                    enabled = breakdown.audioBytes > 0,
-                                    onClick = {
-                                        clearCachePart("Musicbox cache cleared") {
-                                            CacheCleaner.clearAudioCache(context)
-                                        }
-                                    }
-                                )
-                                Text(
-                                    "Replay cache, not downloads",
-                                    color = Cinema.TextMuted,
-                                    fontSize = 11.sp
                                 )
                             }
                         }
@@ -2594,29 +2424,6 @@ fun SettingsScreen(
         }
     }
 
-    when (chartPicker) {
-        "COUNTRY" -> ChartPickerDialog(
-            title = "Default chart country",
-            selectedKey = ChartSelection.country(settings.musicChartCountry).code,
-            options = ChartCountries.all.map { "${it.name} (${it.code})" to it.code },
-            onPick = { code ->
-                chartPicker = null
-                ChartCountries.find(code)?.let(vm::setChartCountry)
-            },
-            onDismiss = { chartPicker = null }
-        )
-        "GENRE" -> ChartPickerDialog(
-            title = "Default chart genre",
-            selectedKey = ChartSelection.genre(settings.musicChartGenre).id,
-            options = ChartGenres.all.map { it.label to it.id },
-            onPick = { id ->
-                chartPicker = null
-                ChartGenres.find(id)?.let(vm::setChartGenre)
-            },
-            onDismiss = { chartPicker = null }
-        )
-    }
-
     iptvEditSource?.let { source ->
         IptvEditDialog(
             source = source,
@@ -3357,65 +3164,6 @@ private fun <T> SettingsSelectRow(
                 )
             }
         }
-    }
-}
-
-/**
- * The same row shape as [SettingsSelectRow], but for catalogues too long to
- * expand inline: the tap opens the shared chart picker dialog.
- */
-@Composable
-private fun SettingsPickerRow(
-    title: String,
-    value: String,
-    description: String? = null,
-    onClick: () -> Unit
-) {
-    var focused by remember { mutableStateOf(false) }
-    val sounds = LocalUiSounds.current
-    SettingsRowFrame(
-        focused = focused,
-        modifier = Modifier
-            .onFocusChanged {
-                focused = it.isFocused
-                if (it.isFocused) sounds.focus()
-            }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
-                sounds.select()
-                onClick()
-            }
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(
-                title,
-                color = Cinema.TextPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (description != null) {
-                Text(
-                    description,
-                    color = Cinema.TextMuted,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-        Text(
-            value,
-            color = Cinema.Gold,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Text("▸", color = Cinema.TextMuted, fontSize = 10.sp)
     }
 }
 

@@ -299,4 +299,98 @@ class StreamIdentityTest {
             )
         )
     }
+
+    @Test
+    fun aSeriesLabelNamingAnotherShowIsRejected() {
+        assertTrue(
+            StremioAddons.streamNamesAnotherShow(
+                stream("Heart.of.the.Beast.S01E02.1080p.WEB-DL"), "The Beast"
+            )
+        )
+        assertTrue(
+            StremioAddons.streamNamesAnotherShow(
+                stream("Beauty.and.the.Beast.S01E02.1080p"), "The Beast"
+            )
+        )
+    }
+
+    @Test
+    fun theCorrectShowPassesInEveryCommonLabelShape() {
+        listOf(
+            "Game.of.Thrones.S03E04.1080p.WEB-DL",
+            "Game of Thrones S03E04",
+            "Game.of.Thrones.2011.S03E04.720p",
+            "Game of Thrones - S03E04 - The Bear and the Maiden Fair",
+            "Game of Thrones - The Bear and the Maiden Fair - S03E04",
+            "Game of Thrones Season 3 Complete"
+        ).forEach { label ->
+            assertFalse(
+                label,
+                StremioAddons.streamNamesAnotherShow(stream(label), "Game of Thrones")
+            )
+        }
+    }
+
+    @Test
+    fun theEpisodeTitleAfterTheMarkerIsNotAShowClaim() {
+        assertFalse(
+            StremioAddons.streamNamesAnotherShow(
+                stream("Game.of.Thrones.S03E04.The.Bear.and.the.Maiden.Fair.1080p"),
+                "Game of Thrones"
+            )
+        )
+    }
+
+    @Test
+    fun regionalMarkersAndReleaseYearsDoNotMakeAnotherShow() {
+        assertFalse(
+            StremioAddons.streamNamesAnotherShow(
+                stream("The.Office.US.S03E04.1080p"), "The Office"
+            )
+        )
+        assertFalse(
+            StremioAddons.streamNamesAnotherShow(
+                stream("The Office (2005) S03E04"), "The Office"
+            )
+        )
+    }
+
+    @Test
+    fun seriesLabelsWithoutAMarkerMakeNoShowClaim() {
+        listOf("1080p · BluRay", "YTS", "Multi Subs").forEach { label ->
+            assertFalse(
+                label,
+                StremioAddons.streamNamesAnotherShow(stream(label), "The Beast")
+            )
+        }
+    }
+
+    @Test
+    fun aOneWordSeriesClaimIsTooThinToReject() {
+        // One word cannot be placed as a show name, so the source keeps playing.
+        assertFalse(
+            StremioAddons.streamNamesAnotherShow(stream("Heart.S01E02.1080p"), "The Beast")
+        )
+    }
+
+    @Test
+    fun showsWrittenInAnotherScriptAreNotJudged() {
+        assertFalse(
+            StremioAddons.streamNamesAnotherShow(
+                stream("Бойцовский клуб S03E04"), "Fight Club"
+            )
+        )
+    }
+
+    @Test
+    fun theFilenameHintIsCheckedForShowsToo() {
+        val hinted = StreamItem(
+            name = "1080p · BluRay",
+            title = null,
+            url = "https://cdn.test/v.mp4",
+            externalUrl = null,
+            behaviorHints = mapOf("filename" to "Heart.of.the.Beast.S01E02.1080p.mkv")
+        )
+        assertTrue(StremioAddons.streamNamesAnotherShow(hinted, "The Beast"))
+    }
 }

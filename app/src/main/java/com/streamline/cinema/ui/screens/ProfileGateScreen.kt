@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -51,11 +52,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.streamline.cinema.CinemaViewModel
 import com.streamline.cinema.data.AudioLanguage
 import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.MaturityLevel
 import com.streamline.cinema.data.SubtitleLanguageOption
+import com.streamline.cinema.ui.AvatarPicker
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
@@ -64,11 +67,12 @@ import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PinDisplay
 import com.streamline.cinema.ui.PinPad
+import com.streamline.cinema.ui.ProfileAvatar
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.TvTextField
 import com.streamline.cinema.ui.glassSurface
-import com.streamline.cinema.ui.profileColor
+import com.streamline.cinema.ui.profileAvatarOptions
 import kotlinx.coroutines.delay
 
 @Composable
@@ -146,9 +150,8 @@ fun ProfileGateScreen(
             )
             Spacer(Modifier.height(40.dp))
 
-            // Tiles are drawn, never decoded: the avatar is a coloured circle
-            // and an initial, so the gate paints on its first frame and a
-            // profile switch never waits on artwork.
+            // Avatars are 256 px images pre-scaled for the tile; they load
+            // straight from resources without a network or disk round trip.
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally)
@@ -168,7 +171,13 @@ fun ProfileGateScreen(
                 item(key = "add") {
                     AddProfileTile(
                         width = tileWidth,
-                        onClick = { editing = CinemaProfile(id = "", name = "") }
+                        onClick = {
+                            editing = CinemaProfile(
+                                id = "",
+                                name = "",
+                                avatarIndex = profiles.size % profileAvatarOptions.size
+                            )
+                        }
                     )
                 }
             }
@@ -222,7 +231,7 @@ fun ProfileGateScreen(
             onDismiss = { editing = null },
             onSave = { saved ->
                 if (saved.id.isBlank()) {
-                    vm.addProfile(saved.name, saved.maturity)
+                    vm.addProfile(saved.name, saved.maturity, saved.avatarIndex)
                 } else {
                     vm.saveProfile(saved)
                 }
@@ -285,20 +294,7 @@ private fun ProfileTile(
             .padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            Modifier
-                .size(avatar)
-                .clip(CircleShape)
-                .background(profileColor(profile.colorIndex)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = profile.initial,
-                color = Cinema.Ink,
-                fontSize = (avatar.value * 0.40f).sp,
-                fontWeight = FontWeight.ExtraBold
-            )
-        }
+        ProfileAvatar(index = profile.avatarIndex, size = avatar)
         Spacer(Modifier.height(12.dp))
         Text(
             text = profile.name,
@@ -395,15 +391,22 @@ private fun ProfileEditorDialog(
     onDelete: () -> Unit
 ) {
     var name by remember(seed.id) { mutableStateOf(seed.name) }
+    var avatarIndex by remember(seed.id) { mutableStateOf(seed.avatarIndex) }
     var maturity by remember(seed.id) { mutableStateOf(seed.maturity) }
     var audio by remember(seed.id) { mutableStateOf(seed.audioLanguage) }
     var subtitles by remember(seed.id) { mutableStateOf(seed.subtitleLanguage) }
     val maxDialogHeight = (LocalConfiguration.current.screenHeightDp * 0.88f).dp
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        // The platform default width caps the window well below the editor's
+        // intended 640 dp, which squeezed the avatar grid to three columns.
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Column(
             Modifier
-                .width(640.dp)
+                .fillMaxWidth(0.72f)
+                .widthIn(max = 640.dp)
                 .heightIn(max = maxDialogHeight)
                 .glassSurface(
                     shape = RoundedCornerShape(CinemaDimens.CardRadius),
@@ -429,6 +432,10 @@ private fun ProfileEditorDialog(
                 onValueChange = { name = it.take(24) },
                 placeholder = "Profile name"
             )
+            Spacer(Modifier.height(18.dp))
+            Text("AVATAR", color = Cinema.TextMuted, fontSize = 10.sp, letterSpacing = 1.4.sp)
+            Spacer(Modifier.height(8.dp))
+            AvatarPicker(selected = avatarIndex, onSelect = { avatarIndex = it })
             Spacer(Modifier.height(18.dp))
             Text("MATURITY", color = Cinema.TextMuted, fontSize = 10.sp, letterSpacing = 1.4.sp)
             Spacer(Modifier.height(8.dp))
@@ -483,6 +490,7 @@ private fun ProfileEditorDialog(
                         onSave(
                             seed.copy(
                                 name = name,
+                                avatarIndex = avatarIndex,
                                 maturity = maturity,
                                 audioLanguage = audio,
                                 subtitleLanguage = subtitles

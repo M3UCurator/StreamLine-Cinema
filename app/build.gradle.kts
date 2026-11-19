@@ -5,7 +5,7 @@ import java.time.format.DateTimeFormatter
 // Release artifacts are named by build day and iteration (Cinema<ddMMyy>v<iteration>.apk)
 // so successive builds never overwrite each other. Bump -PcinemaIteration per release;
 // -PallAbis=true adds the emulator suffix and drops the 32-bit ABI filter for that build.
-val iteration = providers.gradleProperty("cinemaIteration").orElse("12.114").get()
+val iteration = providers.gradleProperty("cinemaIteration").orElse("12.115").get()
 val allAbis = providers.gradleProperty("allAbis").map(String::toBoolean).getOrElse(false)
 val buildDay = LocalDate.now().format(DateTimeFormatter.ofPattern("ddMMyy"))
 val artifactName = "Cinema${buildDay}v$iteration" + if (allAbis) "-allabis" else ""
@@ -146,7 +146,6 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:1.11.1")
     implementation("androidx.media3:media3-exoplayer-smoothstreaming:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
-    implementation("androidx.media3:media3-session:1.11.1")
     implementation("androidx.media3:media3-datasource-okhttp:1.11.1")
     // Jellyfin's FFmpeg extension: AC-3, E-AC-3, DTS/TrueHD and HEVC/AV1 software
     // decoding. DefaultRenderersFactory loads androidx.media3.decoder.ffmpeg

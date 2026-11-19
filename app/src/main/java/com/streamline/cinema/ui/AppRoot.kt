@@ -56,7 +56,6 @@ import com.streamline.cinema.ui.screens.ImportScreen
 import com.streamline.cinema.ui.screens.KidsCurationScreen
 import com.streamline.cinema.ui.screens.LibraryScreen
 import com.streamline.cinema.ui.screens.LiveScreen
-import com.streamline.cinema.ui.screens.MusicboxScreen
 import com.streamline.cinema.ui.screens.PinDialog
 import com.streamline.cinema.ui.screens.PlayroomScreen
 import com.streamline.cinema.ui.screens.ProfileGateScreen
@@ -66,7 +65,6 @@ import com.streamline.cinema.ui.screens.SettingsScreen
 @Composable
 fun AppRoot(vm: CinemaViewModel) {
     val settings by vm.settings.collectAsState()
-    val music by vm.music.collectAsState()
     val updateState by vm.update.collectAsState()
     val profile by vm.activeProfile.collectAsState()
     val context = LocalContext.current
@@ -99,23 +97,6 @@ fun AppRoot(vm: CinemaViewModel) {
 
     LaunchedEffect(detail) {
         if (detail != null) displayedDetail.value = detail
-    }
-
-    // Music joins the bar once an addon publishes a music catalog, or as soon as
-    // the metadata-only CHARTS band is on: charts need no addon. The Kids
-    // profile never gets the tab. The bar is handed the visible list.
-    val musicTabVisible = (music.available || settings.musicCharts) && !profile.isKids
-    val tabs = remember(musicTabVisible) {
-        if (musicTabVisible) {
-            primaryTabs.toMutableList().apply { add(indexOf(AppTab.LIVE) + 1, AppTab.MUSIC) }
-        } else {
-            primaryTabs
-        }
-    }
-
-    LaunchedEffect(Unit) { vm.refreshMusic() }
-    LaunchedEffect(musicTabVisible) {
-        if (!musicTabVisible && tab == AppTab.MUSIC) tab = AppTab.HOME
     }
 
     fun closeDetail() {
@@ -161,9 +142,6 @@ fun AppRoot(vm: CinemaViewModel) {
     // Search, imports and settings sit behind the parental PIN while a Kids
     // profile is active; every route funnels through here so none can slip by.
     fun openTab(target: AppTab) {
-        // Music has no rating metadata to filter on, so Kids never reaches it
-        // by any route — a PIN is not offered as a way in.
-        if (target == AppTab.MUSIC && vm.activeProfile.value.isKids) return
         val locked = vm.activeProfile.value.isKids &&
             (target == AppTab.SETTINGS || target == AppTab.PLAYROOM || target == AppTab.IMPORT)
         if (locked) pendingLockedTab = target else tab = target
@@ -287,10 +265,6 @@ fun AppRoot(vm: CinemaViewModel) {
                             onPlay = launchLive,
                             onOpenSettings = { openTab(AppTab.SETTINGS) }
                         )
-                        AppTab.MUSIC -> MusicboxScreen(
-                            vm = vm,
-                            onOpenSettings = { openTab(AppTab.SETTINGS) }
-                        )
                         AppTab.FAVORITES -> FavoritesScreen(
                             vm = vm,
                             onOpenDetail = { detail = it }
@@ -339,10 +313,8 @@ fun AppRoot(vm: CinemaViewModel) {
             TopTabBar(
                 selected = tab,
                 onSelect = { openTab(it) },
-                tabs = tabs,
                 profileName = profile.name,
-                profileBadge = profile.initial,
-                profileColor = profileColor(profile.colorIndex),
+                profileAvatar = profile.avatarIndex,
                 onProfileClick = { profileGateOpen = true },
                 onSearchClick = if (profile.isKids) null else ({ openSearch() }),
                 downFocusRequester = if (tab == AppTab.HOME) homeEntryFocus else null,

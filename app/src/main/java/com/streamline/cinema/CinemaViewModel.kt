@@ -1,28 +1,13 @@
 package com.streamline.cinema
 
 import android.app.Application
-import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.streamline.cinema.data.AddonSource
 import com.streamline.cinema.data.AppSettings
-import com.streamline.cinema.data.AppleChartsProvider
 import com.streamline.cinema.data.CatalogExtra
 import com.streamline.cinema.data.CatalogItem
-import com.streamline.cinema.data.ChartCache
-import com.streamline.cinema.data.ChartCountry
-import com.streamline.cinema.data.ChartGenre
-import com.streamline.cinema.data.ChartGenres
-import com.streamline.cinema.data.ChartHandoff
-import com.streamline.cinema.data.ChartProvider
-import com.streamline.cinema.data.ChartRequest
-import com.streamline.cinema.data.ChartSelection
-import com.streamline.cinema.data.ChartSource
-import com.streamline.cinema.data.ChartTrack
-import com.streamline.cinema.data.DeezerChartsProvider
-import com.streamline.cinema.data.KeyCheck
-import com.streamline.cinema.data.YouTubeChartsProvider
 import com.streamline.cinema.data.CinemaDns
 import com.streamline.cinema.data.CinemaProfile
 import com.streamline.cinema.data.DnsMode
@@ -45,9 +30,6 @@ import com.streamline.cinema.data.LivePrefsStore
 import com.streamline.cinema.data.LiveSourceKind
 import com.streamline.cinema.data.MaturityLevel
 import com.streamline.cinema.data.MediaType
-import com.streamline.cinema.data.MusicCatalog
-import com.streamline.cinema.data.MusicHistory
-import com.streamline.cinema.data.MusicTrack
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.Season
@@ -69,7 +51,6 @@ import com.streamline.cinema.data.rankingLanguage
 import com.streamline.cinema.data.todayStamp
 import com.streamline.cinema.data.visibleTo
 import com.streamline.cinema.data.watchedEpisodesFor
-import com.streamline.cinema.player.MusicPlaybackService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -185,54 +166,6 @@ data class LiveUiState(
     val loading: Boolean = false,
     val resolving: String? = null,
     val message: String? = null
-)
-
-data class MusicUiState(
-    val catalogs: List<MusicCatalog> = emptyList(),
-    val selected: MusicCatalog? = null,
-    /** Active selection groups of the catalog (`genre` → `Jazz`, …). */
-    val filters: Map<String, String> = emptyMap(),
-    val tracks: List<MusicTrack> = emptyList(),
-    val query: String = "",
-    /** The trimmed query whose results are held in [results]; stale text hides them. */
-    val searchedQuery: String = "",
-    val results: List<MusicTrack> = emptyList(),
-    val loading: Boolean = false,
-    val searching: Boolean = false,
-    /** A manifest pass finished; distinguishes "no music addons" from "still loading". */
-    val loaded: Boolean = false,
-    val message: String? = null
-) {
-    val available: Boolean get() = catalogs.isNotEmpty()
-
-    val supportsSearch: Boolean get() = catalogs.any { it.supportsSearch }
-
-    /** Results only stand while the field still shows the query they answer. */
-    val showingResults: Boolean
-        get() = searchedQuery.isNotBlank() && query.trim() == searchedQuery
-
-    val visibleTracks: List<MusicTrack> get() = if (showingResults) results else tracks
-}
-
-/**
- * The CHARTS band. [request] is the selection whose rows are held, so a pill
- * change can be compared against what the screen is showing.
- */
-data class ChartUiState(
-    val request: ChartRequest? = null,
-    val rows: List<ChartTrack> = emptyList(),
-    val note: String? = null,
-    val loading: Boolean = false,
-    val message: String? = null,
-    /** Charts are the visible surface; picking a catalog chip leaves them. */
-    val active: Boolean = false
-)
-
-/** Outcome of the Settings VALIDATE press for the YouTube key. */
-data class ChartKeyCheckState(
-    val busy: Boolean = false,
-    val message: String? = null,
-    val success: Boolean = false
 )
 
 data class EpgUiState(
@@ -361,33 +294,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     /** Unfiltered channels for the parental curation screen. */
     val liveAll: StateFlow<LiveUiState> = _live.asStateFlow()
 
-    private val _music = MutableStateFlow(MusicUiState())
-    val music: StateFlow<MusicUiState> = _music.asStateFlow()
-
-    private val _chart = MutableStateFlow(ChartUiState())
-    val chart: StateFlow<ChartUiState> = _chart.asStateFlow()
-
-    private val _chartKeyCheck = MutableStateFlow(ChartKeyCheckState())
-    val chartKeyCheck: StateFlow<ChartKeyCheckState> = _chartKeyCheck.asStateFlow()
-
-    /**
-     * One cache serves all three sources; the cache keys carry the source name,
-     * so a REFRESH can drop every entry through a single call.
-     */
-    private val chartCache = ChartCache()
-    private val youtubeCharts = YouTubeChartsProvider(
-        keyProvider = { settings.value.youtubeApiKey.trim() },
-        cache = chartCache
-    )
-    private val chartProviders: Map<ChartSource, ChartProvider> = mapOf(
-        ChartSource.APPLE to AppleChartsProvider(cache = chartCache),
-        ChartSource.DEEZER to DeezerChartsProvider(cache = chartCache),
-        ChartSource.YOUTUBE to youtubeCharts
-    )
-
-    /** Recently played tracks and the last queue for the active profile. */
-    val musicHistory: StateFlow<MusicHistory> = container.musicHistory.history
-
     private val _epg = MutableStateFlow(EpgUiState())
     val epg: StateFlow<EpgUiState> = _epg.asStateFlow()
 
@@ -429,12 +335,9 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         // The library loads off-main; setActiveProfile waits for that lock, so a
         // profile restored from the last session never sees the wrong bucket.
         container.libraryStore.setActiveProfile(container.profileStore.active.value.id)
-        container.musicHistory.setActiveProfile(container.profileStore.active.value.id)
         viewModelScope.launch {
             container.profileStore.active.drop(1).collect { profile ->
                 container.libraryStore.setActiveProfile(profile.id)
-                container.musicHistory.setActiveProfile(profile.id)
-                stopMusicPlayback()
                 refreshRecommendations(force = true)
                 if (_search.value.query.isBlank() && _search.value.genreIds.isEmpty()) {
                     loadPlayroomDefault()
@@ -615,16 +518,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         container.profileStore.select(profileId)
     }
 
-    /**
-     * Music belongs to the profile that started it, so a switch ends the
-     * session; the service saves that profile's queue and playhead on the way
-     * out, and the new profile's Musicbox opens clean.
-     */
-    private fun stopMusicPlayback() {
-        val app = getApplication<Application>()
-        app.stopService(Intent(app, MusicPlaybackService::class.java))
-    }
-
     /** Kids Mode is the Kids profile: this switches to it (creating one if needed). */
     fun enableKidsMode(): CinemaProfile = kidsMode.enable()
 
@@ -643,8 +536,8 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         refreshRecommendations(force = true)
     }
 
-    fun addProfile(name: String, maturity: MaturityLevel): CinemaProfile =
-        container.profileStore.add(name, maturity)
+    fun addProfile(name: String, maturity: MaturityLevel, avatarIndex: Int): CinemaProfile =
+        container.profileStore.add(name, maturity, avatarIndex)
 
     fun deleteProfile(profileId: String): Boolean = container.profileStore.remove(profileId)
 
@@ -1751,329 +1644,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         extras = catalog.extras.map { container.livePrefs.applyGroupOrder(catalog, it) }
     )
 
-    private var musicJob: Job? = null
-    private var chartJob: Job? = null
-
-    /**
-     * [force] re-reads every enabled addon manifest; otherwise an existing catalog
-     * list is reused and only the selected catalog is (re)filled when empty.
-     */
-    fun refreshMusic(force: Boolean = false) {
-        val state = _music.value
-        if (state.loading && !force) return
-        if (!force && state.catalogs.isNotEmpty()) {
-            val selected = state.selected ?: state.catalogs.first()
-            loadMusicCatalog(selected, state.filters, reload = false)
-            return
-        }
-        musicJob?.cancel()
-        musicJob = viewModelScope.launch {
-            _music.update { it.copy(loading = true, searching = false, message = null) }
-            try {
-                val load = repository.musicCatalogs()
-                val previous = _music.value
-                val selected = load.catalogs.firstOrNull { it.key == previous.selected?.key }
-                    ?: load.catalogs.firstOrNull()
-                val keepFilters = selected?.key == previous.selected?.key
-                val filters = if (keepFilters) previous.filters else emptyMap()
-                _music.update {
-                    it.copy(
-                        catalogs = load.catalogs,
-                        selected = selected,
-                        filters = filters,
-                        tracks = emptyList(),
-                        query = "",
-                        searchedQuery = "",
-                        results = emptyList(),
-                        loaded = true,
-                        loading = selected == null,
-                        message = load.failures.takeIf { it.isNotEmpty() }?.joinToString(" · ")
-                    )
-                }
-                if (selected != null) {
-                    loadMusicCatalog(selected, filters, reload = true)
-                } else if (settings.value.musicCharts) {
-                    // Nothing to tune into: the band is the only content left.
-                    showCharts()
-                }
-            } catch (c: CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                _music.update {
-                    it.copy(
-                        loading = false,
-                        loaded = true,
-                        message = t.message ?: "Music catalogs failed"
-                    )
-                }
-            }
-        }
-    }
-
-    /** Selecting the current catalog again is the way back out of a search. */
-    fun selectMusicCatalog(catalog: MusicCatalog) {
-        hideCharts()
-        if (_music.value.selected?.key == catalog.key) {
-            _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
-        }
-        loadMusicCatalog(catalog, emptyMap(), reload = false)
-    }
-
-    fun setMusicFilter(name: String, value: String) {
-        val state = _music.value
-        val catalog = state.selected ?: return
-        val filters = if (value.isBlank()) state.filters - name else state.filters + (name to value)
-        if (filters == state.filters) return
-        hideCharts()
-        loadMusicCatalog(catalog, filters, reload = true)
-    }
-
-    /** Typing only updates the field; the search itself runs on the SEARCH button. */
-    fun setMusicQuery(text: String) {
-        if (_music.value.query == text) return
-        _music.update { it.copy(query = text) }
-    }
-
-    fun clearMusicSearch() {
-        hideCharts()
-        _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
-        // A search can have cancelled the catalog fetch; if no tracks landed,
-        // pulling them back is the difference between a list and an empty page.
-        val state = _music.value
-        val catalog = state.selected
-        if (catalog != null && state.tracks.isEmpty() && !state.loading && !state.searching) {
-            loadMusicCatalog(catalog, state.filters, reload = false)
-        }
-    }
-
-    fun runMusicSearch() {
-        val state = _music.value
-        val term = state.query.trim()
-        if (term.isBlank() || state.searching) return
-        val targets = state.catalogs.filter { it.supportsSearch }
-        if (targets.isEmpty()) {
-            _music.update { it.copy(message = "No music catalog in this setup supports search.") }
-            return
-        }
-        hideCharts()
-        musicJob?.cancel()
-        musicJob = viewModelScope.launch {
-            _music.update { it.copy(searching = true, loading = false, message = null) }
-            try {
-                val result = repository.searchMusic(term, targets)
-                _music.update {
-                    it.copy(
-                        searching = false,
-                        searchedQuery = term,
-                        results = result.tracks,
-                        message = result.failures.takeIf { it.isNotEmpty() }?.joinToString(" · ")
-                    )
-                }
-            } catch (c: CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                _music.update {
-                    it.copy(searching = false, message = t.message ?: "Music search failed")
-                }
-            }
-        }
-    }
-
-    // ---- Charts -----------------------------------------------------------
-
-    /**
-     * The band is the surface the viewer picked, so a pill tap also leaves a
-     * search behind: the field would answer for rows that are no longer shown.
-     */
-    fun showCharts() {
-        if (_music.value.query.isNotBlank() || _music.value.showingResults) {
-            _music.update { it.copy(query = "", searchedQuery = "", results = emptyList()) }
-        }
-        _chart.update { it.copy(active = true) }
-        ensureChart()
-    }
-
-    fun hideCharts() {
-        if (_chart.value.active) _chart.update { it.copy(active = false) }
-    }
-
-    fun selectChartSource(source: ChartSource) {
-        if (settings.value.musicChartSource != source.name) {
-            saveSettings { it.copy(musicChartSource = source.name) }
-        }
-        showCharts()
-    }
-
-    fun setChartCountry(country: ChartCountry) {
-        if (settings.value.musicChartCountry != country.code) {
-            saveSettings { it.copy(musicChartCountry = country.code) }
-        }
-        showCharts()
-    }
-
-    fun setChartGenre(genre: ChartGenre) {
-        if (settings.value.musicChartGenre != genre.id) {
-            saveSettings { it.copy(musicChartGenre = genre.id) }
-        }
-        showCharts()
-    }
-
-    fun setMusicCharts(enabled: Boolean) {
-        if (settings.value.musicCharts == enabled) return
-        saveSettings { it.copy(musicCharts = enabled) }
-        if (enabled) showCharts() else hideCharts()
-    }
-
-    /**
-     * A new key is probed by the band on the next visit, so an active band
-     * reloads now: a removed key falls back to Apple, an added one unlocks
-     * YouTube if that is the stored source.
-     */
-    fun setYouTubeApiKey(key: String) {
-        if (settings.value.youtubeApiKey == key.trim()) return
-        saveSettings { it.copy(youtubeApiKey = key.trim()) }
-        _chartKeyCheck.value = ChartKeyCheckState()
-        if (_chart.value.active) ensureChart(force = true)
-    }
-
-    /** Asks Google's 1-unit videoCategories endpoint whether the key works. */
-    fun validateYouTubeKey() {
-        if (_chartKeyCheck.value.busy) return
-        viewModelScope.launch {
-            _chartKeyCheck.value = ChartKeyCheckState(busy = true)
-            val outcome = withContext(Dispatchers.IO) {
-                youtubeCharts.validateKey(settings.value.youtubeApiKey.trim())
-            }
-            _chartKeyCheck.value = when (outcome) {
-                KeyCheck.Valid -> ChartKeyCheckState(
-                    message = "Key accepted",
-                    success = true
-                )
-                KeyCheck.Missing -> ChartKeyCheckState(message = "Add a key first")
-                KeyCheck.Invalid -> ChartKeyCheckState(message = "Google rejected this key")
-                is KeyCheck.Failed -> ChartKeyCheckState(message = outcome.message)
-            }
-        }
-    }
-
-    /** [force] drops the six-hour cache first, for an explicit REFRESH. */
-    fun ensureChart(force: Boolean = false) {
-        val prefs = settings.value
-        if (!prefs.musicCharts) {
-            chartJob?.cancel()
-            _chart.update { it.copy(active = false, loading = false) }
-            return
-        }
-        val request = ChartSelection.request(
-            prefs.musicChartSource,
-            prefs.musicChartCountry,
-            prefs.musicChartGenre,
-            prefs.youtubeApiKey
-        )
-        val state = _chart.value
-        if (!force && state.request == request && (state.loading || state.rows.isNotEmpty())) return
-        if (force) chartCache.clear()
-        chartJob?.cancel()
-        chartJob = viewModelScope.launch {
-            _chart.update { it.copy(request = request, loading = true, message = null) }
-            try {
-                val result = chartProviders.getValue(request.source).chart(request)
-                _chart.update {
-                    it.copy(
-                        request = request,
-                        rows = result.rows,
-                        note = result.note,
-                        loading = false,
-                        // A provider that knows why it has no rows (Deezer's
-                        // missing genre) says so itself; only fill the gap.
-                        message = if (result.rows.isEmpty()) {
-                            result.note ?: "No chart rows for ${request.describe()}."
-                        } else {
-                            null
-                        }
-                    )
-                }
-            } catch (c: CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                _chart.update {
-                    it.copy(
-                        request = request,
-                        rows = emptyList(),
-                        note = null,
-                        loading = false,
-                        message = t.message ?: "The chart could not be loaded."
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * Hands a chart row to another app: a video id goes to the official YouTube
-     * app, a source page to the browser, anything else to a search. Returns the
-     * failure message to show, or null when an app took it.
-     */
-    fun openChartTrack(track: ChartTrack): String? {
-        ChartHandoff.openTarget(track)?.let { if (repository.openInBrowser(it)) return null }
-        ChartHandoff.validVideoId(track.videoId)?.let {
-            if (repository.openInBrowser(ChartHandoff.watchUrl(it))) return null
-        }
-        val query = ChartHandoff.queryFor(track)
-        if (query.isNotBlank() && repository.openInBrowser(ChartHandoff.searchUrl(query))) return null
-        return "No app on this device could open \"${track.title}\"."
-    }
-
-    private fun loadMusicCatalog(
-        catalog: MusicCatalog,
-        filters: Map<String, String>,
-        reload: Boolean
-    ) {
-        val state = _music.value
-        if (!reload && state.selected?.key == catalog.key &&
-            state.filters == filters && state.tracks.isNotEmpty()
-        ) {
-            return
-        }
-        musicJob?.cancel()
-        musicJob = viewModelScope.launch {
-            _music.update {
-                it.copy(
-                    selected = catalog,
-                    filters = filters,
-                    loading = true,
-                    searching = false,
-                    tracks = emptyList(),
-                    query = "",
-                    searchedQuery = "",
-                    results = emptyList(),
-                    message = null
-                )
-            }
-            try {
-                val tracks = repository.musicTracks(catalog, filters)
-                _music.update {
-                    it.copy(
-                        tracks = tracks,
-                        loading = false,
-                        message = if (tracks.isEmpty()) {
-                            "${catalog.name}: this selection returned no tracks."
-                        } else null
-                    )
-                }
-            } catch (c: CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                _music.update {
-                    it.copy(
-                        loading = false,
-                        message = "${catalog.name}: ${t.message ?: "catalog failed"}"
-                    )
-                }
-            }
-        }
-    }
-
     fun toggleLiveFavorite(channel: LiveChannel): Boolean =
         container.livePrefs.toggleFavorite(channel.key)
 
@@ -2382,8 +1952,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 )
             )
         }
-        // A newly added music addon is what makes the Musicbox tab appear.
-        refreshMusic(force = true)
         return null
     }
 
@@ -2395,7 +1963,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 }
             )
         }
-        refreshMusic(force = true)
     }
 
     /** Reorders addons; the list order is the stream-search priority order. */
@@ -2414,7 +1981,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun deleteAddon(id: String) {
         saveSettings { it.copy(addons = it.addons.filterNot { addon -> addon.id == id }) }
-        refreshMusic(force = true)
     }
 
     fun removeProgressForItem(itemKey: String) = container.libraryStore.removeProgressForItem(itemKey)
@@ -2434,8 +2000,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     ): PlaybackPlan = repository.playbackPlan(item, season, episode, episodeTitle)
 
     fun openExternal(url: String): Boolean = repository.openExternally(url)
-
-    fun openBrowser(url: String): Boolean = repository.openInBrowser(url)
 
     fun resumeEntryFor(item: CatalogItem, season: Int?, episode: Int?): WatchProgress? {
         // Without an episode there is no resume row — only another slot's.

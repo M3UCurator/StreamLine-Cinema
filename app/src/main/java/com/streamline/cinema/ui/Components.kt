@@ -112,10 +112,6 @@ enum class AppTab(val label: String) {
     FAVORITES("Favorites"),
     SETTINGS("Settings"),
 
-    // Rendered in the bar only while a music catalog is configured; the tab
-    // list is supplied by the caller instead of the fixed primary list.
-    MUSIC("Music"),
-
     // Reachable from the top-bar SEARCH button (and Import from the library
     // toolbars); never rendered in the tab bar.
     PLAYROOM("Playroom"),
@@ -1653,12 +1649,8 @@ fun TopTabBar(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
     modifier: Modifier = Modifier,
-    // Music joins the bar only when a music catalog exists, so the visible tabs
-    // are caller-supplied; neighbours and requesters follow this list.
-    tabs: List<AppTab> = primaryTabs,
     profileName: String = "",
-    profileBadge: String = "",
-    profileColor: Color = Cinema.Gold,
+    profileAvatar: Int = 0,
     onProfileClick: (() -> Unit)? = null,
     // Playroom search lives in the bar; Kids profiles pass null so the control
     // never renders (the tab gate behind it stays armed regardless).
@@ -1696,10 +1688,10 @@ fun TopTabBar(
         ) {
             BrandMark()
             Spacer(Modifier.width(if (dense) 12.dp else 26.dp))
-            val tabRequesters = remember(tabs) { tabs.associateWith { FocusRequester() } }
+            val tabRequesters = remember { primaryTabs.associateWith { FocusRequester() } }
             val profileFocus = remember { FocusRequester() }
             val searchFocus = remember { FocusRequester() }
-            val lastTabFocus = tabRequesters.getValue(tabs.last())
+            val lastTabFocus = tabRequesters.getValue(primaryTabs.last())
             val view = LocalView.current
             LaunchedEffect(restoreTarget, restoreTick) {
                 if (restoreTick == 0 || restoreTarget.isNullOrBlank()) return@LaunchedEffect
@@ -1710,7 +1702,7 @@ fun TopTabBar(
                 val requester = if (restoreTarget == "profile") {
                     profileFocus
                 } else {
-                    tabs.firstOrNull { it.name == restoreTarget }?.let { tabRequesters[it] }
+                    primaryTabs.firstOrNull { it.name == restoreTarget }?.let { tabRequesters[it] }
                 }
                 requester?.let { runCatching { it.requestFocus() } }
             }
@@ -1725,9 +1717,9 @@ fun TopTabBar(
                     )
                     .padding(horizontal = 4.dp, vertical = 2.dp)
             ) {
-                tabs.forEachIndexed { index, tab ->
-                    val left = tabs.getOrNull(index - 1)
-                    val right = tabs.getOrNull(index + 1)
+                primaryTabs.forEachIndexed { index, tab ->
+                    val left = primaryTabs.getOrNull(index - 1)
+                    val right = primaryTabs.getOrNull(index + 1)
                     TabItem(
                         tab = tab,
                         selected = tab == selected,
@@ -1767,8 +1759,7 @@ fun TopTabBar(
             if (onProfileClick != null) {
                 ProfileChip(
                     name = profileName,
-                    badge = profileBadge,
-                    color = profileColor,
+                    avatarIndex = profileAvatar,
                     focusRequester = profileFocus,
                     leftFocusRequester = if (onSearchClick != null) searchFocus else null,
                     onClick = onProfileClick
@@ -1802,8 +1793,7 @@ private fun TopBarClock() {
 @Composable
 private fun ProfileChip(
     name: String,
-    badge: String,
-    color: Color,
+    avatarIndex: Int,
     focusRequester: FocusRequester,
     leftFocusRequester: FocusRequester? = null,
     onClick: () -> Unit
@@ -1836,20 +1826,7 @@ private fun ProfileChip(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Box(
-            Modifier
-                .size(26.dp)
-                .clip(CircleShape)
-                .background(color),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = badge,
-                color = Cinema.Ink,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.ExtraBold
-            )
-        }
+        ProfileAvatar(index = avatarIndex, size = 26.dp)
         Text(
             text = name.ifBlank { "Profile" },
             color = if (focused) Cinema.Gold else Cinema.TextPrimary,
@@ -2011,19 +1988,6 @@ fun SkeletonRail(title: String, modifier: Modifier = Modifier, cards: Int = 6) {
         }
     }
 }
-
-/** Avatar palette shared by the profile picker and the top-bar chip. */
-val profileAvatarColors: List<Color> = listOf(
-    Cinema.Gold,
-    Cinema.Crimson,
-    Cinema.Online,
-    Color(0xFF5B8DEF),
-    Color(0xFFB07CFF),
-    Color(0xFFFF8A5C)
-)
-
-fun profileColor(index: Int): Color =
-    profileAvatarColors[index.coerceIn(0, profileAvatarColors.lastIndex)]
 
 fun formatRuntime(minutes: Int?): String? =    minutes?.takeIf { it > 0 }?.let { "${it / 60}h ${it % 60}m".replace("0h ", "") }
 

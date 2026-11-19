@@ -87,25 +87,25 @@ enum class SubtitleLanguageOption(val label: String, val code: String) {
     }
 }
 
+/** Number of avatar drawables in `res/drawable-nodpi`; persisted as avatarIndex. */
+const val PROFILE_AVATAR_COUNT = 15
+
 data class CinemaProfile(
     val id: String,
     val name: String,
     val maturity: MaturityLevel = MaturityLevel.ADULT,
-    val colorIndex: Int = 0,
+    val avatarIndex: Int = 0,
     val audioLanguage: String = "",
     val subtitleLanguage: String = "",
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val isKids: Boolean get() = maturity == MaturityLevel.KIDS
 
-    val initial: String
-        get() = name.trim().take(1).uppercase().ifBlank { "?" }
-
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
         put("name", name)
         put("maturity", maturity.name)
-        put("colorIndex", colorIndex)
+        put("avatarIndex", avatarIndex)
         put("audioLanguage", audioLanguage)
         put("subtitleLanguage", subtitleLanguage)
         put("createdAt", createdAt)
@@ -118,7 +118,10 @@ data class CinemaProfile(
             id = o.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
             name = o.optString("name").takeIf { it.isNotBlank() } ?: "Profile",
             maturity = MaturityLevel.from(o.stringOrNull("maturity")),
-            colorIndex = o.optInt("colorIndex"),
+            // Profiles stored before the photo avatars carry only a colour
+            // index; map it onto an avatar so a household keeps distinct faces.
+            avatarIndex = o.optInt("avatarIndex", o.optInt("colorIndex", 0))
+                .coerceIn(0, PROFILE_AVATAR_COUNT - 1),
             audioLanguage = o.optString("audioLanguage"),
             subtitleLanguage = o.optString("subtitleLanguage"),
             createdAt = o.optLong("createdAt", System.currentTimeMillis())
@@ -188,7 +191,7 @@ class ProfileStore(context: Context) {
     fun upsert(profile: CinemaProfile): CinemaProfile {
         val clean = profile.copy(
             name = profile.name.trim().take(24).ifBlank { "Profile" },
-            colorIndex = profile.colorIndex.coerceIn(0, AVATAR_COLORS - 1)
+            avatarIndex = profile.avatarIndex.coerceIn(0, PROFILE_AVATAR_COUNT - 1)
         )
         val existing = _profiles.value.indexOfFirst { it.id == clean.id }
         _profiles.value = if (existing >= 0) {
@@ -201,14 +204,25 @@ class ProfileStore(context: Context) {
         return clean
     }
 
-    fun add(name: String, maturity: MaturityLevel): CinemaProfile = upsert(
+    fun add(
+        name: String,
+        maturity: MaturityLevel,
+        avatarIndex: Int = nextAvatarIndex()
+    ): CinemaProfile = upsert(
         CinemaProfile(
             id = UUID.randomUUID().toString(),
             name = name,
             maturity = maturity,
-            colorIndex = _profiles.value.size % AVATAR_COLORS
+            avatarIndex = avatarIndex
         )
     )
+
+    /** Lowest unused avatar, so a new profile never repeats an existing face. */
+    private fun nextAvatarIndex(): Int {
+        val used = _profiles.value.mapTo(HashSet()) { it.avatarIndex }
+        return (0 until PROFILE_AVATAR_COUNT).firstOrNull { it !in used }
+            ?: _profiles.value.size % PROFILE_AVATAR_COUNT
+    }
 
     /** Removes a profile; the last remaining profile is never deleted. */
     fun remove(id: String): Boolean {
@@ -237,6 +251,5 @@ class ProfileStore(context: Context) {
     companion object {
         private const val KEY_PROFILES = "profiles"
         private const val KEY_ACTIVE = "activeProfile"
-        const val AVATAR_COLORS = 6
     }
 }

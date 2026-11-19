@@ -190,39 +190,6 @@ enum class BufferTier(val label: String, val detail: String) {
     }
 }
 
-/**
- * Disk ceiling for Musicbox's audio cache. These bytes are replayed copies of
- * resolved source links, not downloads: an expired link is resolved again and a
- * track that fell out of the cache streams fresh, so nothing here is a kept file.
- */
-enum class AudioCacheBudget(val label: String, val detail: String, val maxBytes: Long) {
-    OFF(
-        "OFF",
-        "Nothing is kept on disk; every play resolves the addon's source link again.",
-        0L
-    ),
-    MB256(
-        "256 MB",
-        "About 2 hours of 256 kbps audio; the least recently played track is evicted first.",
-        256L * 1024 * 1024
-    ),
-    MB512(
-        "512 MB",
-        "About 4 hours of 256 kbps audio; the least recently played track is evicted first.",
-        512L * 1024 * 1024
-    ),
-    GB1(
-        "1 GB",
-        "About 9 hours of 256 kbps audio; the least recently played track is evicted first.",
-        1024L * 1024 * 1024
-    );
-
-    companion object {
-        fun from(raw: String?): AudioCacheBudget =
-            entries.firstOrNull { it.name == raw } ?: MB512
-    }
-}
-
 enum class DecoderType(val label: String, val detail: String) {
     AUTO("AUTO", "Android picks the decoder, with automatic software fallback"),
     HW("HW", "Standard MediaCodec hardware decoding"),
@@ -523,21 +490,6 @@ data class AppSettings(
     val normalizeVolume: Boolean = true,
     val clearCacheOnExit: Boolean = false,
     val uiSounds: Boolean = true,
-    /**
-     * Musicbox auto-skips community-marked non-music sections of music videos
-     * (`music_offtopic` from SponsorBlock). Off keeps every second of the track.
-     */
-    val sponsorBlock: Boolean = true,
-    /** Disk ceiling for Musicbox's replay cache; OFF streams every play fresh. */
-    val audioCacheBudget: AudioCacheBudget = AudioCacheBudget.MB512,
-    /** The metadata-only CHARTS band above the addon catalogs. */
-    val musicCharts: Boolean = true,
-    val musicChartSource: String = ChartSource.APPLE.name,
-    /** ISO 3166-1 alpha-2 storefront; blank follows the device's own country. */
-    val musicChartCountry: String = "",
-    val musicChartGenre: String = ANY_GENRE_ID,
-    /** Key for the YouTube Data API; blank hides the YouTube chart source. */
-    val youtubeApiKey: String = "",
     val playerUserAgent: PlayerUaPreset = PlayerUaPreset.DEFAULT,
     val dnsMode: DnsMode = DnsMode.SYSTEM,
     val customDnsServers: List<String> = emptyList(),
@@ -636,11 +588,6 @@ data class AppSettings(
             externalVodPlayer = externalVodPlayer.trim(),
             contentLanguage = cleanLanguage,
             contentCountry = ContentCountry.from(contentCountry).code,
-            // Stored names that no catalogue can honour fall back to the defaults.
-            musicChartSource = ChartSelection.source(musicChartSource).name,
-            musicChartCountry = ChartCountries.find(musicChartCountry)?.code.orEmpty(),
-            musicChartGenre = ChartSelection.genre(musicChartGenre).id,
-            youtubeApiKey = youtubeApiKey.trim(),
             // Filtering by an unset language would erase every shelf.
             languageRule = if (cleanLanguage.isBlank()) LanguageRule.PREFER
             else LanguageRule.from(languageRule.name)
@@ -671,13 +618,6 @@ data class AppSettings(
         put("normalizeVolume", normalizeVolume)
         put("clearCacheOnExit", clearCacheOnExit)
         put("uiSounds", uiSounds)
-        put("sponsorBlock", sponsorBlock)
-        put("audioCacheBudget", audioCacheBudget.name)
-        put("musicCharts", musicCharts)
-        put("musicChartSource", musicChartSource)
-        put("musicChartCountry", musicChartCountry)
-        put("musicChartGenre", musicChartGenre)
-        put("youtubeApiKey", youtubeApiKey)
         put("playerUserAgent", playerUserAgent.name)
         put("dnsMode", dnsMode.name)
         put("customDnsServers", JSONArray(customDnsServers))
@@ -734,13 +674,6 @@ data class AppSettings(
                 normalizeVolume = o.optBoolean("normalizeVolume", true),
                 clearCacheOnExit = o.optBoolean("clearCacheOnExit", false),
                 uiSounds = o.optBoolean("uiSounds", true),
-                sponsorBlock = o.optBoolean("sponsorBlock", true),
-                audioCacheBudget = AudioCacheBudget.from(o.stringOrNull("audioCacheBudget")),
-                musicCharts = o.optBoolean("musicCharts", true),
-                musicChartSource = o.optString("musicChartSource", ChartSource.APPLE.name),
-                musicChartCountry = o.optString("musicChartCountry"),
-                musicChartGenre = o.optString("musicChartGenre", ANY_GENRE_ID),
-                youtubeApiKey = o.optString("youtubeApiKey"),
                 playerUserAgent = PlayerUaPreset.from(o.stringOrNull("playerUserAgent")),
                 dnsMode = DnsMode.from(o.stringOrNull("dnsMode")),
                 customDnsServers = customDns,

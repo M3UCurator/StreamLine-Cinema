@@ -92,9 +92,7 @@ data class AddonManifest(
     val idPrefixes: List<String>?,
     val catalogs: List<AddonCatalog> = emptyList(),
     /** Provider artwork declared by the manifest (`logo`). */
-    val logo: String? = null,
-    /** Optional focus marker; music addons send `music` here. */
-    val contentType: String? = null
+    val logo: String? = null
 ) {
     val supportsStreams: Boolean
         get() = hasResource("stream")
@@ -137,8 +135,7 @@ data class AddonManifest(
             }.orEmpty(),
             logo = o.stringOrNull("logo")?.takeIf {
                 it.startsWith("http://") || it.startsWith("https://")
-            },
-            contentType = o.stringOrNull("contentType")
+            }
         )
 
         private fun parseCatalogExtras(entry: JSONObject): List<CatalogExtra> {
@@ -303,6 +300,22 @@ data class StreamItem(
         private val ASPECT_PAIRS = setOf(16 to 9, 16 to 10, 21 to 9, 4 to 3)
         private val SEASON_PATTERN = Regex("""\bSeason\s*(\d{1,2})\b""", RegexOption.IGNORE_CASE)
         private val UNPARSED_EPISODE = Regex("""\b(?:Ep|Episode)\.?\s*\d{1,3}\b""", RegexOption.IGNORE_CASE)
+
+        /**
+         * Where the first season/episode or season-pack marker starts in [label].
+         * Everything before it is what the label claims as the show, so callers
+         * that compare show names can stop reading at this index.
+         */
+        fun episodeMarkerStart(label: String): Int? {
+            val matches = (EPISODE_RANGE_PATTERNS + EPISODE_PATTERNS + listOf(SEASON_PATTERN))
+                .mapNotNull { pattern ->
+                    pattern.find(label)?.takeUnless {
+                        pattern === ASPECT_LIKE_PATTERN &&
+                            (it.groupValues[1].toIntOrNull() to it.groupValues[2].toIntOrNull()) in ASPECT_PAIRS
+                    }
+                }
+            return matches.minByOrNull { it.range.first }?.range?.first
+        }
 
         fun fromJson(o: JSONObject) = StreamItem(
             name = o.stringOrNull("name"),
@@ -629,6 +642,62 @@ object StremioAddons {
         return mismatched
     }
 
+    /**
+     * True when a series source's own text names a different show than [title].
+     *
+     * A series label carries the show before its season/episode marker and the
+     * episode title after it: `The.Office.US.S03E04.The.Coup.1080p` claims "The
+     * Office US" and nothing from `S03E04` on is read. Segments before the
+     * marker are alternate-title claims as well, so `Show - S03E04` and
+     * `Show - The Coup - S03E04` both claim "Show". Region tags, release words
+     * and a year sit in these labels without naming a different show, and a
+     * label with no marker makes no claim at all.
+     */
+    fun streamNamesAnotherShow(stream: StreamItem, title: String): Boolean {
+        val expected = titleWords(title) ?: return false
+        var mismatched = false
+        for (text in stream.titleTexts()) {
+            val cleaned = DOMAIN.replace(URL_TEXT.replace(text, " "), " ")
+            for (claim in showClaims(cleaned)) {
+                if (claim.matchesShow(expected)) return false
+                if (claim.namesAnotherShow(expected)) mismatched = true
+            }
+        }
+        return mismatched
+    }
+
+    /** What the words before the first season/episode marker claim as the show. */
+    private fun showClaims(text: String): List<List<String>> {
+        val segments = TITLE_SEGMENTS.split(text)
+        val marked = segments.indexOfFirst { StreamItem.episodeMarkerStart(it) != null }
+        if (marked < 0) return emptyList()
+        return segments.subList(0, marked + 1).mapNotNull { segment ->
+            val cut = StreamItem.episodeMarkerStart(segment) ?: segment.length
+            titleWords(segment.substring(0, cut))
+        }
+    }
+
+    private fun List<String>.matchesShow(expected: List<String>): Boolean {
+        if (isEmpty() || expected.isEmpty()) return false
+        if (this == expected) return true
+        val start = indexOfSlice(expected)
+        if (start < 0) return false
+        val before = subList(0, start)
+        val after = subList(start + expected.size, size)
+        return before.all { it in SHOW_NOISE } &&
+            after.all { it in SHOW_NOISE || YEAR_WORD.matches(it) }
+    }
+
+    /**
+     * A claim of two or more readable words, in the requested title's script,
+     * that is not the requested title. Region tags, release words and a year
+     * are label furniture rather than words of a show name.
+     */
+    private fun List<String>.namesAnotherShow(expected: List<String>): Boolean {
+        val meaningful = filterNot { it in SHOW_NOISE || YEAR_WORD.matches(it) }
+        return meaningful.size >= 2 && scriptOf(meaningful) == scriptOf(expected)
+    }
+
     /** The text a source publishes about itself: tag lines, release line, filename. */
     private fun StreamItem.titleTexts(): List<String> = listOfNotNull(
         name,
@@ -674,6 +743,18 @@ object StremioAddons {
         "torrent", "download", "magnet", "sub", "subs", "subbed", "dubbed",
         "hindi", "tamil", "telugu", "malayalam", "kannada", "english",
         "french", "spanish", "german", "italian", "japanese", "korean", "russian"
+    )
+
+    /**
+     * Region tags that separate same-name remakes but name no show themselves,
+     * so `The.Office.US.S01E01` is not a different show from "The Office".
+     */
+    private val REGION_MARKERS = setOf("us", "usa", "gb", "uk", "au", "ca", "nz", "ie", "eu", "latam")
+
+    /** Series labels also carry edition and collection words around the name. */
+    private val SHOW_NOISE = TITLE_NOISE + REGION_MARKERS + setOf(
+        "complete", "proper", "repack", "extended", "uncut", "remastered",
+        "restored", "series", "collection", "anthology", "edition", "limited", "mini"
     )
     private val LEADING_ARTICLES = setOf("the", "a", "an")
     private val LETTER_OR_DIGIT = Regex("""[\p{L}\p{N}]+""")
@@ -1080,26 +1161,6 @@ object StremioAddons {
         // FayaTV repeats the same channel several times in one catalog; duplicate
         // ids also collide as Compose list keys.
         }.distinctBy { it.id }
-    }
-
-    /** Music catalogs share the `/catalog/...` path; only the meta shape differs. */
-    suspend fun fetchMusicCatalog(
-        baseUrl: String,
-        type: String,
-        catalogId: String,
-        extras: Map<String, String> = emptyMap(),
-        skip: Int = 0,
-        addonName: String = "",
-        idPrefixes: List<String> = emptyList()
-    ): List<MusicTrack> {
-        val url = catalogUrl(baseUrl, type, catalogId, extras, skip) ?: return emptyList()
-        return MusicMeta.parseCatalog(
-            getText(url, MAX_RESOURCE_BYTES),
-            baseUrl,
-            addonName,
-            type,
-            idPrefixes
-        )
     }
 
     private fun baseBuilder(baseUrl: String): okhttp3.HttpUrl? {

@@ -1,4 +1,48 @@
-# StreamLine Cinema v12.114
+# StreamLine Cinema v12.116
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.116 — a black start screen, a clean OSD and an EQ that never stops the film
+
+Three viewer-reported defects, fixed at the cause rather than hidden behind styling.
+
+- **Pristine black splash.** The start screen drew a full-screen canvas with a faint gold halo and two 1 px white rules above and below the lockup; at TV viewing distance they read as seams. The canvas is gone, the backdrop is pure `#000000`, and the tile, wordmark and rule settle onto black with nothing behind them. The dead backdrop field left the timeline, so the animation beats are unchanged and still covered by `SplashTimelineTest`.
+- **No rectangle behind the OSD panels.** Compose sizes a dialog window to its content, so the scrim behind the Playback options sheet and the Visuals & audio panel only covered the panel and left a dark rectangle floating over the film. The dialog window is now full-screen with a transparent decor and the platform dim cleared, so the app's own scrim is the only dim and it covers the whole frame.
+- **Changing the equalizer no longer stops playback.** The OSD used the device `Equalizer` and `LoudnessEnhancer` effects on the player's audio session; on TV-class audio HALs re-enabling that effect tears the output down and stalls the film. Tone and boost now run as Media3 `AudioProcessor`s on float PCM inside the sink — a ten-band peaking-biquad EQ and linear makeup gain — so a preset tap or band nudge lands on the next buffer and never touches the audio session, the track, or the player. Multichannel and downmix keep their existing order, and encoded passthrough stays withdrawn as it already was whenever the normalizer runs. The panel also states that bands and boost shape the built-in player's audio only; VLC and MPV play the track untouched.
+
+## Verified on 12.116
+
+- `./gradlew :app:testDebugUnitTest` — green, including the retuned splash timeline suite.
+- On emulator-5554 with the production build: the splash is edge-to-edge black with no lines; the Playback options sheet and the Visuals & audio panel dim the whole frame with no block behind them; switching the preset from Cinema to Flat mid-film kept playback running (playhead 02:37 → 04:33 → 05:24, AudioFlinger active, no player errors) and the sheet then read `100% · Flat`.
+- `./gradlew :app:assembleRelease -PallAbis=true -PcinemaIteration=12.116` and `-PcinemaIteration=12.116` — both BUILD SUCCESSFUL; `aapt dump badging` reports `versionCode 120116` / `versionName 12.116`. Dex check: `DebugPlayActivity` 0, `LoudnessEnhancer` and `android/media/audiofx/Equalizer` 0, `EqAudioProcessor` present. The all-ABI build installed over 12.115 on emulator-5554 with app data kept and cold-started clean.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema191126v12.116.apk` | `armeabi-v7a` (TV boxes) | 77,282,647 bytes | `17c33ff60a1c8971339432420945909f4b232b6d13e57fb766bf8f6a8a9f475a` |
+| `Cinema191126v12.116-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 330,481,310 bytes | `996050da7c6ff5aab6b845097722c0750492f25c39106a29dcc70d0e580a0462` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema191126v12.116.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.114 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

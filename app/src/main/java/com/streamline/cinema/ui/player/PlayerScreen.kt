@@ -5,8 +5,7 @@ import android.app.ActivityManager
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
-import android.media.audiofx.Equalizer
-import android.media.audiofx.LoudnessEnhancer
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
@@ -15,6 +14,7 @@ import android.util.Log
 import android.util.Rational
 import android.view.KeyEvent
 import android.view.ViewGroup
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -83,6 +83,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -96,6 +97,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.AudioAttributes
@@ -181,7 +183,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 private enum class AspectMode(
     val label: String,
@@ -528,11 +529,14 @@ fun PlayerScreen(
     var volumePercent by remember { mutableIntStateOf(100) }
     var nightMode by remember { mutableStateOf(false) }
     var eqPreset by remember { mutableIntStateOf(0) }
-    // Applied per hardware band, in the 0–63 preset scale. Loading a preset
-    // rewrites the list; nudging a slider marks the curve custom.
-    var eqLevels by remember { mutableStateOf<List<Int>>(emptyList()) }
-    var eqBandLabels by remember { mutableStateOf<List<String>>(emptyList()) }
+    // Ten fixed bands in the 0–63 preset scale. Loading a preset rewrites the
+    // list; nudging a band marks the curve custom.
+    var eqLevels by remember { mutableStateOf(presetLevels(WinampEqPreset.AllPresets.first())) }
     var eqCustom by remember { mutableStateOf(false) }
+    // The audio sink reads these snapshots on every buffer, so tone and boost
+    // edits never re-create an effect, a player, or an audio session.
+    val eqState = remember { EqState() }
+    val gainState = remember { GainState() }
     // Captions start off for every title: Media3 otherwise auto-selects the
     // first embedded text track and burns it over the opening frame. The
     // profile's subtitle language only biases which track a later caption
@@ -868,7 +872,9 @@ fun PlayerScreen(
                 isLive = isLive,
                 drm = playbackDrm,
                 subtitlesDisabled = dropSubtitles,
-                subtitleLanguage = preferredSubtitleLanguage(activeProfile)
+                subtitleLanguage = preferredSubtitleLanguage(activeProfile),
+                eqState = eqState,
+                gainState = gainState
             )
         } else {
             null
@@ -1332,7 +1338,6 @@ fun PlayerScreen(
     var liveNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var audioAudit by remember { mutableStateOf<AudioAudit?>(null) }
     var videoPixelSize by remember { mutableStateOf(IntSize.Zero) }
-    var audioSession by remember { mutableIntStateOf(0) }
     var isScrubbing by remember { mutableStateOf(false) }
     var scrubFraction by remember { mutableFloatStateOf(0f) }
     var wasPlayingBeforeScrub by remember { mutableStateOf(false) }
@@ -1620,10 +1625,6 @@ fun PlayerScreen(
                 // VLC only creates its video output once a frame is decoded,
                 // which is often after the ES-selected Tracks update.
                 syncFrameRate()
-            }
-
-            override fun onAudioSessionIdChanged(audioSessionId: Int) {
-                audioSession = if (audioSessionId > 0) audioSessionId else 0
             }
         }
         target.addListener(listener)
@@ -2716,42 +2717,25 @@ fun PlayerScreen(
         }
     }
 
-    var equalizer by remember { mutableStateOf<Equalizer?>(null) }
-    var loudness by remember { mutableStateOf<LoudnessEnhancer?>(null) }
-    DisposableEffect(playerOrNull, audioSession) {
-        if (playerOrNull != null && audioSession > 0) {
-            equalizer = runCatching { Equalizer(0, audioSession) }.getOrNull()
-            loudness = runCatching { LoudnessEnhancer(audioSession) }.getOrNull()
-        }
-        onDispose {
-            runCatching { equalizer?.release() }
-            runCatching { loudness?.release() }
-            equalizer = null
-            loudness = null
-        }
-    }
-    LaunchedEffect(equalizer) {
-        val engine = equalizer ?: return@LaunchedEffect
-        eqBandLabels = bandLabels(engine)
-        eqLevels = presetLevels(engine, WinampEqPreset.AllPresets[eqPreset])
-    }
-    LaunchedEffect(equalizer, eqLevels, eqPreset) {
+    LaunchedEffect(eqState, eqLevels, eqPreset) {
         val preset = WinampEqPreset.AllPresets.getOrElse(eqPreset) { WinampEqPreset.Cinema }
-        applyEqualizer(equalizer, eqLevels, preset.preamp)
+        eqState.update(
+            FloatArray(eqLevels.size) { index ->
+                val shifted = (eqLevels[index] + preset.preamp - EQ_NEUTRAL_LEVEL)
+                    .coerceIn(0, EQ_MAX_LEVEL)
+                winampLevelToDb(shifted)
+            }
+        )
     }
-    // 0–100% attenuates the player output; 100–200% stays at unity gain and
-    // adds loudness compensation for quiet film mixes. Applying both keeps the
-    // slider usable on TVs whose system volume step is too coarse for movies.
+    // 0–100% attenuates the player output; 100–200% adds makeup gain for quiet
+    // film mixes. Both run inside the sink's processor chain. Applying both
+    // keeps the slider usable on TVs whose system volume step is too coarse.
     LaunchedEffect(playerOrNull, volumePercent) {
         playerOrNull?.volume = (volumePercent.coerceIn(0, 200) / 100f).coerceAtMost(1f)
     }
-    LaunchedEffect(loudness, volumePercent, nightMode) {
-        val enhancer = loudness ?: return@LaunchedEffect
-        runCatching {
-            val gain = ((volumePercent - 100).coerceAtLeast(0)) * 10
-            enhancer.setTargetGain(if (nightMode) gain / 2 else gain)
-            enhancer.enabled = gain > 0
-        }
+    LaunchedEffect(gainState, volumePercent, nightMode) {
+        val gainDb = ((volumePercent - 100).coerceAtLeast(0)) / 10f
+        gainState.update(if (nightMode) gainDb / 2f else gainDb)
     }
 
     val tintAlpha = (((1f - contrast) * 0.35f) + ((1f - saturation) * 0.25f)).coerceIn(0f, 0.55f)
@@ -3704,36 +3688,34 @@ fun PlayerScreen(
                                     onClick = {
                                         eqPreset = index
                                         eqCustom = false
-                                        eqLevels = equalizer
-                                            ?.let { presetLevels(it, preset) }
-                                            ?: eqLevels
+                                        eqLevels = presetLevels(preset)
                                     }
                                 )
                             }
                         }
                     }
-                    if (eqBandLabels.isEmpty()) {
+                    SectionRow(if (eqCustom) "Bands · custom" else "Bands")
+                    EQ_BAND_LABELS.forEachIndexed { index, bandLabel ->
+                        EqBandRow(
+                            label = bandLabel,
+                            level = eqLevels.getOrElse(index) { EQ_NEUTRAL_LEVEL },
+                            onAdjust = { delta ->
+                                eqCustom = true
+                                eqLevels = EQ_BAND_LABELS.indices.map { band ->
+                                    val current = eqLevels.getOrElse(band) { EQ_NEUTRAL_LEVEL }
+                                    val next = if (band == index) current + delta else current
+                                    next.coerceIn(0, EQ_MAX_LEVEL)
+                                }
+                            }
+                        )
+                    }
+                    if (playerOrNull != null && playerOrNull !is ExoPlayer) {
                         Text(
-                            "Band sliders are unavailable on this device's audio output.",
+                            "Bands and boost shape the built-in player's audio; " +
+                                "VLC and MPV play the track untouched.",
                             color = Cinema.TextMuted,
                             fontSize = 10.sp
                         )
-                    } else {
-                        SectionRow(if (eqCustom) "Bands · custom" else "Bands")
-                        eqBandLabels.forEachIndexed { index, bandLabel ->
-                            EqBandRow(
-                                label = bandLabel,
-                                level = eqLevels.getOrElse(index) { EQ_NEUTRAL_LEVEL },
-                                onAdjust = { delta ->
-                                    eqCustom = true
-                                    eqLevels = eqBandLabels.indices.map { band ->
-                                        val current = eqLevels.getOrElse(band) { EQ_NEUTRAL_LEVEL }
-                                        val next = if (band == index) current + delta else current
-                                        next.coerceIn(0, EQ_MAX_LEVEL)
-                                    }
-                                }
-                            )
-                        }
                     }
                     StepperRow(
                         label = "Volume / boost",
@@ -3743,7 +3725,7 @@ fun PlayerScreen(
                     )
                     Text(
                         "100% is unity gain. Below that the player output is attenuated; " +
-                            "above it the loudness enhancer lifts quiet film dialogue.",
+                            "above it makeup gain lifts quiet film dialogue.",
                         color = Cinema.TextMuted,
                         fontSize = 10.sp
                     )
@@ -3769,9 +3751,7 @@ fun PlayerScreen(
                                 nightMode = false
                                 eqPreset = 0
                                 eqCustom = false
-                                eqLevels = equalizer
-                                    ?.let { presetLevels(it, WinampEqPreset.Cinema) }
-                                    ?: eqLevels
+                                eqLevels = presetLevels(WinampEqPreset.Cinema)
                             }
                         )
                     }
@@ -4248,6 +4228,24 @@ private fun OsdPanelDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        // Compose sizes the dialog window to its content height, so the scrim
+        // behind the panel only covered the panel and left a dark rectangle
+        // over the film. Force the window to the whole screen, drop the
+        // platform dim (the scrim is ours) and make the decor transparent.
+        val dialogWindow = runCatching {
+            (LocalView.current.parent as? DialogWindowProvider)?.window
+        }.getOrNull()
+        DisposableEffect(dialogWindow) {
+            dialogWindow?.let { window ->
+                window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+                window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                window.setLayout(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT
+                )
+            }
+            onDispose { }
+        }
         Box(
             Modifier
                 .fillMaxSize()
@@ -4505,7 +4503,9 @@ private fun buildPlayer(
     isLive: Boolean,
     drm: DrmConfig? = null,
     subtitlesDisabled: Boolean = false,
-    subtitleLanguage: String? = null
+    subtitleLanguage: String? = null,
+    eqState: EqState,
+    gainState: GainState
 ): BuiltPlayer {
     // Native engines take their caches and request headers as constructor
     // arguments, which is why both sit in the profile's rebuild key for VLC
@@ -4546,7 +4546,9 @@ private fun buildPlayer(
         profile = profile,
         drm = drm,
         subtitlesDisabled = subtitlesDisabled,
-        subtitleLanguage = subtitleLanguage
+        subtitleLanguage = subtitleLanguage,
+        eqState = eqState,
+        gainState = gainState
     )
 }
 
@@ -4627,7 +4629,9 @@ private fun buildExoPlayer(
     profile: PlaybackProfile,
     drm: DrmConfig? = null,
     subtitlesDisabled: Boolean = false,
-    subtitleLanguage: String? = null
+    subtitleLanguage: String? = null,
+    eqState: EqState,
+    gainState: GainState
 ): BuiltPlayer {
     CinemaRenderersFactory.logFfmpegAvailability()
     Log.i(
@@ -4734,7 +4738,9 @@ private fun buildExoPlayer(
     val renderersFactory = CinemaRenderersFactory(
         context,
         downmixStereo = profile.downmixStereo,
-        normalizeVolume = profile.normalizeVolume
+        normalizeVolume = profile.normalizeVolume,
+        eq = eqState,
+        gain = gainState
     )
         // HW is the only strict mode: no software fallback when the pinned
         // hardware decoder refuses the stream. HW+ keeps the fallback.
@@ -4899,44 +4905,8 @@ private fun buildTrackChoices(
     }
 }
 
-private fun applyEqualizer(equalizer: Equalizer?, levels: List<Int>, preamp: Int) {
-    val engine = equalizer ?: return
-    if (levels.isEmpty()) return
-    runCatching {
-        val range = engine.bandLevelRange
-        val min = range[0].toInt()
-        val max = range[1].toInt()
-        levels.forEachIndexed { index, level ->
-            val shifted = (level + preamp - EQ_NEUTRAL_LEVEL).coerceIn(0, EQ_MAX_LEVEL)
-            val millibels = (winampLevelToDb(shifted) * 100).roundToInt().coerceIn(min, max)
-            engine.setBandLevel(index.toShort(), millibels.toShort())
-        }
-        engine.enabled = preamp != EQ_NEUTRAL_LEVEL || levels.any { it != EQ_NEUTRAL_LEVEL }
-    }
-}
-
-/** Centre frequencies of the device's equalizer bands, in Hz. */
-private fun bandCenters(engine: Equalizer): List<Float> {
-    val bands = runCatching { engine.numberOfBands.toInt() }.getOrDefault(0)
-    val centers = (0 until bands).map { band ->
-        runCatching { engine.getCenterFreq(band.toShort()) / 1000f }.getOrDefault(0f)
-    }
-    return if (centers.any { it <= 0f }) emptyList() else centers
-}
-
-private fun presetLevels(engine: Equalizer, preset: WinampEqPreset): List<Int> =
-    bandCenters(engine).map(preset::levelAt)
-
-private fun bandLabels(engine: Equalizer): List<String> = bandCenters(engine).map { hz ->
-    when {
-        hz < 1000f -> "${hz.roundToInt()} Hz"
-        else -> {
-            val khz = hz / 1000f
-            if (khz % 1f == 0f) "${khz.roundToInt()} kHz"
-            else String.format(Locale.US, "%.1f kHz", khz)
-        }
-    }
-}
+/** Preset level for every band of the fixed ten-band curve. */
+private fun presetLevels(preset: WinampEqPreset): List<Int> = EQ_BAND_HZ.map(preset::levelAt)
 
 private fun captionStyle(index: Int): CaptionStyleCompat = when (index) {
     1 -> CaptionStyleCompat(

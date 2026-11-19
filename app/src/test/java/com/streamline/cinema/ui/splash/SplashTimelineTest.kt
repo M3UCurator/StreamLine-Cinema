@@ -26,7 +26,6 @@ class SplashTimelineTest {
     @Test
     fun startsBlackAndSettlesBeforeTheHold() {
         val start = SplashTimeline.frame(0)
-        assertEquals(0f, start.backdrop, delta)
         assertEquals(0f, start.tileAlpha, delta)
         assertEquals(0f, start.glyph, delta)
         assertEquals(0f, start.wordmarkAlpha, delta)
@@ -34,7 +33,6 @@ class SplashTimelineTest {
         assertEquals(0f, start.rule, delta)
 
         val settled = SplashTimeline.frame(SplashTimeline.INTRO_MS)
-        assertEquals(1f, settled.backdrop, delta)
         assertEquals(1f, settled.tileAlpha, delta)
         assertEquals(1f, settled.tileScale, delta)
         assertEquals(1f, settled.glyph, delta)

@@ -27,7 +27,7 @@ Requirements: JDK 17+ (Android Studio JBR works), Android SDK with platform 37, 
 ./gradlew assembleRelease -PallAbis=true
 ```
 
-`assembleRelease` also copies its output to the workspace root as `Cinema<ddMMyy>v<iteration>[-allabis].apk`, where `ddMMyy` is the build date and `<iteration>` defaults to `12.114` in `app/build.gradle.kts` (bump it per release with `-PcinemaIteration=<next>`). The iteration also sets `versionName` and derives `versionCode` (`major * 10000 + minor`, so 12.83 → 120083), which is what the in-app updater compares against GitHub release tags.
+`assembleRelease` also copies its output to the workspace root as `Cinema<ddMMyy>v<iteration>[-allabis].apk`, where `ddMMyy` is the build date and `<iteration>` defaults to `12.116` in `app/build.gradle.kts` (bump it per release with `-PcinemaIteration=<next>`). The iteration also sets `versionName` and derives `versionCode` (`major * 10000 + minor`, so 12.83 → 120083), which is what the in-app updater compares against GitHub release tags.
 
 Output:
 
@@ -37,7 +37,7 @@ app/build/outputs/apk/release/app-release.apk
 Cinema<ddMMyy>v<iteration>[-allabis].apk
 ```
 
-`assembleRelease` signs with `~/.android/debug.keystore` through the `release` `signingConfig`, so the result is a complete v1+v2 signed package instead of an unsigned one the installer rejects. Point `signingConfigs.release` at your own keystore when you distribute it. The default release contains only `lib/armeabi-v7a`; `-PallAbis=true` drops that filter for emulator testing only, so the production APK stays 32-bit. The current pair is `Cinema181126v12.114.apk` (32-bit) and `Cinema181126v12.114-allabis.apk`.
+`assembleRelease` signs with `~/.android/debug.keystore` through the `release` `signingConfig`, so the result is a complete v1+v2 signed package instead of an unsigned one the installer rejects. Point `signingConfigs.release` at your own keystore when you distribute it. The default release contains only `lib/armeabi-v7a`; `-PallAbis=true` drops that filter for emulator testing only, so the production APK stays 32-bit. The current pair is `Cinema191126v12.116.apk` (32-bit) and `Cinema191126v12.116-allabis.apk`.
 
 The APK contains only `lib/armeabi-v7a` (plus pure-Java Compose/Media3 code), so it installs on 32-bit Android TV boxes:
 

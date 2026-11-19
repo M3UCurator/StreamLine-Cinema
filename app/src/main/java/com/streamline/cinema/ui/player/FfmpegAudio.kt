@@ -30,13 +30,18 @@ import androidx.media3.exoplayer.video.VideoRendererEventListener
  * - When [downmixStereo] is set every track wider than two channels is folded
  *   to stereo with constant-power matrices.
  * - When [normalizeVolume] is set every decoded track runs through an
- *   acompressor-style loudness normalizer. Both processors need PCM, so
- *   encoded passthrough is withdrawn whenever either is enabled.
+ *   acompressor-style loudness normalizer.
+ * - The tone curve ([eq]) and the volume/boost gain ([gain]) always run as
+ *   processors: the OSD edits plain float snapshots, so moving a band or the
+ *   boost cannot touch the audio session or the device effect chain. Every
+ *   processor needs PCM, so encoded passthrough is withdrawn.
  */
 internal class CinemaRenderersFactory(
     context: Context,
     private val downmixStereo: Boolean,
-    private val normalizeVolume: Boolean
+    private val normalizeVolume: Boolean,
+    private val eq: EqState,
+    private val gain: GainState
 ) : DefaultRenderersFactory(context) {
 
     init {
@@ -48,22 +53,20 @@ internal class CinemaRenderersFactory(
         enableFloatOutput: Boolean,
         enableAudioTrackPlaybackParams: Boolean
     ): androidx.media3.exoplayer.audio.AudioSink {
-        if (!downmixStereo && !normalizeVolume) {
-            return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
-                ?: DefaultAudioSink.Builder(context).build()
-        }
         val processors = ArrayList<AudioProcessor>()
         if (downmixStereo) processors += buildDownmixProcessor()
+        // The normalizer, EQ and gain all work on float PCM; the converter is a
+        // no-op when the sink already delivers float.
+        processors += ToFloatPcmAudioProcessor()
         if (normalizeVolume) {
             Log.i(TAG, "Volume normalizer active · acompressor curve · -18 dB threshold · 4:1 · 6 dB makeup")
-            // The normalizer works on float PCM; the converter is a no-op when
-            // the sink already delivers float.
-            processors += ToFloatPcmAudioProcessor()
             processors += NormalizerAudioProcessor()
-            // The sink's own processors (silence skipping) only accept 16-bit,
-            // so the chain drops back to 16-bit after the normalizer.
-            processors += ToInt16PcmAudioProcessor()
         }
+        processors += EqAudioProcessor(eq)
+        processors += GainAudioProcessor(gain)
+        // The sink's own processors (silence skipping) only accept 16-bit,
+        // so the chain drops back to 16-bit after the shaping stage.
+        processors += ToInt16PcmAudioProcessor()
         return DefaultAudioSink.Builder(context)
             .setAudioProcessors(processors.toTypedArray())
             // Both processors need decoded PCM, so encoded passthrough is

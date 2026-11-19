@@ -38,7 +38,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import com.streamline.cinema.ui.Cinema
-import kotlin.math.min
 
 /**
  * Start screen drawn entirely in Compose: the brand tile wipes in, the play
@@ -68,40 +67,9 @@ fun SplashScreen(onFinished: () -> Unit, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(Cinema.Ink),
+            .background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val haloCenter = Offset(size.width / 2f, size.height * 0.44f)
-            val haloRadius = min(size.width, size.height) * 0.62f
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colors = listOf(
-                        Cinema.Gold.copy(alpha = 0.13f * frame.backdrop),
-                        Color.Transparent
-                    ),
-                    center = haloCenter,
-                    radius = haloRadius
-                ),
-                radius = haloRadius,
-                center = haloCenter
-            )
-            val seam = size.width * 0.32f * frame.backdrop
-            val seamAlpha = Color.White.copy(alpha = 0.05f * frame.backdrop)
-            drawLine(
-                color = seamAlpha,
-                start = Offset((size.width - seam) / 2f, haloCenter.y - haloRadius * 0.52f),
-                end = Offset((size.width + seam) / 2f, haloCenter.y - haloRadius * 0.52f),
-                strokeWidth = 1f
-            )
-            drawLine(
-                color = seamAlpha,
-                start = Offset((size.width - seam) / 2f, haloCenter.y + haloRadius * 0.52f),
-                end = Offset((size.width + seam) / 2f, haloCenter.y + haloRadius * 0.52f),
-                strokeWidth = 1f
-            )
-        }
-
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.offset(y = (-14).dp)

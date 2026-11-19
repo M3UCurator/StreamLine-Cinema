@@ -13,7 +13,6 @@ object SplashTimeline {
 
     /** A single sampled frame. All alphas are 0..1, rises are 0 (settled)..1 (start). */
     data class Frame(
-        val backdrop: Float,
         val tileAlpha: Float,
         val tileScale: Float,
         val glyph: Float,
@@ -27,8 +26,6 @@ object SplashTimeline {
 
     // Beat sheet, all inside the intro. The last motion settles at 4.9 s so the
     // lockup is completely still for the intro's final beat and the whole hold.
-    private const val BACKDROP_START = 0L
-    private const val BACKDROP_END = 700L
     private const val TILE_START = 150L
     private const val TILE_FADE_END = 900L
     private const val TILE_SCALE_END = 1_000L
@@ -46,7 +43,6 @@ object SplashTimeline {
     fun frame(elapsedMs: Long): Frame {
         val t = elapsedMs.coerceIn(0L, TOTAL_MS)
         return Frame(
-            backdrop = smooth(BACKDROP_START, BACKDROP_END, t),
             tileAlpha = smooth(TILE_START, TILE_FADE_END, t),
             tileScale = 0.88f + 0.12f * easeOutCubic(progress(TILE_START, TILE_SCALE_END, t)),
             glyph = smooth(GLYPH_START, GLYPH_END, t),

@@ -167,6 +167,7 @@ import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.TvButton
@@ -3152,8 +3153,9 @@ fun PlayerScreen(
                     reconnectLabel,
                     color = Cinema.Gold,
                     fontSize = 13.sp,
+                    lineHeight = 16.sp,
                     modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+                        .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(CinemaDimens.PillRadius))
                         .padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
@@ -3333,12 +3335,13 @@ fun PlayerScreen(
                 text = hint,
                 color = Cinema.Gold,
                 fontSize = 17.sp,
+                lineHeight = 22.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 48.dp, bottom = 56.dp)
                     .glassSurface(
-                        shape = RoundedCornerShape(CinemaDimens.ControlRadius),
+                        shape = RoundedCornerShape(CinemaDimens.PillRadius),
                         base = Glass.Sheet,
                         sheen = 0.5f
                     )
@@ -4147,7 +4150,7 @@ private fun EqBandRow(label: String, level: Int, onAdjust: (Int) -> Unit) {
                 shape = RoundedCornerShape(CinemaDimens.ControlRadius),
                 focused = focused,
                 base = Glass.Control,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.45f
             )
             .onFocusChanged { focused = it.isFocused }
@@ -4382,7 +4385,7 @@ private fun UnlockButton(
                 )
             }
             .glassSurface(
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(CinemaDimens.PillRadius),
                 focused = holding,
                 base = Color.Black.copy(alpha = 0.55f),
                 tint = if (holding) Glass.AccentWash else Color.Transparent
@@ -5161,11 +5164,12 @@ private fun NextUpCard(
                 "UP NEXT",
                 color = Cinema.Gold,
                 fontSize = 9.sp,
+                lineHeight = 11.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(8.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(5.dp))
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(CinemaDimens.PillRadius))
                     .padding(horizontal = 7.dp, vertical = 3.dp)
             )
             Box(

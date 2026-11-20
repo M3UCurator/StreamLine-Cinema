@@ -1,7 +1,5 @@
 package com.streamline.cinema.ui.screens
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -36,7 +34,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -50,6 +47,7 @@ import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.LocalPosterStyle
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PosterImage
@@ -348,13 +346,11 @@ private fun CurationCard(
     val sounds = LocalUiSounds.current
     val style = LocalPosterStyle.current
     val titleBlock = with(LocalDensity.current) { (style.titleLineHeight * 2).toDp() }
-    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "curationScale")
     val shape = RoundedCornerShape(CinemaDimens.CardRadius)
 
     Column(
         Modifier
             .fillMaxWidth()
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged {
                 focused = it.isFocused
@@ -369,19 +365,20 @@ private fun CurationCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(if (landscape) 16f / 9f else style.aspectRatio)
-                .glassFrame(shape, focused = focused || approved)
+                .glassFrame(shape, focused = focused, scale = FocusScale.CARD)
         ) {
             PosterImage(url = poster, title = title, modifier = Modifier.fillMaxSize())
             Text(
                 text = if (approved) "✓ KIDS" else "+ ADD",
                 color = if (approved) Cinema.Ink else Cinema.TextPrimary,
                 fontSize = 9.sp,
+                lineHeight = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.8.sp,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(7.dp)
-                    .clip(RoundedCornerShape(4.dp))
+                    .clip(RoundedCornerShape(CinemaDimens.PillRadius))
                     .background(if (approved) Cinema.Gold else Color.Black.copy(alpha = 0.72f))
                     .padding(horizontal = 7.dp, vertical = 4.dp)
             )

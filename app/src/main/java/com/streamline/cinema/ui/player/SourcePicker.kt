@@ -53,6 +53,7 @@ import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalUiSounds
@@ -142,7 +143,7 @@ internal fun SourcePicker(
                         if (options.isEmpty()) "NO SOURCES"
                         else "${options.size} ${if (options.size == 1) "SOURCE" else "SOURCES"}",
                         Cinema.Gold,
-                        Cinema.InkSoft
+                        Cinema.PanelRaised
                     )
                 }
                 Spacer(Modifier.height(12.dp))
@@ -297,7 +298,7 @@ private fun ProviderHeader(provider: String, logo: String, count: Int) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        InfoPill("$count", Cinema.TextSecondary, Cinema.InkSoft)
+        InfoPill("$count", Cinema.TextSecondary, Cinema.PanelRaised)
     }
 }
 
@@ -327,7 +328,7 @@ private fun SourceCard(
                 shape = RoundedCornerShape(CinemaDimens.CardRadius),
                 focused = focused,
                 base = if (selected) Glass.Control else Glass.Sheet,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.85f
             )
             .onFocusChanged {
@@ -355,7 +356,7 @@ private fun SourceCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
                 )
-                if (selected) InfoPill("PLAYING", Cinema.Ink, Cinema.Gold)
+                if (selected) InfoPill("PLAYING", Cinema.Ink, Cinema.Gold, solid = true)
             }
             if (meta.subhead.isNotBlank()) {
                 Text(

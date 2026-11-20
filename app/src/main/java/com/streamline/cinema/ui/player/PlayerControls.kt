@@ -1,7 +1,6 @@
 package com.streamline.cinema.ui.player
 
 import android.view.KeyEvent
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -34,7 +33,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
@@ -60,7 +58,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.streamline.cinema.ui.Cinema
-import com.streamline.cinema.ui.glassFrame
+import com.streamline.cinema.ui.CinemaDimens
+import com.streamline.cinema.ui.FocusScale
+import com.streamline.cinema.ui.Glass
+import com.streamline.cinema.ui.glassSurface
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -142,8 +143,13 @@ private fun BackButton(
         modifier = Modifier
             .size(46.dp)
             .focusRequester(focusRequester)
-            .clip(CircleShape)
-            .background(if (focused) Cinema.Gold else Color.White.copy(alpha = 0.08f))
+            .glassSurface(
+                shape = CircleShape,
+                focused = focused,
+                base = Color.White.copy(alpha = 0.08f),
+                scale = FocusScale.ICON,
+                lift = 0.14f
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 onFocusChange(it.isFocused)
@@ -157,7 +163,7 @@ private fun BackButton(
     ) {
         PlayerGlyphIcon(
             glyph = PlayerGlyph.BACK,
-            tint = if (focused) Cinema.Ink else Cinema.TextPrimary,
+            tint = Cinema.TextPrimary,
             size = 22.dp
         )
     }
@@ -516,17 +522,8 @@ private fun DockButton(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.06f else 1f,
-        animationSpec = tween(110),
-        label = "dockScale"
-    )
     val diameter = if (primary) 66.dp else 52.dp
-    val tint = when {
-        focused -> Cinema.Ink
-        active -> Cinema.Gold
-        else -> Cinema.TextPrimary
-    }
+    val tint = if (active) Cinema.Gold else Cinema.TextPrimary
     Box(
         modifier = Modifier
             .padding(horizontal = 4.dp)
@@ -537,20 +534,14 @@ private fun DockButton(
                 leftTarget?.let { left = it }
                 rightTarget?.let { right = it }
             }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                alpha = if (enabled) 1f else 0.32f
-            }
-            .clip(CircleShape)
-            .background(
-                when {
-                    focused -> Cinema.Gold
-                    active -> Cinema.Gold.copy(alpha = 0.16f)
-                    else -> Color.Transparent
-                }
+            .graphicsLayer { alpha = if (enabled) 1f else 0.32f }
+            .glassSurface(
+                shape = CircleShape,
+                focused = focused,
+                base = if (active) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ICON,
+                lift = 0.12f
             )
-            .glassFrame(CircleShape, focused = focused)
             .onFocusChanged {
                 focused = it.isFocused
                 onFocusHint(label, it.isFocused)
@@ -600,12 +591,7 @@ private fun SkipPill(
     modifier: Modifier = Modifier
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.06f else 1f,
-        animationSpec = tween(110),
-        label = "skipPillScale"
-    )
-    val shape = RoundedCornerShape(50)
+    val shape = RoundedCornerShape(CinemaDimens.PillRadius)
     Box(
         modifier = modifier
             .focusRequester(focusRequester)
@@ -615,13 +601,13 @@ private fun SkipPill(
                 left = FocusRequester.Cancel
                 right = FocusRequester.Cancel
             }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .clip(shape)
-            .background(if (focused) Cinema.Gold else Cinema.Gold.copy(alpha = 0.18f))
-            .glassFrame(shape, focused = focused)
+            .glassSurface(
+                shape = shape,
+                focused = focused,
+                base = Glass.AccentWash,
+                scale = FocusScale.PILL,
+                lift = 0.16f
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 onFocusHint(hint, it.isFocused)
@@ -637,7 +623,7 @@ private fun SkipPill(
     ) {
         Text(
             text = text,
-            color = if (focused) Cinema.Ink else Cinema.Gold,
+            color = Cinema.Gold,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
@@ -875,8 +861,12 @@ internal fun OsdMenuRow(
             .fillMaxWidth()
             .heightIn(min = if (compact) 30.dp else 48.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .clip(RoundedCornerShape(9.dp))
-            .background(if (focused) Cinema.Gold else Color.Transparent)
+            .glassSurface(
+                shape = RoundedCornerShape(9.dp),
+                focused = focused,
+                scale = FocusScale.ROW,
+                lift = 0.12f
+            )
             .onFocusChanged { focused = it.isFocused }
             .semantics { role = Role.Button }
             .clickable(
@@ -892,13 +882,13 @@ internal fun OsdMenuRow(
     ) {
         PlayerGlyphIcon(
             glyph = glyph,
-            tint = if (focused) Cinema.Ink else Cinema.TextSecondary,
+            tint = Cinema.TextSecondary,
             size = if (compact) 16.dp else 20.dp
         )
         Spacer(Modifier.width(if (compact) 10.dp else 16.dp))
         Text(
             text = label,
-            color = if (focused) Cinema.Ink else Cinema.TextPrimary,
+            color = Cinema.TextPrimary,
             fontSize = if (compact) 13.sp else 15.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f),
@@ -911,7 +901,7 @@ internal fun OsdMenuRow(
             // width and squeeze names into "I…" in the two-column sheet.
             Text(
                 text = value,
-                color = if (focused) Cinema.Ink.copy(alpha = 0.72f) else Cinema.TextMuted,
+                color = Cinema.TextMuted,
                 fontSize = if (compact) 11.sp else 13.sp,
                 modifier = Modifier.widthIn(max = if (compact) 132.dp else 180.dp),
                 maxLines = 1,
@@ -928,8 +918,12 @@ internal fun InfoRow(label: String, value: String, focusRequester: FocusRequeste
         modifier = Modifier
             .fillMaxWidth()
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .clip(RoundedCornerShape(6.dp))
-            .background(if (focused) Color.White.copy(alpha = 0.06f) else Color.Transparent)
+            .glassSurface(
+                shape = RoundedCornerShape(6.dp),
+                focused = focused,
+                scale = FocusScale.ROW,
+                lift = 0.06f
+            )
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .padding(horizontal = 8.dp, vertical = 3.dp),

@@ -1,7 +1,5 @@
 package com.streamline.cinema.ui
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -29,7 +27,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,21 +65,14 @@ fun MediaCard(
             runCatching { selfFocus.requestFocus() }
         }
     }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.03f else 1f,
-        animationSpec = tween(120),
-        label = "mediaCardScale"
-    )
+    val scale = FocusScale.CARD
     val genreLabel = tmdbGenresMap[media.genreIds.firstOrNull()]
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .zIndex(if (focused) 2f else 0f)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
+            .focusScale(focused, scale)
             .focusRequester(selfFocus)
             .onFocusChanged {
                 focused = it.isFocused
@@ -130,21 +120,13 @@ fun MediaCard(
                 )
             }
             if (media.voteAverage > 0.0) {
-                Text(
+                InfoPill(
                     text = "★ %.1f".format(media.voteAverage),
                     color = Cinema.Gold,
-                    fontSize = style.metaSize,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
+                    background = Color.Black.copy(alpha = 0.55f),
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
-                        .glassSurface(
-                            shape = RoundedCornerShape(CinemaDimens.PillRadius),
-                            base = Color.Black.copy(alpha = 0.42f),
-                            sheen = 0.5f
-                        )
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
                 )
             }
             if (progress != null && progress.fraction > 0f) {

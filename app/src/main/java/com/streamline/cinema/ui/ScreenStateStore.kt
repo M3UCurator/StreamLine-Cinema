@@ -12,10 +12,10 @@ import androidx.compose.runtime.staticCompositionLocalOf
 /**
  * Process-scoped store for scroll positions and screen-local selections.
  *
- * Tab content is disposed by [androidx.compose.animation.AnimatedContent] whenever
- * the viewer leaves a tab, so `rememberScrollState` / `rememberLazy*State` inside a
- * screen would reset on return. Keeping the state objects here lets every screen
- * come back exactly where it was.
+ * Only the active tab is composed, so it is disposed whenever the viewer leaves
+ * it, and `rememberScrollState` / `rememberLazy*State` inside a screen would reset
+ * on return. Keeping the state objects here lets every screen come back exactly
+ * where it was.
  */
 @Stable
 class ScreenStateStore {

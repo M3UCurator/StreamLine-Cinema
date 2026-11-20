@@ -1,8 +1,6 @@
 package com.streamline.cinema.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,7 +46,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -82,6 +79,7 @@ import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.EmptyState
 import com.streamline.cinema.ui.ErrorBanner
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalFocusMemory
@@ -90,7 +88,7 @@ import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.RestoreSurfaceFocus
 import com.streamline.cinema.ui.SelectionGroup
-import com.streamline.cinema.ui.ShimmerBox
+import com.streamline.cinema.ui.SkeletonBox
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.glassFrame
@@ -518,14 +516,14 @@ private fun LiveSkeletonGrid() {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 repeat(5) {
                     Column(Modifier.width(220.dp)) {
-                        ShimmerBox(
+                        SkeletonBox(
                             Modifier
                                 .fillMaxWidth()
                                 .height(124.dp),
                             shape = RoundedCornerShape(8.dp)
                         )
                         Spacer(Modifier.height(8.dp))
-                        ShimmerBox(
+                        SkeletonBox(
                             Modifier
                                 .fillMaxWidth(0.7f)
                                 .height(12.dp),
@@ -559,7 +557,6 @@ private fun ChannelCard(
     val cardFocus = remember { FocusRequester() }
     val posterStyle = LocalPosterStyle.current
     val cardShape = RoundedCornerShape(12.dp)
-    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "channelScale")
 
     LaunchedEffect(focusMemory.restoreTick("live.grid"), channel.key) {
         if (focusMemory.recall("live.grid") == channel.key) {
@@ -571,7 +568,6 @@ private fun ChannelCard(
     Column(
         modifier = Modifier
             .width(posterStyle.channelWidth)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .focusRequester(cardFocus)
             .onKeyEvent { event ->
                 if (!arranging || event.type != KeyEventType.KeyDown) return@onKeyEvent false
@@ -617,7 +613,7 @@ private fun ChannelCard(
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
                 .background(Cinema.Panel)
-                .glassFrame(cardShape, focused = focused)
+                .glassFrame(cardShape, focused = focused, scale = FocusScale.CARD)
         ) {
             PosterImage(
                 url = channel.poster,
@@ -639,15 +635,16 @@ private fun ChannelCard(
             )
             Text(
                 text = if (busy) "TUNING…" else "LIVE",
-                color = if (busy) Cinema.Pinging else Cinema.Ink,
+                color = Cinema.Ink,
                 fontSize = 9.sp,
+                lineHeight = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(if (busy) Cinema.Panel else Cinema.Offline)
+                    .clip(RoundedCornerShape(CinemaDimens.PillRadius))
+                    .background(if (busy) Cinema.Pinging else Cinema.Offline)
                     .padding(horizontal = 6.dp, vertical = 3.dp)
             )
             if (favorite || arranging) {
@@ -673,12 +670,13 @@ private fun ChannelCard(
                     text = "DEAD · ${DEAD_CHANNEL_FAILURES}×",
                     color = Cinema.Offline,
                     fontSize = 9.sp,
+                    lineHeight = 11.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp,
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(start = 8.dp, top = if (favorite || arranging) 40.dp else 8.dp)
-                        .clip(RoundedCornerShape(3.dp))
+                        .clip(RoundedCornerShape(CinemaDimens.PillRadius))
                         .background(Cinema.Ink.copy(alpha = 0.85f))
                         .padding(horizontal = 6.dp, vertical = 3.dp)
                 )
@@ -819,7 +817,7 @@ private fun LiveChannelRow(
                 if (focused) Cinema.PanelRaised else Cinema.Panel.copy(alpha = 0.55f),
                 shape
             )
-            .glassFrame(shape, focused = focused)
+            .glassFrame(shape, focused = focused, scale = FocusScale.ROW)
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Box(
@@ -838,15 +836,16 @@ private fun LiveChannelRow(
             )
             Text(
                 text = if (busy) "TUNING…" else "LIVE",
-                color = if (busy) Cinema.Pinging else Cinema.Ink,
+                color = Cinema.Ink,
                 fontSize = 7.sp,
+                lineHeight = 9.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 0.6.sp,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(3.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(if (busy) Cinema.Panel else Cinema.Offline)
+                    .clip(RoundedCornerShape(CinemaDimens.PillRadius))
+                    .background(if (busy) Cinema.Pinging else Cinema.Offline)
                     .padding(horizontal = 3.dp, vertical = 1.dp)
             )
         }
@@ -1119,8 +1118,8 @@ private fun GuideRow(
             .glassSurface(
                 shape = rowShape,
                 focused = focused,
-                base = if (focused) Glass.Control else Glass.Frame,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = Glass.Frame,
+                scale = FocusScale.ROW,
                 sheen = 0.45f
             )
             .onFocusChanged {

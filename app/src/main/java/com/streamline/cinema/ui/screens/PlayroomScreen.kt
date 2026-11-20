@@ -62,6 +62,7 @@ import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.EmptyState
 import com.streamline.cinema.ui.ErrorBanner
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalFocusMemory
@@ -70,7 +71,7 @@ import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PosterCard
 import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.SectionHeader
-import com.streamline.cinema.ui.ShimmerBox
+import com.streamline.cinema.ui.SkeletonBox
 import com.streamline.cinema.ui.SkeletonPoster
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
@@ -728,7 +729,7 @@ private fun PlayroomModal(
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             detail.rating?.let {
-                                InfoPill("★ %.1f".format(it), Cinema.Gold, Cinema.Gold.copy(alpha = 0.12f))
+                                InfoPill("★ %.1f".format(it), Cinema.Gold, Glass.AccentWash)
                             }
                             detail.certification?.takeIf { it.isNotBlank() }?.let {
                                 InfoPill(it, Cinema.TextPrimary, Cinema.PanelRaised)
@@ -847,7 +848,7 @@ private fun PlayroomModal(
                     if (episodesLoading) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             repeat(3) {
-                                ShimmerBox(
+                                SkeletonBox(
                                     Modifier
                                         .fillMaxWidth()
                                         .height(66.dp),
@@ -944,7 +945,7 @@ private fun LiveChannelTile(channel: LiveChannel, busy: Boolean, onClick: () -> 
                 shape = shape,
                 focused = focused,
                 base = Glass.Sheet,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.CARD,
                 sheen = 0.55f
             )
             .onFocusChanged {
@@ -973,13 +974,14 @@ private fun LiveChannelTile(channel: LiveChannel, busy: Boolean, onClick: () -> 
                 text = if (busy) "TUNING…" else "LIVE",
                 color = Cinema.Ink,
                 fontSize = 9.sp,
+                lineHeight = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.2.sp,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(6.dp)
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(if (busy) Cinema.Pinging else Cinema.Crimson)
+                    .clip(RoundedCornerShape(CinemaDimens.PillRadius))
+                    .background(if (busy) Cinema.Pinging else Cinema.Offline)
                     .padding(horizontal = 5.dp, vertical = 2.dp)
             )
         }
@@ -1047,7 +1049,7 @@ private fun ProgrammeTile(hit: EpgProgramHit, busy: Boolean, onClick: () -> Unit
                 shape = shape,
                 focused = focused,
                 base = Glass.Sheet,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.CARD,
                 sheen = 0.55f
             )
             .onFocusChanged {
@@ -1065,11 +1067,12 @@ private fun ProgrammeTile(hit: EpgProgramHit, busy: Boolean, onClick: () -> Unit
                 text = if (busy) "TUNING…" else if (live) "ON NOW" else "UP NEXT",
                 color = Cinema.Ink,
                 fontSize = 9.sp,
+                lineHeight = 11.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.1.sp,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(3.dp))
-                    .background(if (busy) Cinema.Pinging else if (live) Cinema.Crimson else Cinema.Gold)
+                    .clip(RoundedCornerShape(CinemaDimens.PillRadius))
+                    .background(if (busy) Cinema.Pinging else if (live) Cinema.Offline else Cinema.Gold)
                     .padding(horizontal = 5.dp, vertical = 2.dp)
             )
             Spacer(Modifier.width(8.dp))
@@ -1145,8 +1148,8 @@ private fun EpisodePreviewRow(episode: Episode, onClick: () -> Unit) {
             .glassSurface(
                 shape = shape,
                 focused = focused,
-                base = if (focused) Glass.Control else Color.Transparent,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.45f
             )
             .onFocusChanged {

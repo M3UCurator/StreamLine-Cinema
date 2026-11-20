@@ -98,6 +98,7 @@ import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Divider
 import com.streamline.cinema.ui.FieldLabel
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalScreenState
@@ -507,7 +508,7 @@ fun SettingsScreen(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     statusPills.forEach { (text, color) ->
-                        InfoPill(text, color, Cinema.InkSoft)
+                        InfoPill(text, color, Cinema.PanelRaised)
                     }
                 }
             }
@@ -628,7 +629,7 @@ fun SettingsScreen(
                                     InfoPill(
                                         it,
                                         if (test.success) Cinema.Online else Cinema.Offline,
-                                        Cinema.InkSoft
+                                        Cinema.PanelRaised
                                     )
                                 }
                             }
@@ -794,8 +795,8 @@ fun SettingsScreen(
                                 )
                             }
                             Spacer(Modifier.weight(1f))
-                            pinError?.let { InfoPill(it, Cinema.Offline, Cinema.InkSoft) }
-                            pinNotice?.let { InfoPill(it, Cinema.Online, Cinema.InkSoft) }
+                            pinError?.let { InfoPill(it, Cinema.Offline, Cinema.PanelRaised) }
+                            pinNotice?.let { InfoPill(it, Cinema.Online, Cinema.PanelRaised) }
                         }
                         }
                         SettingsGroup(
@@ -833,7 +834,7 @@ fun SettingsScreen(
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
-                            InfoPill("${kidsApproved.size} APPROVED", Cinema.Gold, Cinema.InkSoft)
+                            InfoPill("${kidsApproved.size} APPROVED", Cinema.Gold, Cinema.PanelRaised)
                             TvButton(
                                 label = "MANAGE KIDS LIBRARY",
                                 glyph = "⛨",
@@ -845,7 +846,7 @@ fun SettingsScreen(
                         }
                         kidsNotice?.let {
                             Spacer(Modifier.height(10.dp))
-                            InfoPill(it, Cinema.Online, Cinema.InkSoft)
+                            InfoPill(it, Cinema.Online, Cinema.PanelRaised)
                         }
                         Spacer(Modifier.height(10.dp))
                         Row(
@@ -1631,7 +1632,7 @@ fun SettingsScreen(
                                 onClick = { vm.testDns() }
                             )
                             dnsTest.message?.let {
-                                InfoPill(it, if (dnsTest.success) Cinema.Online else Cinema.Offline, Cinema.InkSoft)
+                                InfoPill(it, if (dnsTest.success) Cinema.Online else Cinema.Offline, Cinema.PanelRaised)
                             }
                         }
                         Spacer(Modifier.height(8.dp))
@@ -2728,12 +2729,8 @@ private fun SettingsNavRow(
             .glassSurface(
                 shape = shape,
                 focused = focused,
-                base = when {
-                    selected -> Cinema.Gold.copy(alpha = if (focused) 0.24f else 0.15f)
-                    focused -> Glass.Control
-                    else -> Color.Transparent
-                },
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = if (selected) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.45f
             )
             .onFocusChanged {
@@ -2771,7 +2768,7 @@ private fun SettingsNavRow(
     }
 }
 
-private val SettingsRowShape = RoundedCornerShape(10.dp)
+private val SettingsRowShape = RoundedCornerShape(CinemaDimens.RowRadius)
 
 @Composable
 private fun SettingsRowFrame(
@@ -2786,8 +2783,8 @@ private fun SettingsRowFrame(
             .glassSurface(
                 shape = SettingsRowShape,
                 focused = focused,
-                base = if (focused) Glass.Control else Cinema.Panel.copy(alpha = 0.42f),
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = Cinema.Panel.copy(alpha = 0.42f),
+                scale = FocusScale.ROW,
                 sheen = 0.5f
             )
             .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -2938,7 +2935,7 @@ private fun IptvSourceCard(
             InfoPill(
                 if (source.enabled) "ACTIVE" else "PAUSED",
                 if (source.enabled) Cinema.Online else Cinema.Pinging,
-                Cinema.InkSoft
+                Cinema.PanelRaised
             )
             Text(
                 if (expanded) "▴" else "▾",
@@ -3193,12 +3190,8 @@ private fun SettingsOptionRow(
             .glassSurface(
                 shape = SettingsRowShape,
                 focused = focused,
-                base = when {
-                    selected -> Cinema.Gold.copy(alpha = 0.16f)
-                    focused -> Glass.Control
-                    else -> Cinema.Panel.copy(alpha = 0.28f)
-                },
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = if (selected) Glass.AccentWash else Cinema.Panel.copy(alpha = 0.28f),
+                scale = FocusScale.ROW,
                 sheen = 0.4f
             )
             .padding(start = 28.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
@@ -3268,7 +3261,7 @@ private fun SettingsGroup(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
-            hint?.let { InfoPill(it, Cinema.Gold, Cinema.InkSoft) }
+            hint?.let { InfoPill(it, Cinema.Gold, Cinema.PanelRaised) }
         }
         Column(
             modifier = Modifier.fillMaxWidth(),

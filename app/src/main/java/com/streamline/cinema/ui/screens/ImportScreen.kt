@@ -49,6 +49,7 @@ import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Divider
 import com.streamline.cinema.ui.ErrorBanner
 import com.streamline.cinema.ui.FieldLabel
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalUiSounds
@@ -439,12 +440,8 @@ private fun PresetRow(preset: ImportPreset, selected: Boolean, onClick: () -> Un
             .glassSurface(
                 shape = shape,
                 focused = focused,
-                base = when {
-                    selected -> Cinema.Gold.copy(alpha = 0.10f)
-                    focused -> Glass.Control
-                    else -> Color.Transparent
-                },
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = if (selected) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.45f
             )
             .onFocusChanged {
@@ -519,7 +516,7 @@ private fun ImportStatusCard(phase: ImportPhase, message: String, pending: Int) 
         }
         if (pending > 0) {
             Spacer(Modifier.width(12.dp))
-            InfoPill("$pending enriching", Cinema.Gold, Cinema.Gold.copy(alpha = 0.12f))
+            InfoPill("$pending enriching", Cinema.Gold, Glass.AccentWash)
         }
     }
 }

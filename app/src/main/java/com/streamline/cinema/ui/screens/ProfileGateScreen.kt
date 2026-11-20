@@ -1,7 +1,5 @@
 package com.streamline.cinema.ui.screens
 
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -41,7 +39,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -63,6 +60,7 @@ import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.PinDisplay
@@ -256,31 +254,16 @@ private fun ProfileTile(
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
     val tileShape = RoundedCornerShape(CinemaDimens.CardRadius)
-    // Focus is a short spring scale on top of the glass underline and edge
-    // light: it reads from three metres away and costs one animated layer.
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.07f else 1f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = 650f),
-        label = "profileTileScale"
-    )
     val avatar = (width * 0.70f).coerceIn(84.dp, 116.dp)
     Column(
         modifier = Modifier
             .width(width)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .glassSurface(
                 shape = tileShape,
                 focused = focused,
-                base = when {
-                    focused -> Glass.Control
-                    active -> Cinema.Gold.copy(alpha = 0.10f)
-                    else -> Color.Transparent
-                },
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = if (active) Glass.AccentWash else Glass.Frame,
+                scale = FocusScale.CARD,
                 sheen = 0.45f
             )
             .onFocusChanged {
@@ -319,24 +302,15 @@ private fun AddProfileTile(width: Dp, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
     val tileShape = RoundedCornerShape(CinemaDimens.CardRadius)
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.07f else 1f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = 650f),
-        label = "addProfileTileScale"
-    )
     val avatar = (width * 0.70f).coerceIn(84.dp, 116.dp)
     Column(
         modifier = Modifier
             .width(width)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
             .glassSurface(
                 shape = tileShape,
                 focused = focused,
-                base = if (focused) Glass.Control else Color.White.copy(alpha = 0.03f),
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = Color.White.copy(alpha = 0.03f),
+                scale = FocusScale.CARD,
                 sheen = 0.45f
             )
             .onFocusChanged {

@@ -82,6 +82,7 @@ import com.streamline.cinema.ui.CinemaType
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.EpisodeActionsDialog
 import com.streamline.cinema.ui.ErrorBanner
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.InfoPill
 import com.streamline.cinema.ui.LocalPosterStyle
@@ -90,7 +91,7 @@ import com.streamline.cinema.ui.PosterImage
 import com.streamline.cinema.ui.PosterRow
 import com.streamline.cinema.ui.ResumeBadge
 import com.streamline.cinema.ui.SectionHeader
-import com.streamline.cinema.ui.ShimmerBox
+import com.streamline.cinema.ui.SkeletonBox
 import com.streamline.cinema.ui.TvButton
 import com.streamline.cinema.ui.TvButtonStyle
 import com.streamline.cinema.ui.formatRuntime
@@ -478,7 +479,7 @@ fun DetailScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             item.rating?.let {
-                                InfoPill("★ %.1f".format(it), Cinema.Gold, Cinema.Gold.copy(alpha = 0.14f))
+                                InfoPill("★ %.1f".format(it), Cinema.Gold, Glass.AccentWash)
                             }
                             item.certification?.takeIf { it.isNotBlank() }?.let {
                                 InfoPill("⛨ $it", Cinema.TextPrimary, Cinema.PanelRaised)
@@ -500,7 +501,7 @@ fun DetailScreen(
                                     InfoPill(
                                         "Season $selectedSeason • Episode $playNumber",
                                         Cinema.Gold,
-                                        Cinema.Gold.copy(alpha = 0.12f)
+                                        Glass.AccentWash
                                     )
                                 }
                             }
@@ -512,7 +513,7 @@ fun DetailScreen(
                         if (item.genres.isNotEmpty()) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 item.genres.take(3).forEach { genre ->
-                                    InfoPill(genre, Cinema.TextSecondary, Cinema.Panel)
+                                    InfoPill(genre, Cinema.TextSecondary, Cinema.PanelRaised)
                                 }
                                 InfoPill(
                                     if (profile.audioLanguage.isBlank()) {
@@ -521,7 +522,7 @@ fun DetailScreen(
                                         "AUDIO · ${profile.audioLanguage.uppercase(Locale.ROOT)}"
                                     },
                                     Cinema.TextSecondary,
-                                    Cinema.Panel
+                                    Cinema.PanelRaised
                                 )
                                 InfoPill(
                                     if (profile.subtitleLanguage.isBlank()) {
@@ -530,7 +531,7 @@ fun DetailScreen(
                                         "SUBS · ${profile.subtitleLanguage.uppercase(Locale.ROOT)}"
                                     },
                                     Cinema.TextSecondary,
-                                    Cinema.Panel
+                                    Cinema.PanelRaised
                                 )
                             }
                         }
@@ -737,7 +738,7 @@ fun DetailScreen(
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             repeat(3) {
-                                ShimmerBox(
+                                SkeletonBox(
                                     Modifier
                                         .fillMaxWidth()
                                         .height(84.dp),
@@ -902,7 +903,7 @@ private fun LazyListScope.relatedSection(
                 SectionHeader(title = "More Like This", subtitle = "Finding titles with the same pull")
                 Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                     repeat(6) {
-                        ShimmerBox(
+                        SkeletonBox(
                             Modifier
                                 .width(150.dp)
                                 .height(225.dp),
@@ -963,8 +964,8 @@ private fun EpisodeRow(
             .glassSurface(
                 shape = shape,
                 focused = focused,
-                base = if (focused) Glass.Control else Glass.Frame,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                base = Glass.Frame,
+                scale = FocusScale.ROW,
                 sheen = 0.55f
             )
             .onFocusChanged {
@@ -1074,7 +1075,7 @@ private fun EpisodeRow(
                 InfoPill(
                     "S$seasonNumber E${episode.number}",
                     Cinema.Gold,
-                    Cinema.Gold.copy(alpha = 0.12f)
+                    Glass.AccentWash
                 )
                 progress?.takeIf { it.isResumable }?.let {
                     Spacer(Modifier.width(8.dp))

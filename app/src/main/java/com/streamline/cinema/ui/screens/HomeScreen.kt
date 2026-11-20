@@ -1,6 +1,5 @@
 package com.streamline.cinema.ui.screens
 
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -223,12 +222,10 @@ fun HomeScreen(
     LaunchedEffect(library.size, progress.size) { vm.refreshRecommendations() }
 
     Box(Modifier.fillMaxSize().background(Cinema.Ink)) {
-        Crossfade(
-            targetState = heroFeatured,
-            animationSpec = tween(320),
-            label = "heroBackdrop",
-            modifier = Modifier.fillMaxSize()
-        ) { featured ->
+        // The backdrop swaps with the selection instead of dissolving: a
+        // crossfade keeps two full-screen decodes alive on a 1 GB box.
+        val featured = heroFeatured
+        Box(Modifier.fillMaxSize()) {
             if (featured?.backdropUrl.isNullOrBlank()) {
                 Box(
                     Modifier
@@ -678,7 +675,7 @@ private fun HeroCarousel(
                             InfoPill(
                                 "Season $seasonTrack • Episode $episodeTrack",
                                 Cinema.Gold,
-                                Cinema.Gold.copy(alpha = 0.12f)
+                                Glass.AccentWash
                             )
                         } else {
                             runtime?.let { InfoPill("$it / ep", Cinema.TextSecondary) }

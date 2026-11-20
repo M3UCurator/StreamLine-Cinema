@@ -1,16 +1,14 @@
 package com.streamline.cinema.ui
 
 import androidx.annotation.DrawableRes
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -24,7 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
@@ -67,7 +64,9 @@ fun ProfileAvatar(
         painter = painterResource(profileAvatarOption(index).res),
         contentDescription = contentDescription,
         contentScale = ContentScale.Crop,
-        modifier = modifier.size(size).clip(CircleShape)
+        // requiredSize, not size: a cramped parent row must never coerce the
+        // avatar into a sliver — the artwork would be cropped to a strip.
+        modifier = modifier.requiredSize(size).clip(CircleShape)
     )
 }
 
@@ -112,18 +111,15 @@ private fun AvatarChoice(
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.08f else 1f,
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = 650f),
-        label = "avatarChoiceScale"
-    )
     Box(
         modifier = Modifier
             .size(60.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
+            .glassSurface(
+                shape = CircleShape,
+                focused = focused,
+                base = if (selected) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ICON
+            )
             .onFocusChanged {
                 focused = it.isFocused
                 if (it.isFocused) sounds.focus()
@@ -134,13 +130,6 @@ private fun AvatarChoice(
                 onClick = {
                     sounds.select()
                     onClick()
-                }
-            )
-            .then(
-                when {
-                    selected -> Modifier.border(2.dp, Cinema.Gold, CircleShape)
-                    focused -> Modifier.border(2.dp, Color.White.copy(alpha = 0.75f), CircleShape)
-                    else -> Modifier
                 }
             )
             .padding(5.dp),

@@ -1,12 +1,5 @@
 package com.streamline.cinema.ui
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -18,6 +11,7 @@ import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -70,6 +64,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -144,92 +139,73 @@ fun TvButton(
     focusRequester: FocusRequester? = null
 ) {
     var focused by remember { mutableStateOf(false) }
-    val sounds = LocalUiSounds.current
-    val scale by animateFloatAsState(
-        targetValue = if (focused && enabled) 1.02f else 1f,
-        animationSpec = tween(110),
-        label = "buttonScale"
-    )
     val shape = RoundedCornerShape(CinemaDimens.ControlRadius)
     val base = when (style) {
         TvButtonStyle.PRIMARY -> Cinema.Gold
         TvButtonStyle.SECONDARY -> Glass.Control
-        TvButtonStyle.GHOST -> if (focused) Glass.Sheet else Color.Transparent
-        TvButtonStyle.DANGER -> if (focused) Glass.Sheet else Color.Transparent
+        TvButtonStyle.GHOST, TvButtonStyle.DANGER ->
+            if (focused) Glass.Sheet else Color.Transparent
     }
-    val tint = when {
-        style == TvButtonStyle.PRIMARY -> Color.Transparent
-        style == TvButtonStyle.DANGER -> Glass.DangerWash
-        focused -> Glass.AccentWash
-        else -> Color.Transparent
-    }
+    val tint = if (style == TvButtonStyle.DANGER) Glass.DangerWash else Color.Transparent
     val contentColor = when (style) {
         TvButtonStyle.PRIMARY -> Cinema.Ink
         TvButtonStyle.SECONDARY -> if (focused) Cinema.Gold else Cinema.TextPrimary
         TvButtonStyle.GHOST -> if (focused) Cinema.TextPrimary else Cinema.TextSecondary
         TvButtonStyle.DANGER -> Cinema.Offline
     }
-    val showGlass = base.alpha > 0f || tint.alpha > 0f
 
-    val clickableModifier = Modifier
-        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-        .graphicsLayer {
-            scaleX = scale
-            scaleY = scale
-            alpha = if (enabled) 1f else 0.4f
-        }
-        .then(
-            if (showGlass) {
-                Modifier.glassSurface(shape = shape, focused = focused, base = base, tint = tint)
-            } else {
-                Modifier.clip(shape)
-            }
-        )
-        .onFocusChanged {
-            focused = it.isFocused
-            if (it.isFocused) sounds.focus()
-        }
-        .semantics {
-            role = Role.Button
-            contentDescription = label
-        }
-        .clickable(
-            enabled = enabled,
-            interactionSource = remember { MutableInteractionSource() },
-            indication = null,
-            onClick = {
-                sounds.select()
-                onClick()
-            }
-        )
-
-    Box(
-        modifier = modifier
-            .then(clickableModifier)
-            // Grows with font scale instead of clipping the label at 1.3×/1.5×.
-            .defaultMinSize(minHeight = if (compact) 34.dp else 46.dp)
-            .padding(horizontal = when { compact -> 12.dp; dense -> 14.dp; else -> 22.dp }),
+    FocusableSurface(
+        onClick = onClick,
+        modifier = modifier.defaultMinSize(
+            minHeight = if (compact) CinemaTokens.SizeButtonCompact else CinemaTokens.SizeButton
+        ),
+        shape = shape,
+        scale = if (compact) FocusScale.PILL else FocusScale.CONTROL,
+        base = base,
+        tint = tint,
+        enabled = enabled,
+        role = Role.Button,
+        contentDescription = label,
+        focusRequester = focusRequester,
+        onFocusChange = { focused = it },
         contentAlignment = Alignment.Center
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (glyph != null) {
+        // The glyph occupies a leading slot that is mirrored after the label, so
+        // the label's centre line is the button's centre line. Centring the
+        // glyph+label pair instead pushed every labelled glyph button's text
+        // right of centre.
+        Layout(
+            modifier = Modifier.padding(
+                horizontal = when { compact -> 12.dp; dense -> 14.dp; else -> 22.dp }
+            ),
+            content = {
+                if (glyph != null) {
+                    Text(
+                        text = glyph,
+                        color = contentColor,
+                        fontSize = if (compact) 13.sp else 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
                 Text(
-                    text = glyph,
+                    text = label,
                     color = contentColor,
-                    fontSize = if (compact) 13.sp else 15.sp,
-                    fontWeight = FontWeight.Bold
+                    style = if (compact) CinemaType.ButtonCompact else CinemaType.Button,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Text(
-                text = label,
-                color = contentColor,
-                style = if (compact) CinemaType.ButtonCompact else CinemaType.Button,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        ) { measurables, constraints ->
+            val loose = constraints.copy(minWidth = 0, minHeight = 0)
+            val glyphPlaceable = if (measurables.size > 1) measurables.first().measure(loose) else null
+            val labelPlaceable = measurables.last().measure(loose)
+            val lead = glyphPlaceable?.let { it.width + 8.dp.roundToPx() } ?: 0
+            val height = maxOf(labelPlaceable.height, glyphPlaceable?.height ?: 0)
+            layout(labelPlaceable.width + lead * 2, height) {
+                labelPlaceable.placeRelative(lead, (height - labelPlaceable.height) / 2)
+                glyphPlaceable?.placeRelative(0, (height - glyphPlaceable.height) / 2)
+            }
         }
     }
 }
@@ -277,8 +253,7 @@ fun TvTextField(
                     shape = shape,
                     focused = focused,
                     base = Glass.Control,
-                    tint = if (focused) Glass.AccentWash.copy(alpha = 0.06f) else Color.Transparent,
-                    indicator = false
+                    scale = FocusScale.ROW
                 )
                 .onFocusChanged {
                     focused = it.isFocused
@@ -571,11 +546,12 @@ fun ResumeBadge(
         text = label,
         color = Cinema.Ink,
         fontSize = if (compact) 10.sp else 11.sp,
+        lineHeight = if (compact) 12.sp else 13.sp,
         fontWeight = FontWeight.Bold,
         letterSpacing = 0.4.sp,
         maxLines = 1,
         modifier = modifier
-            .clip(RoundedCornerShape(50))
+            .clip(RoundedCornerShape(CinemaDimens.PillRadius))
             .background(Cinema.Gold)
             .padding(
                 horizontal = if (compact) 9.dp else 11.dp,
@@ -620,11 +596,6 @@ fun PosterCard(
             runCatching { selfFocus.requestFocus() }
         }
     }
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.03f else 1f,
-        animationSpec = tween(120),
-        label = "posterScale"
-    )
     val spoken = buildString {
         append(item.title)
         if (rank != null) append(", number $rank")
@@ -637,10 +608,7 @@ fun PosterCard(
         modifier = modifier
             .width(style.cardWidth)
             .zIndex(if (focused) 2f else 0f)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
+            .focusScale(focused, FocusScale.CARD)
             .focusRequester(selfFocus)
             .then(
                 if (onToggleFavorite != null || leftFocus != null) {
@@ -710,7 +678,8 @@ fun PosterCard(
                         .glassSurface(
                             shape = CircleShape,
                             focused = starFocused,
-                            base = if (favorite) Cinema.Gold else Color.Black.copy(alpha = 0.55f)
+                            base = if (favorite) Cinema.Gold else Color.Black.copy(alpha = 0.55f),
+                            scale = FocusScale.ICON
                         )
                         .focusProperties { right = selfFocus }
                         .focusRequester(starFocus)
@@ -859,7 +828,6 @@ fun ContinueCard(
     val cardFocus = remember { FocusRequester() }
     val style = LocalPosterStyle.current
     val cardShape = RoundedCornerShape(CinemaDimens.CardRadius)
-    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(120), label = "continueScale")
     val scope = rememberCoroutineScope()
     var holdJob by remember { mutableStateOf<Job?>(null) }
     var holding by remember { mutableStateOf(false) }
@@ -887,7 +855,7 @@ fun ContinueCard(
         modifier = modifier
             .width(style.continueWidth)
             .zIndex(if (focused || removeFocused) 2f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .focusScale(focused, FocusScale.CARD)
             .focusRequester(cardFocus)
             .onFocusChanged {
                 focused = it.isFocused
@@ -1000,7 +968,8 @@ fun ContinueCard(
                         .glassSurface(
                             shape = CircleShape,
                             focused = removeFocused,
-                            base = if (removeFocused) Cinema.Gold else Color.Black.copy(alpha = 0.55f)
+                            base = if (removeFocused) Cinema.Gold else Color.Black.copy(alpha = 0.55f),
+                            scale = FocusScale.ICON
                         )
                         .onFocusChanged {
                             removeFocused = it.isFocused
@@ -1318,9 +1287,9 @@ fun Chip(
             .glassSurface(
                 shape = shape,
                 focused = focused,
-                base = if (selected) Cinema.Gold else Glass.Control,
-                tint = if (focused && !selected) Glass.AccentWash else Color.Transparent,
-                sheen = if (selected) 0.7f else 0.55f
+                base = if (selected) Glass.AccentWash else Glass.Control,
+                scale = FocusScale.PILL,
+                sheen = 0.55f
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1342,7 +1311,7 @@ fun Chip(
         Text(
             text = label,
             color = when {
-                selected -> Cinema.Ink
+                selected -> Cinema.Gold
                 focused -> Cinema.TextPrimary
                 else -> Cinema.TextSecondary
             },
@@ -1435,7 +1404,7 @@ fun ToggleRow(
                 shape = shape,
                 focused = focused,
                 base = Glass.Control,
-                tint = if (focused) Glass.AccentWash else Color.Transparent
+                scale = FocusScale.ROW
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1499,11 +1468,13 @@ fun InfoPill(
     text: String,
     color: Color = Cinema.TextSecondary,
     background: Color = Cinema.PanelRaised,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    solid: Boolean = false
 ) {
     // Opaque palette colours are eased into the glass opacity band so pills read
-    // as layered material instead of painted chips.
-    val fill = if (background.alpha >= 1f) background.copy(alpha = 0.62f) else background
+    // as layered material instead of painted chips. Solid status pills opt out:
+    // their Ink-on-colour pairing only holds at full strength.
+    val fill = if (solid || background.alpha < 1f) background else background.copy(alpha = 0.62f)
     Text(
         text = text,
         color = color,
@@ -1665,8 +1636,7 @@ fun TopTabBar(
 ) {
     // At large font scales the bar has to shed spacing so every tab, the
     // profile chip and the status dot stay visible and focusable.
-    val dense = LocalDensity.current.fontScale > 1.15f
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
             .height(CinemaDimens.TopBarHeight + CinemaDimens.TopBarScrim)
@@ -1678,6 +1648,10 @@ fun TopTabBar(
                 )
             )
     ) {
+        // Six tabs, the search pill, the clock and the chip do not fit the
+        // generous spacing below ~1000 dp; the row would then measure its last
+        // child (the chip) into whatever sliver is left. Shed spacing first.
+        val dense = LocalDensity.current.fontScale > 1.15f || maxWidth < 1000.dp
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -1723,6 +1697,7 @@ fun TopTabBar(
                     TabItem(
                         tab = tab,
                         selected = tab == selected,
+                        tight = dense,
                         modifier = Modifier
                             .focusRequester(tabRequesters.getValue(tab))
                             .focusProperties {
@@ -1811,7 +1786,7 @@ private fun ProfileChip(
                 shape = shape,
                 focused = focused,
                 base = if (focused) Glass.Control else Color.White.copy(alpha = 0.045f),
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.PILL,
                 sheen = 0.5f
             )
             .onFocusChanged {
@@ -1843,27 +1818,22 @@ private fun TabItem(
     tab: AppTab,
     selected: Boolean,
     modifier: Modifier = Modifier,
+    tight: Boolean = false,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
     val shape = RoundedCornerShape(CinemaDimens.PillRadius)
-    val dense = LocalDensity.current.fontScale > 1.15f
+    val dense = tight || LocalDensity.current.fontScale > 1.15f
     Column(
         modifier = modifier
             .padding(horizontal = 2.dp)
-            .then(
-                if (focused) {
-                    Modifier.glassSurface(
-                        shape = shape,
-                        focused = true,
-                        base = Glass.Control,
-                        tint = Glass.AccentWash,
-                        sheen = 0.45f
-                    )
-                } else {
-                    Modifier
-                }
+            .glassSurface(
+                shape = shape,
+                focused = focused,
+                base = if (focused) Glass.Control else Color.Transparent,
+                scale = FocusScale.PILL,
+                sheen = 0.45f
             )
             .onFocusChanged {
                 focused = it.isFocused
@@ -1880,6 +1850,9 @@ private fun TabItem(
             .padding(horizontal = if (dense) 8.dp else 14.dp, vertical = 7.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Top space matches gap + rail below so the label sits dead centre
+        // whether or not the tab is selected.
+        Spacer(Modifier.height(5.dp))
         Text(
             text = tab.label,
             color = when {
@@ -1892,7 +1865,7 @@ private fun TabItem(
             letterSpacing = 0.5.sp,
             maxLines = 1
         )
-        Spacer(Modifier.height(5.dp))
+        Spacer(Modifier.height(3.dp))
         Box(
             Modifier
                 .width(18.dp)
@@ -1920,34 +1893,17 @@ fun Divider(modifier: Modifier = Modifier) {
     )
 }
 
-/** Moving highlight used instead of a spinner while a rail or card is loading. */
+/**
+ * Static placeholder for a rail or card that is still loading. The design
+ * deliberately has no shimmer: a moving sweep on a TV reads as progress that
+ * never finishes and pulls the eye off the controls.
+ */
 @Composable
-fun ShimmerBox(modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(8.dp)) {
-    val transition = rememberInfiniteTransition(label = "shimmer")
-    val progress by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2_200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "shimmerProgress"
-    )
-    val sweep = progress * 1_200f - 600f
+fun SkeletonBox(modifier: Modifier = Modifier, shape: Shape = RoundedCornerShape(8.dp)) {
     Box(
         modifier
             .clip(shape)
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = 0.045f),
-                        Color.White.copy(alpha = 0.115f),
-                        Color.White.copy(alpha = 0.045f)
-                    ),
-                    start = Offset(sweep, 0f),
-                    end = Offset(sweep + 600f, 420f)
-                )
-            )
+            .background(Color.White.copy(alpha = 0.055f))
     )
 }
 
@@ -1958,19 +1914,19 @@ fun SkeletonPoster(
 ) {
     val style = LocalPosterStyle.current
     Column(modifier.width(width ?: style.cardWidth)) {
-        ShimmerBox(
+        SkeletonBox(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(style.aspectRatio),
             shape = RoundedCornerShape(CinemaDimens.CardRadius)
         )
         Spacer(Modifier.height(10.dp))
-        ShimmerBox(
+        SkeletonBox(
             Modifier.fillMaxWidth(0.85f).height(style.titleSize.value.dp),
             shape = RoundedCornerShape(3.dp)
         )
         Spacer(Modifier.height(6.dp))
-        ShimmerBox(
+        SkeletonBox(
             Modifier.fillMaxWidth(0.5f).height(style.metaSize.value.dp),
             shape = RoundedCornerShape(3.dp)
         )

@@ -3,12 +3,6 @@ package com.streamline.cinema.ui
 import android.app.Activity
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -222,14 +216,10 @@ fun AppRoot(vm: CinemaViewModel) {
             // an invisible page), and skips the ambient blur until it closes.
             if (!profileGateOpen) {
                 AmbientGlassBackdrop()
-                AnimatedContent(
-                targetState = tab,
-                transitionSpec = {
-                    fadeIn(tween(150)) togetherWith fadeOut(tween(120))
-                },
-                label = "tabContent",
-                modifier = Modifier.fillMaxSize()
-            ) { activeTab ->
+                // Tabs swap instantly: a crossfade delays the first frame of the
+                // new page, and on a TV the only thing the user asked for is the
+                // page to be there.
+                val activeTab = tab
                 val body: @Composable () -> Unit = {
                     when (activeTab) {
                         AppTab.HOME -> HomeScreen(
@@ -308,7 +298,6 @@ fun AppRoot(vm: CinemaViewModel) {
                         body()
                     }
                 }
-            }
 
             TopTabBar(
                 selected = tab,
@@ -323,11 +312,7 @@ fun AppRoot(vm: CinemaViewModel) {
                 modifier = Modifier.align(Alignment.TopCenter)
             )
 
-            AnimatedVisibility(
-                visible = detail != null,
-                enter = fadeIn(tween(150)),
-                exit = fadeOut(tween(120))
-            ) {
+            if (detail != null) {
                 displayedDetail.value?.let { item ->
                     Box(Modifier.fillMaxSize().background(Cinema.Ink)) {
                         DetailScreen(

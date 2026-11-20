@@ -49,6 +49,7 @@ import com.streamline.cinema.data.ExternalPlayerInfo
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
 import com.streamline.cinema.ui.CinemaType
+import com.streamline.cinema.ui.FocusScale
 import com.streamline.cinema.ui.Glass
 import com.streamline.cinema.ui.LocalUiSounds
 import com.streamline.cinema.ui.TvButton
@@ -303,7 +304,7 @@ private fun OpenWithRow(
                 shape = RoundedCornerShape(CinemaDimens.ControlRadius),
                 focused = focused,
                 base = if (highlighted) Glass.AccentWash else Glass.Control,
-                tint = if (focused) Glass.AccentWash else Color.Transparent,
+                scale = FocusScale.ROW,
                 sheen = 0.8f
             )
             .onFocusChanged {

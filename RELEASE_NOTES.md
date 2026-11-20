@@ -1,4 +1,55 @@
-# StreamLine Cinema v12.116
+# StreamLine Cinema v12.117
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.117 — one focus language, and a top bar that fits
+
+Highlights used to come from each screen's own rule, and the top bar over-subscribed its row until the profile chip was measured into a sliver. Both are fixed at the source.
+
+- **One primitive draws every highlight.** `FocusableSurface` (`ui/FocusSystem.kt`) now owns focus for tab pills, posters, rows, buttons, fields, transport controls and dialog actions: the element grows proportionally (14% icon-only controls, 6% pills and tabs, 5% cards, 4% buttons and fields, 1% full-width rows), its fill lifts by 7% white (4% over artwork) and a 2 dp `#FFDEA0` ring with a 1 px dark seam appears. All three settle over 120 ms with monotonic easing, and the grow is a `graphicsLayer` transform applied outside the clip, so cards scale without re-laying out neighbours and the rounded bounds never crop the growth.
+- **The transport dock keeps its glass.** A focused OSD button used to invert to solid gold with a dark glyph, so the whole dock flashed. It now keeps its fill, accent wash and icon colour and signals focus with the same ring as the rest of the app; the active state is still the gold glyph.
+- **Button labels are centred on both axes.** `TvButton` places its optional glyph in a leading slot mirrored after the label, so the label itself — not the glyph-plus-label pair — sits on the centre line and a short label no longer pins to the top of the 46 dp minimum height.
+- **The top bar fits at every width.** Six tabs, the search pill, the clock and the chip do not fit the generous spacing below ~1000 dp; the row measured its last child into whatever sliver remained, which is why the avatar read as a squash — the box itself was 5 dp wide and `ContentScale.Crop` showed a vertical slice of the artwork. Below 1000 dp (or above 1.15× font scale) the bar now uses 16 dp edge padding, a 12 dp brand gap, 10 dp trailing gaps and 8 dp tab padding. On the emulator the chip's avatar measures 68×68 px with its name beside it, instead of 13×68 px with the name ellipsized away.
+- **Avatars cannot be distorted.** `ProfileAvatar` uses `requiredSize`, so no parent row can coerce the artwork into a strip; the gate cards, the chip and the manage-profiles list render the same round image.
+- **One pill, one line box.** Every badge, chip, filter and status pill is the same stadium (`PillRadius` 999) and carries an explicit 14 sp line height on `CinemaType.Pill` — the inherited `bodyLarge` box had been doubling a small badge's height until its capsule read as a circle. The last `RoundedCornerShape(50)` literals are gone.
+- **Contrast is measured, not guessed.** `Cinema` records WCAG ratios against `Ink`: primary 18.2:1, secondary 13.7:1, muted 7.3:1 (both brightened), a new 3.7:1 `TextFaint` reserved for context beside a brighter sibling, and the focus ring at 15.4:1. No label or action relies on the muted token as its only copy.
+- **Less decoding per frame.** Tabs, the detail theater and the hero backdrop swap instantly instead of crossfading, and the loading skeletons are static blocks instead of a 2.2 s shimmer sweep. On a low-RAM box the old fades delayed the frame the viewer asked for and kept two render trees — or two full-screen images — alive; the player OSD's short reveal stays, since it is a control layer over playing video.
+
+## Verified on 12.117
+
+- `./gradlew :app:testDebugUnitTest` — green; every suite reports 0 failures and 0 errors.
+- `./gradlew :app:assembleRelease -PallAbis=true` and `./gradlew :app:assembleRelease` — both BUILD SUCCESSFUL. `aapt dump badging` reports `versionCode 120117` / `versionName 12.117`; the 32-bit file lists `armeabi-v7a` only, the all-ABI file all four ABIs.
+- Dex check on both APKs: `DebugPlayActivity` 0, `FocusableSurface` 4, `TextFaint` 2.
+- The all-ABI build installed over 12.116 on emulator-5554 with app data kept; `dumpsys package` reports `versionName 12.117`, `resolve-activity` for `DebugPlayActivity` answers "No activity found", and the crash buffer is empty after a cold start through the profile gate onto Home.
+- On device the bar's avatar measures 68×68 px (26 dp) with the name "You" beside it, and the chip draws the shared ring when focused; the chip is intact on Home, Playroom, Settings and Live.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema201126v12.117.apk` | `armeabi-v7a` (TV boxes) | 77,299,039 bytes | `dd19d94326ff7cf9abb3674fb315cc9f494bac7e11775cf7dc272112e03c1b23` |
+| `Cinema201126v12.117-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 330,497,684 bytes | `cb399266c48a0bf3461e33737e886bea3e7098f7b9b44222abfab388c5fdeedc` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema201126v12.117.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.116 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

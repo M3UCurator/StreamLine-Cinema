@@ -50,7 +50,7 @@ underline, a settings row keeps its gold text, an approved kids title keeps its
 | --- | --- | --- |
 | `ICON` | 14% | transport dock buttons, back button, star/remove toggles, avatar choices |
 | `PILL` | 6% | tab pills, chips, skip-intro pill, compact buttons |
-| `CARD` | 5% | posters, continue-watching cards, live channel tiles, profile tiles, curation tiles |
+| `CARD` | 5% | posters, continue-watching cards, profile tiles, curation tiles |
 | `CONTROL` | 4% | standard buttons and text fields |
 | `ROW` | 1% | full-width rows: settings, guide, episodes, sources, OSD menu rows |
 | `NONE` | 0% | static surfaces that are drawn but never focused |
@@ -235,8 +235,8 @@ use `requiredSize`, so a cramped parent crops rather than distorts them.
 | Continue card | `CardRadius` | continue width | `CARD` | 0 | long-press opens episode menu; play is the tap |
 | Star / remove toggle | circle | 32–36 dp | `ICON` | — | overlays the poster corner |
 | Media card (generic) | `CardRadius` | poster | `CARD` | 0 | same contract as poster card |
-| Live channel tile | 10 dp | channel width | `CARD` | 8 | `16:9` art, LIVE pill top-end |
-| Live channel row | 10 dp | 76 dp tall | `ROW` | 10×8 | list mode |
+| Live channel row | 8 dp | 52 dp tall | `ROW` | 12×0 | number / logo / name / now / time columns |
+| Live sidebar row | 8 dp | 42 dp tall | `ROW` | 4×8 | flat rail: gold bar + wash when selected, sheen only on focus |
 | Guide row | `RowRadius` | 48 dp | `ROW` | 14×10 | time / channel / now / next columns |
 | Episode row | `RowRadius` | 48 dp | `ROW` | 10 + 48 gutter | OK plays, hold opens options |
 | Source card | `CardRadius` | content | `ROW` | 16×12 | provider grouping, badges |

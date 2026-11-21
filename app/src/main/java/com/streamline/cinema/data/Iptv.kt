@@ -854,7 +854,13 @@ object IptvParser {
         return if (encoded.isEmpty()) url else "$url|$encoded"
     }
 
-    private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+    /**
+     * `%20` rather than `+`: StreamUrls.parse decodes `%XX` runs but keeps a
+     * literal `+` (base64 tokens need it), so a form-encoded space would come
+     * back as a plus sign in the UA.
+     */
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, "UTF-8").replace("+", "%20")
 
     private fun parseXml(input: InputStream, handler: DefaultHandler) {
         val factory = SAXParserFactory.newInstance()

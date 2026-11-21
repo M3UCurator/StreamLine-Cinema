@@ -115,6 +115,28 @@ class IptvParserTest {
     }
 
     @Test
+    fun spacesInDeclaredHeadersSurviveThePipeRoundTrip() {
+        val agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        val m3u = """
+            #EXTM3U
+            #EXTINF:-1 http-user-agent="$agent" http-referrer="http://ref.example/",Attr
+            http://stream.example/a.m3u8
+            #EXTINF:-1,VlcOpt
+            #EXTVLCOPT:http-user-agent=$agent
+            http://stream.example/b.m3u8
+        """.trimIndent()
+
+        val channels = IptvParser.parseM3u(m3u, "src").channels
+        // A form-encoded space would decode back as '+', which the literal-plus
+        // rule in StreamUrls.parse deliberately preserves.
+        channels.forEach { assertTrue(!it.streamUrl!!.substringAfter('|').contains('+')) }
+        assertEquals(agent, StreamUrls.parse(channels[0].streamUrl!!).headers["User-Agent"])
+        assertEquals("http://ref.example/", StreamUrls.parse(channels[0].streamUrl!!).headers["Referer"])
+        assertEquals(agent, StreamUrls.parse(channels[1].streamUrl!!).headers["User-Agent"])
+    }
+
+    @Test
     fun resolvesRelativeStreamUrlsAgainstThePlaylistUrl() {
         val m3u = """
             #EXTM3U

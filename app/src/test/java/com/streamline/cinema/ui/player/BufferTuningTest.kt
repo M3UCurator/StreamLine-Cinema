@@ -9,27 +9,84 @@ import org.junit.Test
 
 class BufferTuningTest {
 
-    /** BALANCED must reproduce the pre-tier defaults so upgrades keep their window. */
+    /** BALANCED is the default window: a 3.5 s start and an 8 s re-buffer headroom. */
     @Test
-    fun balancedMatchesTheExistingProfiles() {
+    fun balancedCarriesTheDefaultGates() {
         val adaptive = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = true, lowRam = false)
-        assertEquals(3_000, adaptive.minBufferMs)
+        assertEquals(8_000, adaptive.minBufferMs)
         assertEquals(30_000, adaptive.maxBufferMs)
-        assertEquals(1_200, adaptive.bufferForPlaybackMs)
-        assertEquals(2_500, adaptive.bufferForPlaybackAfterRebufferMs)
+        assertEquals(3_500, adaptive.bufferForPlaybackMs)
+        assertEquals(8_000, adaptive.bufferForPlaybackAfterRebufferMs)
         assertEquals(60_000, adaptive.backBufferMs)
 
         val relaxed = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = false, lowRam = false)
-        assertEquals(5_000, relaxed.minBufferMs)
-        assertEquals(2_000, relaxed.bufferForPlaybackMs)
-        assertEquals(4_000, relaxed.bufferForPlaybackAfterRebufferMs)
+        assertEquals(6_000, relaxed.minBufferMs)
+        assertEquals(3_500, relaxed.bufferForPlaybackMs)
+        assertEquals(6_000, relaxed.bufferForPlaybackAfterRebufferMs)
 
         val progressive = bufferWindow(BufferTier.BALANCED, adaptive = false, lowLatency = true, lowRam = false)
         assertEquals(15_000, progressive.minBufferMs)
         assertEquals(50_000, progressive.maxBufferMs)
-        assertEquals(2_500, progressive.bufferForPlaybackMs)
-        assertEquals(5_000, progressive.bufferForPlaybackAfterRebufferMs)
+        assertEquals(3_500, progressive.bufferForPlaybackMs)
+        assertEquals(8_000, progressive.bufferForPlaybackAfterRebufferMs)
         assertEquals(120_000, progressive.backBufferMs)
+    }
+
+    /** Fast start must mean fast for live only; HLS/DASH VOD gets the file gates. */
+    @Test
+    fun adaptiveFastStartSplitsLiveFromVod() {
+        val vod = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = true, lowRam = false)
+        val live = bufferWindow(
+            BufferTier.BALANCED,
+            adaptive = true,
+            lowLatency = true,
+            lowRam = false,
+            live = true
+        )
+        assertEquals(3_000, live.minBufferMs)
+        assertEquals(30_000, live.maxBufferMs)
+        assertEquals(1_500, live.bufferForPlaybackMs)
+        assertEquals(3_000, live.bufferForPlaybackAfterRebufferMs)
+        assertEquals(60_000, live.backBufferMs)
+
+        assertTrue(live.bufferForPlaybackMs < vod.bufferForPlaybackMs)
+        assertTrue(live.bufferForPlaybackAfterRebufferMs < vod.bufferForPlaybackAfterRebufferMs)
+
+        // Without fast start both land on the relaxed window.
+        val relaxedVod = bufferWindow(BufferTier.BALANCED, adaptive = true, lowLatency = false, lowRam = false)
+        val relaxedLive = bufferWindow(
+            BufferTier.BALANCED,
+            adaptive = true,
+            lowLatency = false,
+            lowRam = false,
+            live = true
+        )
+        assertEquals(relaxedVod, relaxedLive)
+
+        // Live only redirects the adaptive fast-start branch.
+        val fileLive = bufferWindow(
+            BufferTier.BALANCED,
+            adaptive = false,
+            lowLatency = true,
+            lowRam = false,
+            live = true
+        )
+        assertEquals(15_000, fileLive.minBufferMs)
+        assertEquals(3_500, fileLive.bufferForPlaybackMs)
+        assertEquals(8_000, fileLive.bufferForPlaybackAfterRebufferMs)
+    }
+
+    /** Progressive files, including the high-capacity pin, get the full headroom. */
+    @Test
+    fun progressiveWindowsKeepTheRebufferGate() {
+        listOf(BufferTier.LEAN, BufferTier.BALANCED, BufferTier.GENEROUS).forEach { tier ->
+            val window = bufferWindow(tier, adaptive = false, lowLatency = true, lowRam = false)
+            assertTrue(window.bufferForPlaybackMs >= 3_000)
+            assertTrue(window.bufferForPlaybackAfterRebufferMs >= 6_000)
+        }
+        val balanced = bufferWindow(BufferTier.BALANCED, adaptive = false, lowLatency = true, lowRam = false)
+        assertEquals(3_500, balanced.bufferForPlaybackMs)
+        assertEquals(8_000, balanced.bufferForPlaybackAfterRebufferMs)
     }
 
     @Test
@@ -138,8 +195,8 @@ class BufferTuningTest {
         }
         assertEquals(15_000, HIGH_CAPACITY_VOD_WINDOW.minBufferMs)
         assertEquals(50_000, HIGH_CAPACITY_VOD_WINDOW.maxBufferMs)
-        assertEquals(2_500, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackMs)
-        assertEquals(5_000, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackAfterRebufferMs)
+        assertEquals(3_500, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackMs)
+        assertEquals(8_000, HIGH_CAPACITY_VOD_WINDOW.bufferForPlaybackAfterRebufferMs)
 
         // Adaptive streams keep their own windows.
         val adaptive = bufferWindow(
@@ -221,8 +278,11 @@ class BufferTuningTest {
         assertEquals(pinned.backBufferMs, plan.trimmedBackBufferMs)
         assertEquals(6_710, plan.window.minBufferMs)
         assertEquals(6_710, plan.window.maxBufferMs)
-        assertEquals(2_500, plan.window.bufferForPlaybackMs)
-        assertEquals(5_000, plan.window.bufferForPlaybackAfterRebufferMs)
+        assertEquals(3_500, plan.window.bufferForPlaybackMs)
+        // The 8 s gate does not fit the 6.7 s the budget holds, so it is
+        // clamped to the same ceiling as the window instead of being rejected
+        // by DefaultLoadControl.
+        assertEquals(6_710, plan.window.bufferForPlaybackAfterRebufferMs)
         val held = plan.window.maxBufferMs.toLong() * (REFERENCE_BITRATE_BPS / 8_000)
         assertTrue(held <= budget.effectiveBytes)
     }
@@ -283,6 +343,7 @@ class BufferTuningTest {
             listOf(
                 bufferWindow(tier, adaptive = true, lowLatency = false, lowRam = false),
                 bufferWindow(tier, adaptive = true, lowLatency = true, lowRam = false),
+                bufferWindow(tier, adaptive = true, lowLatency = true, lowRam = false, live = true),
                 bufferWindow(tier, adaptive = false, lowLatency = true, lowRam = false),
                 bufferWindow(tier, adaptive = true, lowLatency = true, lowRam = true),
                 bufferWindow(

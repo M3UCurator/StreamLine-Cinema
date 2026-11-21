@@ -1200,6 +1200,17 @@ fun SettingsScreen(
                                 lowRam = lowRamDevice
                             )
                         }
+                        // Fast start keeps the low-latency gates for live only;
+                        // HLS/DASH VOD resolves the file-class window above.
+                        val adaptiveLiveProfile = remember(settings, lowRamDevice) {
+                            playbackProfile(
+                                settings,
+                                settings.decoderType,
+                                adaptive = true,
+                                lowRam = lowRamDevice,
+                                live = true
+                            )
+                        }
                         SettingsGroup(
                             "Bandwidth & buffering",
                             hint = when {
@@ -1222,7 +1233,8 @@ fun SettingsScreen(
                             label = "Fast-start buffering",
                             checked = settings.lowLatency,
                             onChange = { vm.saveSettings { s -> s.copy(lowLatency = it) } },
-                            description = "Starts 2–3 s in and re-buffers at 2.5 s; no LL-HLS/LL-DASH part loading"
+                            description = "Live channels start 1.5 s in and re-buffer at 3 s; " +
+                                "HLS/DASH VOD keeps the 3.5 s / 8 s file gates · no LL-HLS/LL-DASH part loading"
                         )
                         SettingsToggleRow(
                             label = "Adaptive bitrate (ABR)",
@@ -1254,7 +1266,7 @@ fun SettingsScreen(
                             label = "High-capacity buffering (MP4 / MKV)",
                             checked = settings.highCapacityBuffer,
                             onChange = { vm.saveSettings { s -> s.copy(highCapacityBuffer = it) } },
-                            description = "15 s fill · 50 s forward · 2.5 s start · 5 s re-buffer; " +
+                            description = "15 s fill · 50 s forward · 3.5 s start · 8 s re-buffer; " +
                                 "wins over the buffer tier for MP4/MKV, shortened to what the byte budget holds"
                         )
                         SettingsInfoRow(
@@ -1265,6 +1277,12 @@ fun SettingsScreen(
                             title = "HLS / MPEG-DASH load control",
                             value = describeBuffer(adaptiveProfile)
                         )
+                        if (describeBuffer(adaptiveLiveProfile) != describeBuffer(adaptiveProfile)) {
+                            SettingsInfoRow(
+                                title = "Live channels load control",
+                                value = describeBuffer(adaptiveLiveProfile)
+                            )
+                        }
                         SettingsInfoRow(
                             title = "VLC / MPV cache",
                             value = describeNativeCache(progressiveProfile)

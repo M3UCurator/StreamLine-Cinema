@@ -15,12 +15,21 @@ internal data class BufferWindow(
     val backBufferMs: Int
 )
 
-// The 2.5 s start / 5 s re-buffer gates this app has always used. Media3
-// 1.11's own DefaultLoadControl defaults are 1 s / 2 s, so these are
-// deliberately more conservative. Kept as literals so the mapping is testable
-// without loading Media3 on the JVM.
-private const val START_MS = 2_500
-private const val REBUFFER_MS = 5_000
+// Playback gates. The start gate waits for 3.5 s of media before the first
+// frame, which is what separates a steady open from a stuttering one at 1080p.
+// The re-buffer gate waits for 8 s once playback has stalled, so a link that
+// dips keeps a continuous picture instead of oscillating in and out of
+// buffering. Media3 1.11's own defaults are 1 s / 2 s; both stay well inside
+// the 15 s balanced window. Kept as literals so the mapping is testable without
+// loading Media3 on the JVM.
+private const val START_MS = 3_500
+private const val REBUFFER_MS = 8_000
+
+// Live adaptive streams keep lower gates: long enough to survive one missed
+// segment fetch, short enough that a zap or a stall recovery is not left
+// waiting. The 8 s VOD gate would add 5 s to every channel recovery.
+private const val LIVE_START_MS = 1_500
+private const val LIVE_REBUFFER_MS = 3_000
 
 // Hard RAM ceilings for the low-RAM load control. Seconds are not a memory
 // bound: the same window holds four times the bytes at 4K, so the loader is
@@ -42,7 +51,7 @@ internal const val NORMAL_HEAP_DIVISOR = 4
 /**
  * The window the "High-capacity buffering" switch requests on MP4/MKV: a 15 s
  * fill before playback may start, 50 s of forward buffer to ride out a line
- * that dips, and the app's 2.5 s / 5 s start and re-buffer gates.
+ * that dips, and the shared 3.5 s / 8 s start and re-buffer gates.
  */
 internal val HIGH_CAPACITY_VOD_WINDOW = BufferWindow(
     minBufferMs = 15_000,
@@ -53,9 +62,13 @@ internal val HIGH_CAPACITY_VOD_WINDOW = BufferWindow(
 )
 
 /**
- * BALANCED must stay byte-for-byte the pre-tier behaviour so existing installs
- * keep their tuned window; LEAN and GENEROUS only move the forward window and
- * the rewind retention around it.
+ * The tier moves the forward window and the rewind retention; the start and
+ * re-buffer gates come from [START_MS] and [REBUFFER_MS], except on the live
+ * fast-start window, where recovery latency matters more than headroom.
+ *
+ * [live] splits the adaptive fast-start branch: HLS/DASH VOD opens with the
+ * file-class gates and the 8 s window that carries them, while live keeps the
+ * low-latency pair so a zap does not pay the VOD start delay.
  *
  * [highCapacityVod] requests the progressive MP4/MKV window
  * [HIGH_CAPACITY_VOD_WINDOW] whatever the tier says, including on the low-RAM
@@ -69,7 +82,8 @@ internal fun bufferWindow(
     adaptive: Boolean,
     lowLatency: Boolean,
     lowRam: Boolean,
-    highCapacityVod: Boolean = false
+    highCapacityVod: Boolean = false,
+    live: Boolean = false
 ): BufferWindow {
     if (!adaptive && highCapacityVod) return HIGH_CAPACITY_VOD_WINDOW
     if (lowRam) {
@@ -97,25 +111,43 @@ internal fun bufferWindow(
                 BufferTier.GENEROUS -> 60_000
             }
         }
-        return BufferWindow(fixed, fixed, START_MS, REBUFFER_MS, back)
+        // A lean fixed window can be shorter than the 8 s re-buffer gate, and
+        // DefaultLoadControl rejects a gate above minBufferMs, so both gates are
+        // clamped to the window the budget can actually hold.
+        return BufferWindow(
+            fixed,
+            fixed,
+            minOf(START_MS, fixed),
+            minOf(REBUFFER_MS, fixed),
+            back
+        )
     }
     if (adaptive) {
         return when (tier) {
             BufferTier.LEAN -> BufferWindow(2_000, 15_000, 1_000, 2_000, 30_000)
-            BufferTier.BALANCED -> BufferWindow(
-                if (lowLatency) 3_000 else 5_000,
-                30_000,
-                if (lowLatency) 1_200 else 2_000,
-                if (lowLatency) 2_500 else 4_000,
-                60_000
-            )
-            BufferTier.GENEROUS -> BufferWindow(8_000, 60_000, 3_000, 6_000, 90_000)
+            BufferTier.BALANCED -> if (lowLatency) {
+                if (live) {
+                    // Live keeps the fast-start trade: one missed segment fetch
+                    // must not cost five extra seconds on every zap.
+                    BufferWindow(3_000, 30_000, LIVE_START_MS, LIVE_REBUFFER_MS, 60_000)
+                } else {
+                    // HLS/DASH VOD opens with the file-class gates. The window
+                    // floor is raised to 8 s because DefaultLoadControl rejects
+                    // a re-buffer gate above minBufferMs.
+                    BufferWindow(8_000, 30_000, START_MS, REBUFFER_MS, 60_000)
+                }
+            } else {
+                // Relaxed adaptive gets the same class of headroom as files.
+                // minBufferMs is raised too: it may not sit below the gate.
+                BufferWindow(6_000, 30_000, START_MS, 6_000, 60_000)
+            }
+            BufferTier.GENEROUS -> BufferWindow(8_000, 60_000, START_MS, REBUFFER_MS, 90_000)
         }
     }
     return when (tier) {
-        BufferTier.LEAN -> BufferWindow(10_000, 30_000, 2_000, 4_000, 60_000)
+        BufferTier.LEAN -> BufferWindow(10_000, 30_000, 3_000, 6_000, 60_000)
         BufferTier.BALANCED -> BufferWindow(15_000, 50_000, START_MS, REBUFFER_MS, 120_000)
-        BufferTier.GENEROUS -> BufferWindow(20_000, 90_000, 3_000, 6_000, 180_000)
+        BufferTier.GENEROUS -> BufferWindow(20_000, 90_000, START_MS, REBUFFER_MS, 180_000)
     }
 }
 

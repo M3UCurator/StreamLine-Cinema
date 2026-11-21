@@ -47,6 +47,7 @@ import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.StreamBadgeCatalog
+import com.streamline.cinema.data.StreamPresentation
 import com.streamline.cinema.data.StreamSearchPhase
 import com.streamline.cinema.data.StreamSearchStep
 import com.streamline.cinema.ui.Chip
@@ -64,9 +65,10 @@ import kotlinx.coroutines.delay
 
 /**
  * Source picker grouped by provider. Each addon is a chip that filters the list;
- * every card carries the parsed stream spec rows and the badge pill images that
- * the configured badge document matches against the stream text. The list is
- * lazy and unbounded: every distinct stream the search discovered is listed.
+ * every row is one compact pair of lines — spec pills plus the release file name
+ * and container — with the badge artwork the configured badge document matches
+ * against the stream text. The list is lazy and unbounded: every distinct stream
+ * the search discovered is listed.
  */
 @Composable
 internal fun SourcePicker(
@@ -302,6 +304,12 @@ private fun ProviderHeader(provider: String, logo: String, count: Int) {
     }
 }
 
+/**
+ * One source, two lines: the spec pills and the release file name. The pills
+ * carry the same facts the reference list shows — resolution, size, bitrate,
+ * dynamic range, source/codec and audio — so a viewer picks by glancing at the
+ * row instead of opening it. Badge artwork and the addon logo sit on the right.
+ */
 @Composable
 private fun SourceCard(
     option: PlaybackOption,
@@ -311,14 +319,26 @@ private fun SourceCard(
     onSelect: () -> Unit
 ) {
     val meta = option.meta
+    val facts = remember(meta) { StreamPresentation.facts(meta) }
     val sounds = LocalUiSounds.current
     val interaction = remember { MutableInteractionSource() }
     var focused by remember { mutableStateOf(false) }
     val matched = remember(option.url, badges) { badges.matches(meta.haystack) }
-    val specSize = listOfNotNull(
-        meta.size.takeIf { it.isNotBlank() },
-        meta.bitrate.takeIf { it.isNotBlank() }
-    ).joinToString(" · ")
+    // Transport that is not a file still deserves a type pill (live HLS feeds).
+    val container = facts.container.ifBlank {
+        if (facts.fileName.isBlank()) option.streamKind?.name.orEmpty() else ""
+    }
+    val title = facts.fileName.ifBlank {
+        meta.releaseTitle.ifBlank { option.name }
+    }
+    // Size and bitrate share one pill, like the reference list.
+    val spec = when {
+        facts.size.isNotBlank() && facts.bitrate.isNotBlank() ->
+            "${facts.size} · ≈${facts.bitrate}"
+        facts.size.isNotBlank() -> facts.size
+        facts.bitrate.isNotBlank() -> "≈${facts.bitrate}"
+        else -> ""
+    }
 
     Row(
         Modifier
@@ -339,135 +359,88 @@ private fun SourceCard(
                 sounds.select()
                 onSelect()
             }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(Modifier.weight(1f)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text(
-                    meta.headline.ifBlank { option.name },
-                    color = Cinema.TextPrimary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                if (selected) InfoPill("PLAYING", Cinema.Ink, Cinema.Gold, solid = true)
+        Column(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            if (selected || facts.hasPills || container.isNotBlank()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (selected) InfoPill("PLAYING", Cinema.Ink, Cinema.Gold, solid = true)
+                    if (facts.resolution.isNotBlank()) {
+                        InfoPill(facts.resolution, Cinema.Gold, Glass.AccentWash)
+                    }
+                    if (spec.isNotBlank()) {
+                        InfoPill(spec, Cinema.TextPrimary, Glass.Control)
+                    }
+                    if (facts.dynamicRange.isNotBlank()) {
+                        InfoPill(
+                            facts.dynamicRange,
+                            Cinema.Tmdb,
+                            Cinema.Tmdb.copy(alpha = 0.14f)
+                        )
+                    }
+                    if (facts.type.isNotBlank()) {
+                        InfoPill(facts.type, Cinema.TextSecondary, Glass.Control)
+                    }
+                    if (facts.audio.isNotBlank()) {
+                        InfoPill(facts.audio, Cinema.Online, Cinema.Online.copy(alpha = 0.14f))
+                    }
+                    if (container.isNotBlank()) {
+                        InfoPill(container, Cinema.TextMuted, Glass.Control)
+                    }
+                }
             }
-            if (meta.subhead.isNotBlank()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    meta.subhead,
-                    color = Cinema.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Spacer(Modifier.height(5.dp))
-            if (meta.releaseTitle.isNotBlank()) {
-                Text(
-                    meta.releaseTitle,
-                    color = Cinema.TextPrimary.copy(alpha = 0.9f),
+                    title,
+                    color = Cinema.TextPrimary.copy(alpha = 0.92f),
                     fontSize = 12.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-            }
-            if (meta.format.isNotBlank()) {
+                Spacer(Modifier.width(10.dp))
                 Text(
-                    meta.format,
-                    color = Cinema.Gold.copy(alpha = 0.85f),
-                    fontSize = 11.sp,
+                    providerOf(option).uppercase(),
+                    color = Cinema.TextFaint,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (specSize.isNotBlank()) {
-                Text(
-                    specSize,
-                    color = Cinema.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (meta.releaseGroup.isNotBlank()) {
-                Text(
-                    meta.releaseGroup,
-                    color = Cinema.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (meta.languages.isNotBlank()) {
-                Text(
-                    meta.languages,
-                    color = Cinema.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            if (!meta.hasDetails && matched.isEmpty()) {
-                Text(
-                    option.name,
-                    color = Cinema.TextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 150.dp)
                 )
             }
         }
-        Spacer(Modifier.width(18.dp))
-        Column(
-            horizontalAlignment = Alignment.End,
-            modifier = Modifier.widthIn(max = 300.dp)
-        ) {
-            if (meta.providerLogo.isNotBlank()) {
-                AsyncImage(
-                    model = meta.providerLogo,
-                    contentDescription = meta.provider,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .height(26.dp)
-                        .widthIn(max = 150.dp)
-                )
-                Spacer(Modifier.height(4.dp))
-            }
-            Text(
-                providerOf(option).uppercase(),
-                color = Cinema.TextSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.8.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                "NATIVE · ABR",
-                color = Cinema.TextMuted,
-                fontSize = 9.sp,
-                maxLines = 1
-            )
-            if (matched.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    matched.forEach { badge ->
-                        AsyncImage(
-                            model = badge.imageUrl,
-                            contentDescription = badge.name,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.height(16.dp)
-                        )
-                    }
+        if (matched.isNotEmpty() || meta.providerLogo.isNotBlank()) {
+            Spacer(Modifier.width(12.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                matched.take(4).forEach { badge ->
+                    AsyncImage(
+                        model = badge.imageUrl,
+                        contentDescription = badge.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.height(16.dp)
+                    )
+                }
+                if (meta.providerLogo.isNotBlank()) {
+                    AsyncImage(
+                        model = meta.providerLogo,
+                        contentDescription = meta.provider,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .height(18.dp)
+                            .widthIn(max = 90.dp)
+                    )
                 }
             }
         }

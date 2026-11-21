@@ -23,6 +23,10 @@ data class StreamMeta(
     val size: String = "",
     /** `26.4 Mbps`. */
     val bitrate: String = "",
+    /** Release file name when the addon publishes one: `Show.S01E01.2160p.mkv`. */
+    val fileName: String = "",
+    /** Container from the file name, upper case: `MKV`. */
+    val fileType: String = "",
     /** Releaser / supplier: `Frenchio · SUPPLY`. */
     val releaseGroup: String = "",
     /** `FR · MULTI`. */
@@ -32,10 +36,6 @@ data class StreamMeta(
     /** Every line joined, for badge pattern matching. */
     val haystack: String = ""
 ) {
-    val hasDetails: Boolean
-        get() = releaseTitle.isNotBlank() || format.isNotBlank() || size.isNotBlank() ||
-            releaseGroup.isNotBlank() || languages.isNotBlank()
-
     /** Live lookups resolve inside another screen; the card fields ride the intent. */
     fun toJson(): JSONObject = JSONObject().apply {
         put("provider", provider)
@@ -46,6 +46,8 @@ data class StreamMeta(
         put("format", format)
         put("size", size)
         put("bitrate", bitrate)
+        put("fileName", fileName)
+        put("fileType", fileType)
         put("releaseGroup", releaseGroup)
         put("languages", languages)
         put("quality", quality)
@@ -64,6 +66,8 @@ data class StreamMeta(
                 format = raw.optString("format"),
                 size = raw.optString("size"),
                 bitrate = raw.optString("bitrate"),
+                fileName = raw.optString("fileName"),
+                fileType = raw.optString("fileType"),
                 releaseGroup = raw.optString("releaseGroup"),
                 languages = raw.optString("languages"),
                 quality = raw.optString("quality"),
@@ -71,6 +75,28 @@ data class StreamMeta(
             )
         }
     }
+}
+
+/**
+ * The compact row's pill cluster in front of the file name: what the stream is,
+ * how big it is, what it carries and what container it lands in. Every field is
+ * display-ready and blank when the addon never said.
+ */
+data class StreamFacts(
+    val resolution: String = "",
+    val size: String = "",
+    val bitrate: String = "",
+    val dynamicRange: String = "",
+    val audio: String = "",
+    /** Source and codec tags in the order the addon wrote them: `BLU-RAY · REMUX · HEVC`. */
+    val type: String = "",
+    val container: String = "",
+    val fileName: String = ""
+) {
+    val hasPills: Boolean
+        get() = resolution.isNotBlank() || size.isNotBlank() || bitrate.isNotBlank() ||
+            dynamicRange.isNotBlank() || audio.isNotBlank() || type.isNotBlank() ||
+            container.isNotBlank()
 }
 
 object StreamPresentation {
@@ -90,6 +116,22 @@ object StreamPresentation {
     private val HTML_TAG = Regex("<[^>]*>")
     private val LINE_BREAK = Regex("(?i)<br\\s*/?>")
     private val LINK = Regex("https?://\\S+", RegexOption.IGNORE_CASE)
+    private val FILE_NAME = Regex(
+        "(?i)([A-Za-z0-9][A-Za-z0-9 ._()&+'\\-]{2,180}\\.(?:mkv|mp4|m4v|avi|m2ts|mov|webm|wmv|flv|ts|m3u8))(?!\\w)"
+    )
+    private val DYNAMIC_TOKEN = Regex(
+        "(?i)(dolby[\\s._-]*vision|dovi|\\bdv\\b|hdr10\\+|hdr10plus|hdr10|hdr|hlg|sdr)"
+    )
+    private val AUDIO_TOKEN = Regex(
+        "(?i)(atmos|truehd|dts[\\s._:-]*(?:hd[\\s._:-]*ma|x|hd)?|ddp|dd\\+|" +
+            "dolby[\\s._-]*digital[\\s._-]*plus|dolby[\\s._-]*digital|e-?ac-?3|ac-?3|flac|aac|opus)"
+    )
+    private val CHANNELS = Regex(
+        "(?<![0-9])([1-9])[.·]([01])(?![0-9])(?!\\s*[gmt]b\\b)",
+        RegexOption.IGNORE_CASE
+    )
+    private val SEPARATORS = Regex("[\\s._-]+")
+    private val DYNAMIC_PRIORITY = listOf("DV", "HDR10+", "HDR10", "HDR", "HLG")
     private val KNOWN_LANG_TOKENS = setOf(
         "MULTI", "MULTI-SUB", "MULTISUB", "VOSTFR", "TRUEFRENCH", "VFF", "VFQ", "VF2",
         "VF", "VO", "VOST", "AUDIO", "ORIGINAL", "DUAL"
@@ -103,6 +145,10 @@ object StreamPresentation {
         val provider = label.trim()
         val nameLines = cleanLines(name)
         val titleLines = cleanLines(title)
+        // Torrent layouts publish the release file name as one of their lines;
+        // it is the most precise thing the row can show, so it is lifted out
+        // before the remaining text is split into fields.
+        val fileName = findFileName(titleLines).ifBlank { findFileName(nameLines) }
         val haystack = buildString {
             append(provider).append(' ')
             append(name.orEmpty()).append(' ')
@@ -114,6 +160,7 @@ object StreamPresentation {
         val tagLines = nameLines.mapNotNull { raw ->
             var text = raw
             if (provider.isNotBlank() && text.equals(provider, ignoreCase = true)) return@mapNotNull null
+            if (fileName.isNotBlank() && text.equals(fileName, ignoreCase = true)) return@mapNotNull null
             if (provider.isNotBlank() && text.startsWith(provider, ignoreCase = true)) {
                 text = text.substring(provider.length).trim(' ', '·', '|', '-', ':', '—')
             }
@@ -130,7 +177,9 @@ object StreamPresentation {
         var languages = ""
 
         for (raw in titleLines) {
-            val line = raw.trim()
+            // The file name is shown on its own row; whatever shares its line
+            // (size, seeder notes) still goes through the normal split below.
+            val line = if (fileName.isBlank()) raw.trim() else withoutFileName(raw, fileName)
             if (line.isEmpty()) continue
             if (provider.isNotBlank() && line.equals(provider, ignoreCase = true)) continue
             if (line == headline || line == subhead) continue
@@ -207,12 +256,31 @@ object StreamPresentation {
             format = formats.joinToString(" · "),
             size = sizes.distinct().joinToString(" · "),
             bitrate = bitrate,
+            fileName = fileName,
+            fileType = containerLabel(fileName),
             releaseGroup = releaseGroup,
             languages = languages,
             quality = quality,
             haystack = haystack
         )
     }
+
+    /**
+     * Collapses a parsed stream into the pills of the compact row. Anything the
+     * addon spread across free-text lines is re-derived from the haystack, so
+     * layouts that only publish a release string still gain the full cluster.
+     */
+    fun facts(meta: StreamMeta): StreamFacts = StreamFacts(
+        resolution = meta.quality,
+        // Sizes can arrive as a list of variants; the row shows the first.
+        size = meta.size.substringBefore(" · ").trim(),
+        bitrate = meta.bitrate,
+        dynamicRange = dynamicLabel(meta.haystack),
+        audio = audioLabel(meta.haystack),
+        type = typeLabel(meta.haystack),
+        container = meta.fileType,
+        fileName = meta.fileName
+    )
 
     private fun cleanLines(raw: String?): List<String> {
         if (raw.isNullOrBlank()) return emptyList()
@@ -278,6 +346,131 @@ object StreamPresentation {
                 token.lowercase() in setOf("web", "hd", "sd", "hdr", "sdr")
         }
     }
+
+    private fun findFileName(lines: List<String>): String =
+        lines.mapNotNull { line ->
+            val text = line.trim().trim('[', ']', '(', ')').trim()
+            val match = FILE_NAME.find(text) ?: return@mapNotNull null
+            // Only a line that opens with the name is the release file name; a
+            // stray mention inside prose is not what the addon published.
+            if (match.range.first != 0) return@mapNotNull null
+            match.groupValues[1].trim()
+        }.maxByOrNull { it.length }
+            .orEmpty()
+
+    /** Removes the file name from a line, keeping whatever note shared it. */
+    private fun withoutFileName(line: String, fileName: String): String {
+        val index = line.indexOf(fileName, ignoreCase = true)
+        if (index < 0) return line.trim()
+        val rest = line.substring(0, index) + " " + line.substring(index + fileName.length)
+        return rest.trim(' ', '·', '|', '•', '-', '—', '(', ')', '[', ']').trim()
+    }
+
+    private fun containerLabel(fileName: String): String {
+        if (fileName.isBlank()) return ""
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "" -> ""
+            "m3u8" -> "HLS"
+            else -> ext.uppercase()
+        }
+    }
+
+    private fun dynamicLabel(text: String): String {
+        val found = DYNAMIC_TOKEN.findAll(text)
+            .map { dynamicTag(it.value) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        return found.minByOrNull { tag ->
+            DYNAMIC_PRIORITY.indexOf(tag).let { if (it < 0) DYNAMIC_PRIORITY.size else it }
+        }.orEmpty()
+    }
+
+    private fun dynamicTag(raw: String): String {
+        val token = raw.lowercase()
+        return when {
+            token.startsWith("dolby") || token == "dovi" || token == "dv" -> "DV"
+            token == "hdr10+" || token == "hdr10plus" -> "HDR10+"
+            token == "hdr10" -> "HDR10"
+            token == "hdr" -> "HDR"
+            token == "hlg" -> "HLG"
+            else -> ""
+        }
+    }
+
+    private fun audioLabel(text: String): String {
+        val labels = AUDIO_TOKEN.findAll(text)
+            .map { audioTag(it.value) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .toList()
+        if (labels.isEmpty()) return ""
+        // `DTS` next to `DTS-HD MA` is the same track family, not a second one.
+        val kept = labels.filterNot { label ->
+            labels.any { other -> other != label && other.startsWith(label) }
+        }.take(2)
+        val channels = CHANNELS.find(text)?.let { "${it.groupValues[1]}.${it.groupValues[2]}" }
+        // Reference order: codec, channel layout, then the Atmos badge last.
+        val parts = kept.filter { it != "Atmos" } + listOfNotNull(channels) +
+            kept.filter { it == "Atmos" }
+        return parts.joinToString(" · ")
+    }
+
+    private fun audioTag(raw: String): String {
+        val token = raw.lowercase().replace(SEPARATORS, " ").trim()
+        return when {
+            token == "atmos" -> "Atmos"
+            token == "truehd" -> "TrueHD"
+            token.startsWith("dts hd ma") -> "DTS-HD MA"
+            token == "dts hd" -> "DTS-HD"
+            token == "dts x" -> "DTS:X"
+            token == "dts" -> "DTS"
+            token == "ddp" || token == "dd+" -> "DDP"
+            token.contains("digital") && token.contains("plus") -> "DDP"
+            token.contains("digital") -> "DD"
+            token.startsWith("eac3") || token.startsWith("e ac 3") ||
+                token.startsWith("ec3") || token.startsWith("ac3") -> "DD"
+            token == "flac" -> "FLAC"
+            token == "aac" -> "AAC"
+            token == "opus" -> "Opus"
+            else -> ""
+        }
+    }
+
+    private fun typeLabel(text: String): String {
+        val hits = buildList {
+            SOURCE.findAll(text).forEach { add(it.range.first to sourceLabel(it.value)) }
+            CODEC.findAll(text).forEach { add(it.range.first to codecLabel(it.value)) }
+        }
+        return hits.sortedBy { it.first }
+            .map { it.second }
+            .distinct()
+            .take(3)
+            .joinToString(" · ")
+    }
+
+    private fun sourceLabel(raw: String): String =
+        when (raw.uppercase().replace(SEPARATORS, "")) {
+            "REMUX", "BDREMUX" -> "REMUX"
+            "BLURAY" -> "BLU-RAY"
+            "BDRIP" -> "BDRIP"
+            "WEBDL" -> "WEB-DL"
+            "WEBRIP" -> "WEBRIP"
+            "HDTV" -> "HDTV"
+            "DVDRIP" -> "DVD-RIP"
+            "HDCAM" -> "HDCAM"
+            else -> raw.uppercase()
+        }
+
+    private fun codecLabel(raw: String): String =
+        when (raw.uppercase().replace(SEPARATORS, "")) {
+            "HEVC", "H265", "X265" -> "HEVC"
+            "AVC", "H264", "X264" -> "H.264"
+            "AV1" -> "AV1"
+            "VP9" -> "VP9"
+            "MPEG2" -> "MPEG-2"
+            else -> raw.uppercase()
+        }
 
     private fun normalizeQuality(raw: String?): String = when (raw?.lowercase()) {
         null -> ""

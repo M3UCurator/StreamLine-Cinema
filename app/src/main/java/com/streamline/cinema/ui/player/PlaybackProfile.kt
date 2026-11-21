@@ -103,6 +103,8 @@ private fun widthFor(height: Int): Int = when {
  * settled buffer selection while the Settings UI passes the live values.
  * [forceBuiltIn] covers the native-engine fallback: the profile then names the
  * engine that will actually run, so its rebuild key stays truthful.
+ * [live] only changes the adaptive fast-start window: live keeps the low-latency
+ * gates, HLS/DASH VOD takes the file-class headroom.
  * [maxMemoryBytes] is injectable so tests resolve the same budget on any host.
  */
 internal fun playbackProfile(
@@ -115,7 +117,8 @@ internal fun playbackProfile(
     highCapacityVod: Boolean = settings.highCapacityBuffer,
     headers: Map<String, String> = emptyMap(),
     forceBuiltIn: Boolean = false,
-    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()
+    maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
+    live: Boolean = false
 ): PlaybackProfile = PlaybackProfile(
     engine = if (forceBuiltIn) PlaybackEngine.BUILT_IN else settings.playbackEngine,
     decoder = decoder,
@@ -123,7 +126,7 @@ internal fun playbackProfile(
     downmixStereo = settings.forceStereoDownmix,
     normalizeVolume = settings.normalizeVolume,
     amlogicFix = settings.amlogicFix,
-    window = bufferWindow(tier, adaptive, lowLatency, lowRam, highCapacityVod),
+    window = bufferWindow(tier, adaptive, lowLatency, lowRam, highCapacityVod, live),
     byteBudget = resolveByteBudget(adaptive, lowRam, maxMemoryBytes),
     native = nativeCache(tier, highCapacityVod = highCapacityVod && !adaptive),
     abr = settings.abrEnabled,

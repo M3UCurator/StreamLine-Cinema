@@ -99,6 +99,70 @@ class StreamPresentationTest {
     }
 
     @Test
+    fun compactRowLiftsTheReleaseFileNameAndSpecPills() {
+        val meta = StreamPresentation.parse(
+            "AIOStreams",
+            "AIOStreams\n4K",
+            "Big.Buck.Bunny.2008.2160p.UHD.BluRay.Remux.HDR.HEVC.DTS-HD.MA.5.1.mkv\n" +
+                "6.61 GB · 88 Mbps"
+        )
+        assertEquals(
+            "Big.Buck.Bunny.2008.2160p.UHD.BluRay.Remux.HDR.HEVC.DTS-HD.MA.5.1.mkv",
+            meta.fileName
+        )
+        assertEquals("MKV", meta.fileType)
+        // The file name row replaces the release title; it must not be repeated.
+        assertTrue(meta.releaseTitle.isBlank())
+
+        val facts = StreamPresentation.facts(meta)
+        assertEquals("4K", facts.resolution)
+        assertEquals("6.61 GB", facts.size)
+        assertEquals("88 Mbps", facts.bitrate)
+        assertEquals("HDR", facts.dynamicRange)
+        assertEquals("DTS-HD MA · 5.1", facts.audio)
+        assertEquals("BLU-RAY · REMUX · HEVC", facts.type)
+        assertEquals("MKV", facts.container)
+        assertTrue(facts.fileName.isNotBlank())
+    }
+
+    @Test
+    fun compactRowDerivesPillsWithoutAFileName() {
+        val meta = StreamPresentation.parse(
+            "Torrentio",
+            "Torrentio\n1080p",
+            "BluRay\nWEB-DL\nDDP5.1 Atmos\nDV HDR10+ HEVC\n2.1 GB\nSPARKS"
+        )
+        assertEquals("", meta.fileName)
+        val facts = StreamPresentation.facts(meta)
+        assertEquals("1080p", facts.resolution)
+        assertEquals("2.1 GB", facts.size)
+        assertEquals("DV", facts.dynamicRange)
+        assertEquals("DDP · 5.1 · Atmos", facts.audio)
+        assertEquals("BLU-RAY · WEB-DL · HEVC", facts.type)
+        assertEquals("", facts.container)
+        assertEquals("", facts.bitrate)
+    }
+
+    @Test
+    fun hdr10PlusWithoutTheSignIsRecognised() {
+        val meta = StreamPresentation.parse(
+            "Addon",
+            null,
+            "Movie.2024.2160p.WEB-DL.HDR10Plus.DDP5.1.HEVC.mkv"
+        )
+        assertEquals("HDR10+", StreamPresentation.facts(meta).dynamicRange)
+    }
+
+    @Test
+    fun fileTypeComesFromTheExtensionAndHlsIsSpelledOut() {
+        val stream = StreamPresentation.parse("Addon", null, "Show.S02E04.720p.m3u8")
+        assertEquals("HLS", stream.fileType)
+        val movie = StreamPresentation.parse("Addon", null, "Movie.2024.1080p.WEB-DL.mkv")
+        assertEquals("Movie.2024.1080p.WEB-DL.mkv", movie.fileName)
+        assertEquals("MKV", movie.fileType)
+    }
+
+    @Test
     fun badgeCatalogParsesGroupsAndMatchesText() {
         val filters = JSONArray()
             .put(

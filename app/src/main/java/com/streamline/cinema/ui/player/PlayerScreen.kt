@@ -832,6 +832,7 @@ fun PlayerScreen(
         settings,
         decoderMode,
         profileAdaptive,
+        isLive,
         lowRamDevice,
         settledBuffer,
         playbackHeaders,
@@ -846,7 +847,8 @@ fun PlayerScreen(
             lowLatency = settledBuffer.lowLatency,
             highCapacityVod = settledBuffer.highCapacity,
             headers = playbackHeaders,
-            forceBuiltIn = nativeFallback
+            forceBuiltIn = nativeFallback,
+            live = isLive
         )
     }
     // Reloads (retry timer, proxy bypass, RELOAD button) re-prepare the same
@@ -932,26 +934,23 @@ fun PlayerScreen(
     // session per channel, so the panel and the dropped-frame cap describe the
     // channel on screen instead of the whole zapping session.
     val playbackStatsListener = remember { PlaybackStatsListener(false, null) }
-    DisposableEffect(playerOrNull) {
+    // One probe per source: a retained live player keeps its instance across
+    // channel zaps, so the previous channel's decoder names must not survive.
+    val decoderProbe = remember(playbackUrl) { DecoderProbe() }
+    DisposableEffect(playerOrNull, decoderProbe) {
         // Analytics counters only exist on the built-in engine; native engines
         // report what they can through the same Player state instead.
         val target = playerOrNull as? ExoPlayer ?: return@DisposableEffect onDispose { }
         target.addAnalyticsListener(playbackStatsListener)
-        onDispose { target.removeAnalyticsListener(playbackStatsListener) }
-    }
-    var statsSnapshot by remember { mutableStateOf(PlaybackStats.EMPTY) }
-    // Refreshed alongside the counters so the panel shows the estimate ABR is
-    // using now, not the session mean.
-    var liveBandwidthBps by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(panel, playerOrNull) {
-        if (panel != OsdPanel.STATS) return@LaunchedEffect
-        while (true) {
-            statsSnapshot = runCatching { playbackStatsListener.playbackStats }
-                .getOrNull() ?: PlaybackStats.EMPTY
-            liveBandwidthBps = PlaybackBandwidth.estimateBps()
-            delay(1_000L)
+        target.addAnalyticsListener(decoderProbe)
+        onDispose {
+            target.removeAnalyticsListener(playbackStatsListener)
+            target.removeAnalyticsListener(decoderProbe)
         }
     }
+    // Polled once a second while the panel is open, and refreshed with it so
+    // the estimate shown is the one ABR is using now, not the session mean.
+    val osdStats = rememberOsdStats(panel, playerOrNull, playbackStatsListener, decoderProbe)
 
     // Set when the decoder cannot keep up with the selected rendition; the
     // video ceiling then drops to 720p for the rest of this source.
@@ -3894,7 +3893,7 @@ fun PlayerScreen(
                     }
                 }
                 OsdPanel.STATS -> {
-                    val snapshot = statsSnapshot
+                    val snapshot = osdStats.stats
                     val videoFormat = snapshot.videoFormatHistory.lastOrNull()?.format
                     val audioFormat = snapshot.audioFormatHistory.lastOrNull()?.format
                     val width = videoFormat?.width?.takeIf { it > 0 } ?: videoPixelSize.width
@@ -3926,7 +3925,7 @@ fun PlayerScreen(
                         )
                         add(
                             "Bandwidth estimate" to (
-                                liveBandwidthBps.takeIf { it > 0 }
+                                osdStats.bandwidthBps.takeIf { it > 0 }
                                     ?.let { formatBitrate(it) }
                                     ?: snapshot.meanBandwidth.takeIf { it > 0 }
                                         ?.let { formatBitrate(it.toLong()) }
@@ -3960,6 +3959,10 @@ fun PlayerScreen(
                         )
                         add("Audio" to describeAudio(audioFormat))
                         add("Decoder" to profile.decoder.name.replace('_', ' '))
+                        // The mode above is a request; these are the codecs
+                        // MediaCodec actually opened for this source.
+                        add("Video decoder" to (osdStats.videoDecoder ?: "—"))
+                        add("Audio decoder" to (osdStats.audioDecoder ?: "—"))
                         add(
                             "Engine" to describeRunningEngine(playerOrNull, nativeFallback)
                         )
@@ -4948,6 +4951,43 @@ private fun mediaFileName(url: String?, fallback: String): String {
     val decoded = segment?.let { runCatching { Uri.decode(it) }.getOrNull() }
         ?.takeIf { it.isNotBlank() }
     return decoded ?: fallback
+}
+
+/** What the stats panel shows: the counters plus the codecs actually opened. */
+private data class OsdStats(
+    val stats: PlaybackStats = PlaybackStats.EMPTY,
+    val bandwidthBps: Long = 0L,
+    val videoDecoder: String? = null,
+    val audioDecoder: String? = null
+)
+
+/**
+ * Polls only while the stats panel is on screen. Kept out of the player
+ * composable because the K2 data-flow pass scales badly with the number of
+ * mutable locals it has to track through that many nested lambdas.
+ */
+@Composable
+private fun rememberOsdStats(
+    panel: OsdPanel?,
+    player: Player?,
+    statsListener: PlaybackStatsListener,
+    probe: DecoderProbe
+): OsdStats {
+    var value by remember { mutableStateOf(OsdStats()) }
+    LaunchedEffect(panel, player, probe) {
+        if (panel != OsdPanel.STATS) return@LaunchedEffect
+        while (true) {
+            value = OsdStats(
+                stats = runCatching { statsListener.playbackStats }
+                    .getOrNull() ?: PlaybackStats.EMPTY,
+                bandwidthBps = PlaybackBandwidth.estimateBps(),
+                videoDecoder = probe.videoDecoder,
+                audioDecoder = probe.audioDecoder
+            )
+            delay(1_000L)
+        }
+    }
+    return value
 }
 
 

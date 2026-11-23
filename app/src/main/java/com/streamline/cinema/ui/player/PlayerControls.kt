@@ -184,8 +184,7 @@ internal data class LiveProgramInfo(
 
 @Composable
 internal fun PlayerDock(
-    positionMs: Long,
-    bufferedMs: Long,
+    telemetry: PlaybackTelemetry,
     durationMs: Long,
     isPlaying: Boolean,
     controlsEnabled: Boolean,
@@ -229,9 +228,14 @@ internal fun PlayerDock(
     isLive: Boolean = false,
     liveProgram: LiveProgramInfo? = null,
     liveChannelName: String = "",
-    nowMs: Long = System.currentTimeMillis(),
+    scrubFraction: Float? = null,
     modifier: Modifier = Modifier
 ) {
+    // The dock is the only reader of the 1 Hz counters, which keeps the
+    // position tick from recomposing the screen that mounts the video surface.
+    // A scrubbed target is previewed until the ticker catches up.
+    val positionMs = scrubFraction?.let { (it * durationMs).toLong() } ?: telemetry.positionMs
+    val bufferedMs = telemetry.bufferedMs
     val previousFocus = remember { FocusRequester() }
     val rewindFocus = remember { FocusRequester() }
     val forwardFocus = remember { FocusRequester() }
@@ -279,7 +283,7 @@ internal fun PlayerDock(
             LiveProgramRow(
                 program = liveProgram,
                 channelName = liveChannelName,
-                nowMs = nowMs
+                nowMs = telemetry.liveNowMs
             )
         } else {
             Box(Modifier.fillMaxWidth()) {

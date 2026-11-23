@@ -63,6 +63,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -149,6 +150,7 @@ import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.PlayerUaPreset
 import com.streamline.cinema.data.SkipKind
+import com.streamline.cinema.data.SkipOffer
 import com.streamline.cinema.data.SkipSegments
 import com.streamline.cinema.data.SourceResolution
 import com.streamline.cinema.data.StreamBadgeCatalog
@@ -176,7 +178,9 @@ import com.streamline.cinema.ui.glassSurface
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
@@ -640,8 +644,14 @@ fun PlayerScreen(
     // End-of-episode hand-off: a short, cancellable countdown instead of an
     // abrupt cut, so nobody gets yanked into the next episode unprepared.
     var nextUpSlot by remember { mutableStateOf<EpisodeSlot?>(null) }
-    var nextUpSeconds by remember { mutableIntStateOf(NEXT_UP_SECONDS) }
-    var nextUpTotal by remember { mutableIntStateOf(NEXT_UP_SECONDS) }
+    // Read by the next-up card alone, so the 1 Hz countdown never invalidates
+    // the screen that owns the video surface.
+    val countdown = remember {
+        NextUpCountdown().apply {
+            seconds = NEXT_UP_SECONDS
+            total = NEXT_UP_SECONDS
+        }
+    }
     // Playhead that should hand off to [nextUpSlot]; null means the eight-second
     // end-of-file countdown. A credits offer sets it minutes ahead, so pausing
     // or buffering during the credits holds the hand-off instead of racing a
@@ -1279,8 +1289,7 @@ fun PlayerScreen(
 
     var isPlaying by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(false) }
-    var positionMs by remember { mutableStateOf(0L) }
-    var bufferedMs by remember { mutableStateOf(0L) }
+    val telemetry = remember { PlaybackTelemetry() }
     var durationMs by remember { mutableStateOf(0L) }
 
     // Credits start minutes before the file ends, so that marker — not EOF —
@@ -1294,39 +1303,52 @@ fun PlayerScreen(
                 ?: if (segmentsResolved) fallbackCreditsStartMs(durationMs) else null
         }
     }
-    LaunchedEffect(
-        creditsStartMs, positionMs, durationMs, nextSlot, nextUpSlot, nextUpCancelled, isLive
-    ) {
+    // Precise boundaries come from TheIntroDB. The duration heuristic is only
+    // a stand-in for episodes the database has nothing on (offline, unknown
+    // title); a titled episode with no intro segment is a cold open, so the
+    // fallback stays off once an answer arrives.
+    val fallbackIntroEndMs = remember(item?.key, segmentsResolved, durationMs, isLive) {
+        when {
+            isLive || item == null || !segmentsResolved || durationMs <= 0 -> 0L
+            durationMs >= 12 * 60_000L -> 90_000L
+            durationMs >= 6 * 60_000L -> 75_000L
+            else -> 0L
+        }
+    }
+    // Re-keying this effect on the playhead restarted it every second. The
+    // telemetry flow carries the same crossing without a composition read.
+    LaunchedEffect(creditsStartMs, durationMs, nextSlot, nextUpSlot, nextUpCancelled, isLive) {
         val start = creditsStartMs ?: return@LaunchedEffect
         val slot = nextSlot ?: return@LaunchedEffect
-        if (isLive || nextUpCancelled || nextUpSlot != null || positionMs < start) {
-            return@LaunchedEffect
-        }
+        if (isLive || nextUpCancelled || nextUpSlot != null) return@LaunchedEffect
         val dueAt = durationMs - CREDITS_END_MARGIN_S * 1_000L
-        // Seeking into the final seconds should not switch episodes on its own;
-        // the offer only arms while there is still something to hand off to.
-        if (positionMs >= dueAt) return@LaunchedEffect
-        val seconds = ((dueAt - positionMs) / 1_000L).toInt().coerceAtLeast(1)
-        nextUpTotal = seconds.coerceAtLeast(NEXT_UP_SECONDS)
-        nextUpSeconds = seconds
-        nextUpDueAtMs = dueAt
-        nextUpSlot = slot
+        snapshotFlow { telemetry.positionMs }.collect { pos ->
+            // Seeking into the final seconds should not switch episodes on its
+            // own; the offer only arms while there is still something to hand
+            // off to.
+            if (nextUpSlot == null && pos >= start && pos < dueAt) {
+                val seconds = ((dueAt - pos) / 1_000L).toInt().coerceAtLeast(1)
+                countdown.total = seconds.coerceAtLeast(NEXT_UP_SECONDS)
+                countdown.seconds = seconds
+                nextUpDueAtMs = dueAt
+                nextUpSlot = slot
+            }
+        }
     }
 
     LaunchedEffect(nextUpSlot, nextUpDueAtMs) {
         val slot = nextUpSlot ?: return@LaunchedEffect
         val dueAt = nextUpDueAtMs
         if (dueAt == null) {
-            while (nextUpSeconds > 1) {
+            while (countdown.seconds > 1) {
                 delay(1_000L)
-                nextUpSeconds -= 1
+                countdown.seconds -= 1
             }
         } else {
             // The countdown mirrors the playhead, so pausing keeps the offer
             // pending instead of switching episodes mid-pause.
-            while (positionMs < dueAt) {
-                delay(500L)
-                nextUpSeconds = ((dueAt - positionMs) / 1_000L).toInt().coerceAtLeast(1)
+            snapshotFlow { telemetry.positionMs }.takeWhile { it < dueAt }.collect { pos ->
+                countdown.seconds = ((dueAt - pos) / 1_000L).toInt().coerceAtLeast(1)
             }
         }
         nextUpSlot = null
@@ -1335,7 +1357,6 @@ fun PlayerScreen(
     }
 
     var liveGuide by remember { mutableStateOf(EpgGuide.EMPTY) }
-    var liveNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var audioAudit by remember { mutableStateOf<AudioAudit?>(null) }
     var videoPixelSize by remember { mutableStateOf(IntSize.Zero) }
     var isScrubbing by remember { mutableStateOf(false) }
@@ -1365,7 +1386,7 @@ fun PlayerScreen(
             val rate = (target as? ExoPlayer)?.videoFormat?.frameRate
                 ?: snapshot?.let { firstFormat(it, C.TRACK_TYPE_VIDEO) }?.frameRate
                 ?: 0f
-            FrameRateMatching.apply(activity, rate)
+            FrameRateMatching.apply(activity, rate, live = isLive)
         }
         // A retained live engine carries the previous channel's overrides, so
         // the preferred language and the saved picks are scoped to the item,
@@ -1396,8 +1417,8 @@ fun PlayerScreen(
                     // countdown so a binge never stalls.
                     val slot = nextSlotLatest.value
                     if (!isLive && slot != null) {
-                        nextUpTotal = NEXT_UP_SECONDS
-                        nextUpSeconds = NEXT_UP_SECONDS
+                        countdown.total = NEXT_UP_SECONDS
+                        countdown.seconds = NEXT_UP_SECONDS
                         nextUpDueAtMs = null
                         nextUpSlot = slot
                     } else if (isLive) {
@@ -2087,13 +2108,13 @@ fun PlayerScreen(
             val target = playerOrNull ?: break
             if (!isScrubbing) {
                 val live = target.currentPosition.coerceAtLeast(0)
-                positionMs = live
+                telemetry.positionMs = live
                 if (live > 0) lastKnownPositionMs = live
-                bufferedMs = target.bufferedPosition.coerceAtLeast(0)
+                telemetry.bufferedMs = target.bufferedPosition.coerceAtLeast(0)
             }
             val duration = target.duration
             if (duration > 0) durationMs = duration
-            if (isLive) liveNowMs = System.currentTimeMillis()
+            if (isLive) telemetry.liveNowMs = System.currentTimeMillis()
             delay(1_000)
         }
     }
@@ -2107,19 +2128,30 @@ fun PlayerScreen(
     }
 
     val liveChannel = channels.getOrNull(liveIndex)
-    val liveProgram: LiveProgramInfo? = if (isLive && liveChannel != null) {
-        liveGuide.nowNext(liveChannel.epgId, liveChannel.name, liveNowMs)?.let { nowNext ->
-            val now = nowNext.now
-            LiveProgramInfo(
-                title = now?.title.orEmpty(),
-                startMs = now?.startMs ?: 0L,
-                stopMs = now?.stopMs ?: 0L,
-                nextTitle = nowNext.next?.title,
-                nextStartMs = nowNext.next?.startMs
-            )
+    // A guide-window lookup whose answer only changes at programme boundaries,
+    // so it is polled off the 1 Hz clock instead of recomputed per frame.
+    var liveProgramNow by remember { mutableStateOf<LiveProgramInfo?>(null) }
+    LaunchedEffect(isLive, liveChannel, liveGuide) {
+        if (!isLive || liveChannel == null) {
+            liveProgramNow = null
+            return@LaunchedEffect
         }
-    } else {
-        null
+        while (isActive) {
+            val program = liveGuide
+                .nowNext(liveChannel.epgId, liveChannel.name, telemetry.liveNowMs)
+                ?.let { nowNext ->
+                    val now = nowNext.now
+                    LiveProgramInfo(
+                        title = now?.title.orEmpty(),
+                        startMs = now?.startMs ?: 0L,
+                        stopMs = now?.stopMs ?: 0L,
+                        nextTitle = nowNext.next?.title,
+                        nextStartMs = nowNext.next?.startMs
+                    )
+                }
+            if (program != liveProgramNow) liveProgramNow = program
+            delay(1_000L)
+        }
     }
 
     // A progress write serializes the whole library state, so a 4 s cadence
@@ -2272,7 +2304,7 @@ fun PlayerScreen(
         // Seeking never pauses or rebuilds the player: the picture keeps
         // rendering from the new position so the jump can be judged live.
         active.seekTo(target)
-        positionMs = target
+        telemetry.positionMs = target
         notePlayhead(target)
         interaction++
     }
@@ -2323,46 +2355,51 @@ fun PlayerScreen(
         }
     }
 
-    // Precise boundaries come from TheIntroDB. The duration heuristic is only
-    // a stand-in for episodes the database has nothing on (offline, unknown
-    // title); a titled episode with no intro segment is a cold open, so the
-    // fallback stays off once an answer arrives.
-    val skipOffer = remember(skipSegments, positionMs, durationMs, isLive) {
-        if (isLive) null else skipSegments?.offerAt(positionMs, durationMs)
-    }
-    val fallbackIntroEndMs = remember(item?.key, segmentsResolved, durationMs, isLive) {
-        when {
-            isLive || item == null || !segmentsResolved || durationMs <= 0 -> 0L
-            durationMs >= 12 * 60_000L -> 90_000L
-            durationMs >= 6 * 60_000L -> 75_000L
-            else -> 0L
+    // The offer window and both boundary flags are derived inside a flow: they
+    // flip a couple of times per episode, so a 1 Hz playhead update must not
+    // invalidate the screen that mounts the video surface.
+    var skipOffer by remember { mutableStateOf<SkipOffer?>(null) }
+    var fallbackIntroActive by remember { mutableStateOf(false) }
+    var nextHighlight by remember { mutableStateOf(false) }
+    LaunchedEffect(
+        telemetry, skipSegments, durationMs, isLive, creditsStartMs, nextSlot, fallbackIntroEndMs
+    ) {
+        snapshotFlow {
+            val pos = telemetry.positionMs
+            Triple(
+                if (isLive) null else skipSegments?.offerAt(pos, durationMs),
+                skipSegments == null && fallbackIntroEndMs > 0 &&
+                    pos >= 12_000L && pos < fallbackIntroEndMs,
+                !isLive && nextSlot != null && durationMs > 0 &&
+                    (creditsStartMs?.let { pos >= it } == true || (durationMs - pos) <= 90_000L)
+            )
+        }.distinctUntilChanged().collect { (offer, intro, highlight) ->
+            skipOffer = offer
+            fallbackIntroActive = intro
+            nextHighlight = highlight
         }
     }
-    val fallbackIntroActive = skipSegments == null && fallbackIntroEndMs > 0 &&
-        positionMs >= 12_000L && positionMs < fallbackIntroEndMs
     // While the next-up card is on screen the credits are already accounted for.
+    val offer = skipOffer
     val skipLabel = when {
         nextUpSlot != null -> null
-        skipOffer != null -> skipOffer.kind.short
+        offer != null -> offer.kind.short
         fallbackIntroActive -> SkipKind.INTRO.short
         else -> null
     }
     val skipHint = when {
         nextUpSlot != null -> ""
-        skipOffer != null -> skipOffer.kind.label
+        offer != null -> offer.kind.label
         fallbackIntroActive -> SkipKind.INTRO.label
         else -> ""
     }
-    val skipTargetMs = skipOffer?.targetMs ?: fallbackIntroEndMs
-    val nextHighlight = !isLive && nextSlot != null && durationMs > 0 &&
-        (creditsStartMs?.let { positionMs >= it } == true ||
-            (durationMs - positionMs) <= 90_000L)
+    val skipTargetMs = offer?.targetMs ?: fallbackIntroEndMs
 
     fun applySkip() {
         val target = skipTargetMs
         if (target > 0) {
             playerOrNull?.seekTo(target)
-            positionMs = target
+            telemetry.positionMs = target
             notePlayhead(target)
         }
         // The offer disappears once the playhead passes it, so hand focus back
@@ -2382,12 +2419,6 @@ fun PlayerScreen(
         timelineFocused = true
         osdFocusTarget = OsdFocus.TIMELINE
         runCatching { seekFocus.requestFocus() }
-    }
-
-    val displayPosition = if (isScrubbing && durationMs > 0) {
-        (scrubFraction * durationMs).toLong()
-    } else {
-        positionMs
     }
 
     val anyDialog = panel != null || showPicker || openWithOpen
@@ -3036,8 +3067,7 @@ fun PlayerScreen(
             nextUpSlot?.let { slot ->
                 NextUpCard(
                     slot = slot,
-                    seconds = nextUpSeconds,
-                    total = nextUpTotal,
+                    countdown = countdown,
                     onPlayNow = { playSlot(slot) },
                     onDismiss = { dismissNextUp() },
                     modifier = Modifier
@@ -3209,8 +3239,7 @@ fun PlayerScreen(
                 )
 
                 PlayerDock(
-                    positionMs = displayPosition,
-                    bufferedMs = bufferedMs,
+                    telemetry = telemetry,
                     durationMs = durationMs,
                     isPlaying = isPlaying,
                     controlsEnabled = playerOrNull != null,
@@ -3273,7 +3302,7 @@ fun PlayerScreen(
                             if (now - lastScrubSeekAt >= SCRUB_PREVIEW_INTERVAL_MS) {
                                 lastScrubSeekAt = now
                                 active.seekTo(target)
-                                positionMs = target
+                                telemetry.positionMs = target
                                 notePlayhead(target)
                             }
                         }
@@ -3284,7 +3313,7 @@ fun PlayerScreen(
                         if (active != null && duration > 0) {
                             val target = (fraction * duration).toLong()
                             active.seekTo(target)
-                            positionMs = target
+                            telemetry.positionMs = target
                             notePlayhead(target)
                         }
                         isScrubbing = false
@@ -3321,9 +3350,9 @@ fun PlayerScreen(
                     onExternal = { openOpenWith() },
                     onOverflow = { panel = OsdPanel.OVERFLOW },
                     isLive = isLive,
-                    liveProgram = liveProgram,
+                    liveProgram = liveProgramNow,
                     liveChannelName = liveChannel?.name.orEmpty(),
-                    nowMs = liveNowMs,
+                    scrubFraction = scrubFraction.takeIf { isScrubbing && durationMs > 0 },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
@@ -5162,13 +5191,13 @@ private const val NEXT_UP_SECONDS = 8
 @Composable
 private fun NextUpCard(
     slot: EpisodeSlot,
-    seconds: Int,
-    total: Int,
+    countdown: NextUpCountdown,
     onPlayNow: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val fraction = (seconds.toFloat() / total.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val seconds = countdown.seconds
+    val fraction = (seconds.toFloat() / countdown.total.coerceAtLeast(1)).coerceIn(0f, 1f)
     Column(
         modifier
             .width(240.dp)

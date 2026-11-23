@@ -66,4 +66,24 @@ class FrameRateMatchingTest {
         assertNull(chooseDisplayMode(0f, current, listOf(current, option(2, rate = 24f))))
         assertNull(chooseDisplayMode(-24f, current, listOf(current, option(2, rate = 24f))))
     }
+
+    @Test
+    fun liveSessionPinsTheDisplayAfterTheFirstTune() {
+        val gate = FrameRateGate()
+        // The first live channel decides for the session...
+        assertEquals(true, gate.allows(live = true))
+        // ...so zapping into a different rate never mode-sets the output again.
+        assertEquals(false, gate.allows(live = true))
+        assertEquals(false, gate.allows(live = true))
+    }
+
+    @Test
+    fun vodAlwaysMayMatchAndLeavingLiveRearmsThePin() {
+        val gate = FrameRateGate()
+        assertEquals(true, gate.allows(live = false))
+        assertEquals(true, gate.allows(live = true))
+        assertEquals(false, gate.allows(live = true))
+        gate.reset()
+        assertEquals(true, gate.allows(live = true))
+    }
 }

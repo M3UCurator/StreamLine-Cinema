@@ -2769,6 +2769,15 @@ fun PlayerScreen(
                     runCatching { unlockFocus.requestFocus() }
                     return@onPreviewKeyEvent false
                 }
+                if (keyCode == KeyEvent.KEYCODE_CHANNEL_UP || keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN) {
+                    // Remote CH+/CH- surf live channels like LEFT/RIGHT; outside
+                    // live, consume them so they cannot wake the OSD instead.
+                    if (isLive) {
+                        if (nextUpSlot != null) dismissNextUp()
+                        tuneChannel(if (keyCode == KeyEvent.KEYCODE_CHANNEL_UP) 1 else -1)
+                    }
+                    return@onPreviewKeyEvent true
+                }
                 if (!osdVisible) {
                     when (keyCode) {
                         KeyEvent.KEYCODE_DPAD_LEFT -> {

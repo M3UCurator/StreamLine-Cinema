@@ -569,7 +569,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         ignoreLanguageRule: Boolean = false
     ) {
         val typed = query.isNotBlank()
-        val liveMatches = if (typed) iptvMatches(query) else emptyList()
         _search.update { current ->
             // Typing switches the Playroom back to text search; a blank query
             // keeps the genre selection, pruned to the selected media type.
@@ -578,7 +577,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 query = query,
                 filter = filter,
                 genreIds = kept,
-                channels = liveMatches,
+                channels = if (typed) current.channels else emptyList(),
                 programs = if (typed) emptyList() else current.programs,
                 letter = if (typed) null else current.letter
             )
@@ -605,21 +604,42 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         val local = localMatches(query, filter)
+        val offlineError = "TMDB access is offline. Add an API key or proxy URL in Settings."
         if (!settings.value.hasTmdbAccess) {
             _search.update {
-                it.copy(
-                    results = local,
-                    loading = false,
-                    error = if (local.isEmpty() && liveMatches.isEmpty()) {
-                        "TMDB access is offline. Add an API key or proxy URL in Settings."
-                    } else null
-                )
+                // Local results show at once; the offline error waits for the
+                // debounced live match so it does not flash before the scan.
+                it.copy(results = local, loading = false, error = null)
+            }
+            // The live match scans every cached playlist and may pull a channel
+            // cache off disk, so it settles with the debounce on a worker
+            // instead of running on main for each keystroke.
+            searchJob = viewModelScope.launch {
+                delay(350)
+                val liveMatches = withContext(Dispatchers.Default) { iptvMatches(query) }
+                _search.update {
+                    if (it.query != query) {
+                        it
+                    } else {
+                        it.copy(
+                            channels = liveMatches,
+                            error = if (local.isEmpty() && liveMatches.isEmpty()) offlineError else null
+                        )
+                    }
+                }
             }
             return
         }
         searchJob = viewModelScope.launch {
             delay(350)
-            _search.update { it.copy(loading = true, error = null) }
+            val liveMatches = withContext(Dispatchers.Default) { iptvMatches(query) }
+            _search.update {
+                if (it.query != query) {
+                    it
+                } else {
+                    it.copy(channels = liveMatches, loading = true, error = null)
+                }
+            }
             try {
                 val remote = repository.search(query, filter, adult)
                 val language = settings.value.rankingLanguage()
@@ -641,11 +661,15 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                 throw t
             } catch (t: Throwable) {
                 _search.update {
-                    it.copy(
-                        results = local,
-                        loading = false,
-                        error = t.message ?: "Search failed"
-                    )
+                    if (it.query != query) {
+                        it
+                    } else {
+                        it.copy(
+                            results = local,
+                            loading = false,
+                            error = t.message ?: "Search failed"
+                        )
+                    }
                 }
             }
         }

@@ -2231,7 +2231,9 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val unlockFocus = remember { FocusRequester() }
 
-    val seekEnabled = durationMs > 0 && !locked && gesturesEnabled
+    // Live has no seek bar, so nothing is composed for seekFocus there; without
+    // the isLive gate UP from the dock asked a requester that never exists.
+    val seekEnabled = !isLive && durationMs > 0 && !locked && gesturesEnabled
 
     LaunchedEffect(osdVisible, osdFocusTarget, locked, current != null) {
         // Locked is checked before OSD visibility: the unlock pill is composed even
@@ -4226,9 +4228,17 @@ private fun OsdPanelDialog(
     content: @Composable () -> Unit
 ) {
     val closeFocus = remember { FocusRequester() }
+    var focusSettled by remember { mutableStateOf(false) }
     LaunchedEffect(initialFocus) {
-        delay(140)
-        runCatching { (initialFocus ?: closeFocus).requestFocus() }
+        val target = initialFocus ?: closeFocus
+        // The dialog window and its buttons can take longer than one frame to
+        // become focusable, so keep asking until something inside the panel
+        // holds focus or the user has already placed it.
+        repeat(FOCUS_ATTEMPTS) { attempt ->
+            delay(if (attempt == 0) 140L else FOCUS_RETRY_MS)
+            if (focusSettled) return@LaunchedEffect
+            runCatching { target.requestFocus() }
+        }
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -4293,7 +4303,8 @@ private fun OsdPanelDialog(
                     .verticalScroll(rememberScrollState())
                     .pointerInput(Unit) {
                         detectTapGestures { }
-                    },
+                    }
+                    .onFocusChanged { if (it.hasFocus) focusSettled = true },
                 verticalArrangement = Arrangement.spacedBy(if (sideSheet) 6.dp else 10.dp)
             ) {
                 if (sideSheet) {

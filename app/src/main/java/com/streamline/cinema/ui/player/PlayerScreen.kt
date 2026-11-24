@@ -204,6 +204,7 @@ private enum class AspectMode(
 
 private enum class OsdPanel { AUDIO, SUBTITLES, OVERFLOW, TOOLS, TOGGLES, QUALITY, TRANSPORT, INFO, STATS }
 
+/** An OSD zone the remote can occupy; PLAY stands for the whole transport dock. */
 private enum class OsdFocus { PLAY, TIMELINE, SKIP, BACK }
 
 // Live edge policy for HLS. Media3's default target offset is three target
@@ -501,17 +502,15 @@ fun PlayerScreen(
     var locked by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf<OsdPanel?>(null) }
     var osdFocusTarget by remember { mutableStateOf(OsdFocus.PLAY) }
-    var timelineFocused by remember { mutableStateOf(false) }
-    var skipFocused by remember { mutableStateOf(false) }
-    var backFocused by remember { mutableStateOf(false) }
-    var dockFocused by remember { mutableStateOf(false) }
+    // Which OSD zone actually holds focus right now. One zone instead of four
+    // booleans: the screen only ever needs to know where the remote is to route
+    // UP/DOWN, and a single value cannot disagree with itself. Null means no
+    // OSD control is focused (clean surface, touch mode, or an open dialog).
+    var osdZone by remember { mutableStateOf<OsdFocus?>(null) }
 
     fun hideOsd() {
         osdVisible = false
-        dockFocused = false
-        timelineFocused = false
-        skipFocused = false
-        backFocused = false
+        osdZone = null
     }
 
     var decoderMode by remember { mutableStateOf(settings.decoderType) }
@@ -2263,7 +2262,23 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val unlockFocus = remember { FocusRequester() }
 
-    val seekEnabled = durationMs > 0 && !locked && gesturesEnabled
+    // The seek bar is the only VOD timeline control; live draws a read-only
+    // programme row instead. Excluding live here keeps UP from the dock from
+    // aiming at a requester that was never composed.
+    val seekEnabled = !isLive && durationMs > 0 && !locked && gesturesEnabled
+
+    fun focusZone(zone: OsdFocus) {
+        osdFocusTarget = zone
+        interaction++
+        runCatching {
+            when (zone) {
+                OsdFocus.PLAY -> playFocus.requestFocus()
+                OsdFocus.TIMELINE -> seekFocus.requestFocus()
+                OsdFocus.SKIP -> skipFocus.requestFocus()
+                OsdFocus.BACK -> backFocus.requestFocus()
+            }
+        }
+    }
 
     LaunchedEffect(osdVisible, osdFocusTarget, locked, current != null) {
         // Locked is checked before OSD visibility: the unlock pill is composed even
@@ -2281,19 +2296,22 @@ fun PlayerScreen(
             runCatching { rootFocus.requestFocus() }
             return@LaunchedEffect
         }
-        val requester = when {
-            osdFocusTarget == OsdFocus.TIMELINE && seekEnabled -> seekFocus
-            osdFocusTarget == OsdFocus.SKIP -> skipFocus
-            osdFocusTarget == OsdFocus.BACK -> backFocus
-            else -> playFocus
+        val (requester, target) = when {
+            osdFocusTarget == OsdFocus.TIMELINE && seekEnabled -> seekFocus to OsdFocus.TIMELINE
+            osdFocusTarget == OsdFocus.SKIP -> skipFocus to OsdFocus.SKIP
+            osdFocusTarget == OsdFocus.BACK -> backFocus to OsdFocus.BACK
+            else -> playFocus to OsdFocus.PLAY
         }
         // The OSD is composed on demand and animated in; on a slow TV box the
-        // first requests can land before the button is focusable, so keep asking
-        // until an OSD control reports focus (or the user moves focus elsewhere).
+        // first requests can land before the control is focusable, so keep
+        // asking — until the target itself reports focus, or another key moved
+        // the remote. The interaction guard is what stops a late retry from
+        // yanking focus back while the viewer is already walking the OSD.
+        val startedAt = interaction
         repeat(FOCUS_ATTEMPTS) {
+            if (osdZone == target || interaction != startedAt) return@LaunchedEffect
             runCatching { requester.requestFocus() }
             delay(FOCUS_RETRY_MS)
-            if (dockFocused || timelineFocused || skipFocused || backFocused) return@LaunchedEffect
         }
     }
 
@@ -2404,21 +2422,14 @@ fun PlayerScreen(
         }
         // The offer disappears once the playhead passes it, so hand focus back
         // to the transport before that happens.
-        skipFocused = false
-        dockFocused = true
-        osdFocusTarget = OsdFocus.PLAY
-        runCatching { playFocus.requestFocus() }
-        interaction++
+        focusZone(OsdFocus.PLAY)
     }
 
     // The offer expires on its own once the playhead leaves the segment; drop
     // focus back to the bar instead of leaving the remote on a hidden node.
-    LaunchedEffect(skipLabel, skipFocused) {
-        if (skipLabel != null || !skipFocused) return@LaunchedEffect
-        skipFocused = false
-        timelineFocused = true
-        osdFocusTarget = OsdFocus.TIMELINE
-        runCatching { seekFocus.requestFocus() }
+    LaunchedEffect(skipLabel, osdZone) {
+        if (skipLabel != null || osdZone != OsdFocus.SKIP) return@LaunchedEffect
+        focusZone(OsdFocus.TIMELINE)
     }
 
     val anyDialog = panel != null || showPicker || openWithOpen
@@ -2842,77 +2853,72 @@ fun PlayerScreen(
                         }
                     }
                 } else {
-                    // Explicit zones: header (top), timeline, dock (bottom). Whatever the
-                    // focused control is, UP and DOWN always move toward the neighbouring
-                    // zone, so a remote never gets trapped inside the dock.
+                    // Explicit zones: header (top), skip pill / timeline, dock
+                    // (bottom). The zone mirrors whichever control holds focus;
+                    // UP and DOWN always cross to the neighbouring zone, so a
+                    // remote never dead-ends or wanders into a diagonal control.
+                    // A null zone means nothing in the OSD is focused (first key
+                    // after a tap, or focus still on the clean surface).
+                    val zone = osdZone
                     when (keyCode) {
                         KeyEvent.KEYCODE_DPAD_DOWN -> {
-                            when {
-                                dockFocused -> hideOsd()
+                            when (zone) {
+                                OsdFocus.PLAY -> hideOsd()
                                 // The skip pill floats over the timeline, so DOWN
-                                // belongs back on the bar rather than the transport row.
-                                skipFocused -> {
-                                    skipFocused = false
-                                    timelineFocused = true
-                                    osdFocusTarget = OsdFocus.TIMELINE
-                                    runCatching { seekFocus.requestFocus() }
-                                }
-                                else -> {
-                                    dockFocused = true
-                                    timelineFocused = false
-                                    osdFocusTarget = OsdFocus.PLAY
-                                    runCatching { playFocus.requestFocus() }
-                                }
+                                // belongs back on the bar rather than the dock.
+                                OsdFocus.SKIP -> focusZone(
+                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.PLAY
+                                )
+                                else -> focusZone(OsdFocus.PLAY)
                             }
-                            interaction++
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_UP -> {
-                            when {
-                                dockFocused -> {
-                                    dockFocused = false
-                                    if (seekEnabled) {
-                                        osdFocusTarget = OsdFocus.TIMELINE
-                                        runCatching { seekFocus.requestFocus() }
-                                    } else {
-                                        osdFocusTarget = OsdFocus.BACK
-                                        runCatching { backFocus.requestFocus() }
-                                    }
-                                }
-                                timelineFocused && skipLabel != null -> {
-                                    skipFocused = false
-                                    timelineFocused = false
-                                    osdFocusTarget = OsdFocus.SKIP
-                                    runCatching { skipFocus.requestFocus() }
-                                }
-                                skipFocused -> Unit
-                                !backFocused -> {
-                                    osdFocusTarget = OsdFocus.BACK
-                                    runCatching { backFocus.requestFocus() }
-                                }
+                            when (zone) {
+                                OsdFocus.PLAY -> focusZone(
+                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.BACK
+                                )
+                                OsdFocus.TIMELINE -> focusZone(
+                                    if (skipLabel != null) OsdFocus.SKIP else OsdFocus.BACK
+                                )
+                                // The pill is the top of its column, and BACK is
+                                // the top of the screen: both stay put instead of
+                                // handing focus to a control that is not there.
+                                OsdFocus.SKIP, OsdFocus.BACK -> interaction++
+                                null -> focusZone(
+                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.BACK
+                                )
                             }
-                            interaction++
                             true
                         }
                         else -> {
-                            if (skipFocused &&
-                                (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                                    keyCode == KeyEvent.KEYCODE_ENTER)
-                            ) {
-                                applySkip()
-                                interaction++
-                                true
-                            } else if (!dockFocused && !timelineFocused && !skipFocused && !backFocused) {
-                                // Touch wakes the OSD without handing focus to it (touch
-                                // mode refuses programmatic focus), so the first remote
-                                // key after a tap lands on the transport row.
-                                osdFocusTarget = OsdFocus.PLAY
-                                runCatching { playFocus.requestFocus() }
-                                interaction++
-                                true
-                            } else {
-                                interaction++
-                                false
+                            when {
+                                zone == OsdFocus.SKIP &&
+                                    (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                                        keyCode == KeyEvent.KEYCODE_ENTER) -> {
+                                    applySkip()
+                                    true
+                                }
+                                // Touch wakes the OSD without handing focus to it
+                                // (touch mode refuses programmatic focus), so the
+                                // first remote key after a tap takes the dock.
+                                // Before the player exists the transport is
+                                // disabled and unfocusable, so let the focus
+                                // system pick an enabled control (sources,
+                                // display) instead of pinning PLAY.
+                                zone == null -> {
+                                    if (playerOrNull != null) {
+                                        focusZone(OsdFocus.PLAY)
+                                        true
+                                    } else {
+                                        interaction++
+                                        false
+                                    }
+                                }
+                                else -> {
+                                    interaction++
+                                    false
+                                }
                             }
                         }
                     }
@@ -3198,7 +3204,22 @@ fun PlayerScreen(
             exit = fadeOut(tween(160)),
             modifier = Modifier.fillMaxSize()
         ) {
-            Box(Modifier.fillMaxSize()) {
+            // Single source of truth for "a control in the OSD holds focus":
+            // hasFocus covers the whole subtree, so it also clears the zone
+            // when a panel dialog takes the window, when a tap drops focus to
+            // touch mode, and when the controls animate away.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .onFocusChanged { state ->
+                        // hasFocus covers the whole subtree, so this also
+                        // clears the zone when a panel dialog takes the window
+                        // or a tap drops focus to touch mode. Ignore the
+                        // exit-animation teardown: a button can report focus
+                        // while the controls are animating away.
+                        if (osdVisible && !state.hasFocus) osdZone = null
+                    }
+            ) {
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -3226,14 +3247,13 @@ fun PlayerScreen(
                         ?: searchStatus.takeIf { current != null },
                     clock = clockText,
                     backFocus = backFocus,
+                    downTarget = playFocus,
                     onBack = onExit,
                     onBackFocusChange = { focused ->
-                        backFocused = focused
                         if (focused) {
-                            dockFocused = false
-                            timelineFocused = false
+                            osdZone = OsdFocus.BACK
+                            interaction++
                         }
-                        interaction++
                     },
                     modifier = Modifier.align(Alignment.TopCenter)
                 )
@@ -3260,28 +3280,18 @@ fun PlayerScreen(
                     playFocus = playFocus,
                     seekFocus = seekFocus,
                     skipFocus = skipFocus,
+                    backFocus = backFocus,
                     onSeekFocusChange = { focused ->
-                        timelineFocused = focused
-                        if (focused) {
-                            dockFocused = false
-                            skipFocused = false
-                            backFocused = false
-                        }
+                        if (focused) osdZone = OsdFocus.TIMELINE
                     },
                     onSkipFocusChange = { focused ->
-                        skipFocused = focused
-                        if (focused) {
-                            dockFocused = false
-                            timelineFocused = false
-                            backFocused = false
-                        }
+                        if (focused) osdZone = OsdFocus.SKIP
                     },
-                    onDockFocusChange = {
-                        dockFocused = true
-                        backFocused = false
-                        skipFocused = false
-                        timelineFocused = false
-                        interaction++
+                    onDockFocusChange = { focused ->
+                        if (focused) {
+                            osdZone = OsdFocus.PLAY
+                            interaction++
+                        }
                     },
                     onScrubStart = {
                         wasPlayingBeforeScrub = playerOrNull?.isPlaying == true
@@ -3425,7 +3435,10 @@ fun PlayerScreen(
             },
             onDismiss = {
                 panel = null
-                if (!osdVisible) wake(OsdFocus.PLAY)
+                // Hand the remote back to a real control whether the OSD was
+                // hidden behind the sheet or still up; the pump keeps whatever
+                // control the dialog itself restores focus to.
+                wake(OsdFocus.PLAY)
             },
             sideSheet = activePanel == OsdPanel.OVERFLOW,
             initialFocus = when (activePanel) {
@@ -4255,9 +4268,18 @@ private fun OsdPanelDialog(
     content: @Composable () -> Unit
 ) {
     val closeFocus = remember { FocusRequester() }
-    LaunchedEffect(initialFocus) {
-        delay(140)
-        runCatching { (initialFocus ?: closeFocus).requestFocus() }
+    // Whether any control in the panel holds focus. The dialog is its own
+    // window, so this is also how the pump knows its first request landed:
+    // requesting before the rows are attached used to leave the remote on the
+    // window with nothing selected.
+    var panelFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(initialFocus, panelFocused) {
+        if (panelFocused) return@LaunchedEffect
+        val target = initialFocus ?: closeFocus
+        repeat(FOCUS_ATTEMPTS) { attempt ->
+            delay(if (attempt == 0) 120L else FOCUS_RETRY_MS)
+            runCatching { target.requestFocus() }
+        }
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -4320,6 +4342,7 @@ private fun OsdPanelDialog(
                     )
                     .padding(if (sideSheet) 12.dp else 22.dp)
                     .verticalScroll(rememberScrollState())
+                    .onFocusChanged { panelFocused = it.hasFocus }
                     .pointerInput(Unit) {
                         detectTapGestures { }
                     },

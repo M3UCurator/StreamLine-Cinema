@@ -1,8 +1,10 @@
 package com.streamline.cinema.data
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
@@ -46,46 +48,53 @@ class IntroDbClient(cacheRoot: File) {
     suspend fun segments(tmdbId: Int, season: Int, episode: Int): SkipSegments? {
         if (tmdbId <= 0 || season <= 0 || episode <= 0) return null
         val key = "$tmdbId-$season-$episode"
-        return gate.withLock {
-            if (memory.containsKey(key)) return@withLock memory[key]
+        // `await` only suspends until the callback fires; reading the body and
+        // closing the response still do socket I/O on the calling thread, and
+        // the player calls this from a main-thread Compose effect, where that
+        // close throws NetworkOnMainThreadException. Dispatch the whole lookup
+        // (and its disk cache) to IO so every caller is safe.
+        return withContext(Dispatchers.IO) {
+            gate.withLock {
+                if (memory.containsKey(key)) return@withLock memory[key]
 
-            val now = System.currentTimeMillis()
-            val cached = readCache(key)
-            val ttl = if (cached?.segments == null) NEGATIVE_TTL_MS else CACHE_TTL_MS
-            if (cached != null && now - cached.savedAtMs <= ttl) {
-                memory[key] = cached.segments
-                return@withLock cached.segments
-            }
-            if (now < blockedUntilMs) return@withLock cached?.segments
+                val now = System.currentTimeMillis()
+                val cached = readCache(key)
+                val ttl = if (cached?.segments == null) NEGATIVE_TTL_MS else CACHE_TTL_MS
+                if (cached != null && now - cached.savedAtMs <= ttl) {
+                    memory[key] = cached.segments
+                    return@withLock cached.segments
+                }
+                if (now < blockedUntilMs) return@withLock cached?.segments
 
-            var completed = false
-            var parsed: SkipSegments? = null
-            try {
-                http.await(request(tmdbId, season, episode)).use { response ->
-                    when {
-                        response.code == 429 -> {
-                            blockedUntilMs = now + rateLimitCooldownMs(response.header("X-RateLimit-Reset"))
-                            Log.i(TAG, "IntroDB rate limited until +${blockedUntilMs - now} ms")
-                        }
-                        response.code == 404 -> completed = true
-                        response.isSuccessful -> {
-                            parsed = SkipSegments.parse(response.bodyStringCapped(MAX_BODY_BYTES))
-                            completed = true
+                var completed = false
+                var parsed: SkipSegments? = null
+                try {
+                    http.await(request(tmdbId, season, episode)).use { response ->
+                        when {
+                            response.code == 429 -> {
+                                blockedUntilMs = now + rateLimitCooldownMs(response.header("X-RateLimit-Reset"))
+                                Log.i(TAG, "IntroDB rate limited until +${blockedUntilMs - now} ms")
+                            }
+                            response.code == 404 -> completed = true
+                            response.isSuccessful -> {
+                                parsed = SkipSegments.parse(response.bodyStringCapped(MAX_BODY_BYTES))
+                                completed = true
+                            }
                         }
                     }
+                } catch (failure: IOException) {
+                    Log.i(TAG, "IntroDB $tmdbId S$season E$episode failed: ${failure.message}")
                 }
-            } catch (failure: IOException) {
-                Log.i(TAG, "IntroDB $tmdbId S$season E$episode failed: ${failure.message}")
-            }
 
-            if (completed) {
-                memory[key] = parsed
-                writeCache(key, parsed)
-                parsed
-            } else {
-                // A transient failure keeps an older copy in service rather than
-                // dropping skip data mid-episode.
-                cached?.segments
+                if (completed) {
+                    memory[key] = parsed
+                    writeCache(key, parsed)
+                    parsed
+                } else {
+                    // A transient failure keeps an older copy in service rather
+                    // than dropping skip data mid-episode.
+                    cached?.segments
+                }
             }
         }
     }

@@ -1,9 +1,11 @@
 package com.streamline.cinema.data
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import org.json.JSONArray
@@ -225,10 +227,17 @@ class TmdbClient(private val settingsStore: SettingsStore) {
     private suspend fun execute(request: Request): JSONObject {
         var attempt = 0
         while (true) {
-            val response = Http.client.await(request)
-            val code = response.code
-            val body = response.bodyStringCapped(256 * 1024)
-            response.close()
+            // await only suspends until the callback; reading the body and
+            // closing the response still touch the socket on the calling
+            // thread. UI callers run on main, where that throws
+            // NetworkOnMainThreadException and the lookup silently falls back.
+            val (code, body) = withContext(Dispatchers.IO) {
+                val response = Http.client.await(request)
+                val status = response.code
+                val text = response.bodyStringCapped(256 * 1024)
+                response.close()
+                status to text
+            }
             if (code == 429 && attempt < 2) {
                 attempt++
                 delay(1_200L * attempt)

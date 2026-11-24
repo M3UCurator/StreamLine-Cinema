@@ -63,7 +63,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -150,7 +149,6 @@ import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.PlayerUaPreset
 import com.streamline.cinema.data.SkipKind
-import com.streamline.cinema.data.SkipOffer
 import com.streamline.cinema.data.SkipSegments
 import com.streamline.cinema.data.SourceResolution
 import com.streamline.cinema.data.StreamBadgeCatalog
@@ -178,9 +176,7 @@ import com.streamline.cinema.ui.glassSurface
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
@@ -204,7 +200,6 @@ private enum class AspectMode(
 
 private enum class OsdPanel { AUDIO, SUBTITLES, OVERFLOW, TOOLS, TOGGLES, QUALITY, TRANSPORT, INFO, STATS }
 
-/** An OSD zone the remote can occupy; PLAY stands for the whole transport dock. */
 private enum class OsdFocus { PLAY, TIMELINE, SKIP, BACK }
 
 // Live edge policy for HLS. Media3's default target offset is three target
@@ -502,15 +497,17 @@ fun PlayerScreen(
     var locked by remember { mutableStateOf(false) }
     var panel by remember { mutableStateOf<OsdPanel?>(null) }
     var osdFocusTarget by remember { mutableStateOf(OsdFocus.PLAY) }
-    // Which OSD zone actually holds focus right now. One zone instead of four
-    // booleans: the screen only ever needs to know where the remote is to route
-    // UP/DOWN, and a single value cannot disagree with itself. Null means no
-    // OSD control is focused (clean surface, touch mode, or an open dialog).
-    var osdZone by remember { mutableStateOf<OsdFocus?>(null) }
+    var timelineFocused by remember { mutableStateOf(false) }
+    var skipFocused by remember { mutableStateOf(false) }
+    var backFocused by remember { mutableStateOf(false) }
+    var dockFocused by remember { mutableStateOf(false) }
 
     fun hideOsd() {
         osdVisible = false
-        osdZone = null
+        dockFocused = false
+        timelineFocused = false
+        skipFocused = false
+        backFocused = false
     }
 
     var decoderMode by remember { mutableStateOf(settings.decoderType) }
@@ -643,14 +640,8 @@ fun PlayerScreen(
     // End-of-episode hand-off: a short, cancellable countdown instead of an
     // abrupt cut, so nobody gets yanked into the next episode unprepared.
     var nextUpSlot by remember { mutableStateOf<EpisodeSlot?>(null) }
-    // Read by the next-up card alone, so the 1 Hz countdown never invalidates
-    // the screen that owns the video surface.
-    val countdown = remember {
-        NextUpCountdown().apply {
-            seconds = NEXT_UP_SECONDS
-            total = NEXT_UP_SECONDS
-        }
-    }
+    var nextUpSeconds by remember { mutableIntStateOf(NEXT_UP_SECONDS) }
+    var nextUpTotal by remember { mutableIntStateOf(NEXT_UP_SECONDS) }
     // Playhead that should hand off to [nextUpSlot]; null means the eight-second
     // end-of-file countdown. A credits offer sets it minutes ahead, so pausing
     // or buffering during the credits holds the hand-off instead of racing a
@@ -1288,7 +1279,8 @@ fun PlayerScreen(
 
     var isPlaying by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(false) }
-    val telemetry = remember { PlaybackTelemetry() }
+    var positionMs by remember { mutableStateOf(0L) }
+    var bufferedMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
 
     // Credits start minutes before the file ends, so that marker — not EOF —
@@ -1302,52 +1294,39 @@ fun PlayerScreen(
                 ?: if (segmentsResolved) fallbackCreditsStartMs(durationMs) else null
         }
     }
-    // Precise boundaries come from TheIntroDB. The duration heuristic is only
-    // a stand-in for episodes the database has nothing on (offline, unknown
-    // title); a titled episode with no intro segment is a cold open, so the
-    // fallback stays off once an answer arrives.
-    val fallbackIntroEndMs = remember(item?.key, segmentsResolved, durationMs, isLive) {
-        when {
-            isLive || item == null || !segmentsResolved || durationMs <= 0 -> 0L
-            durationMs >= 12 * 60_000L -> 90_000L
-            durationMs >= 6 * 60_000L -> 75_000L
-            else -> 0L
-        }
-    }
-    // Re-keying this effect on the playhead restarted it every second. The
-    // telemetry flow carries the same crossing without a composition read.
-    LaunchedEffect(creditsStartMs, durationMs, nextSlot, nextUpSlot, nextUpCancelled, isLive) {
+    LaunchedEffect(
+        creditsStartMs, positionMs, durationMs, nextSlot, nextUpSlot, nextUpCancelled, isLive
+    ) {
         val start = creditsStartMs ?: return@LaunchedEffect
         val slot = nextSlot ?: return@LaunchedEffect
-        if (isLive || nextUpCancelled || nextUpSlot != null) return@LaunchedEffect
-        val dueAt = durationMs - CREDITS_END_MARGIN_S * 1_000L
-        snapshotFlow { telemetry.positionMs }.collect { pos ->
-            // Seeking into the final seconds should not switch episodes on its
-            // own; the offer only arms while there is still something to hand
-            // off to.
-            if (nextUpSlot == null && pos >= start && pos < dueAt) {
-                val seconds = ((dueAt - pos) / 1_000L).toInt().coerceAtLeast(1)
-                countdown.total = seconds.coerceAtLeast(NEXT_UP_SECONDS)
-                countdown.seconds = seconds
-                nextUpDueAtMs = dueAt
-                nextUpSlot = slot
-            }
+        if (isLive || nextUpCancelled || nextUpSlot != null || positionMs < start) {
+            return@LaunchedEffect
         }
+        val dueAt = durationMs - CREDITS_END_MARGIN_S * 1_000L
+        // Seeking into the final seconds should not switch episodes on its own;
+        // the offer only arms while there is still something to hand off to.
+        if (positionMs >= dueAt) return@LaunchedEffect
+        val seconds = ((dueAt - positionMs) / 1_000L).toInt().coerceAtLeast(1)
+        nextUpTotal = seconds.coerceAtLeast(NEXT_UP_SECONDS)
+        nextUpSeconds = seconds
+        nextUpDueAtMs = dueAt
+        nextUpSlot = slot
     }
 
     LaunchedEffect(nextUpSlot, nextUpDueAtMs) {
         val slot = nextUpSlot ?: return@LaunchedEffect
         val dueAt = nextUpDueAtMs
         if (dueAt == null) {
-            while (countdown.seconds > 1) {
+            while (nextUpSeconds > 1) {
                 delay(1_000L)
-                countdown.seconds -= 1
+                nextUpSeconds -= 1
             }
         } else {
             // The countdown mirrors the playhead, so pausing keeps the offer
             // pending instead of switching episodes mid-pause.
-            snapshotFlow { telemetry.positionMs }.takeWhile { it < dueAt }.collect { pos ->
-                countdown.seconds = ((dueAt - pos) / 1_000L).toInt().coerceAtLeast(1)
+            while (positionMs < dueAt) {
+                delay(500L)
+                nextUpSeconds = ((dueAt - positionMs) / 1_000L).toInt().coerceAtLeast(1)
             }
         }
         nextUpSlot = null
@@ -1356,6 +1335,7 @@ fun PlayerScreen(
     }
 
     var liveGuide by remember { mutableStateOf(EpgGuide.EMPTY) }
+    var liveNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var audioAudit by remember { mutableStateOf<AudioAudit?>(null) }
     var videoPixelSize by remember { mutableStateOf(IntSize.Zero) }
     var isScrubbing by remember { mutableStateOf(false) }
@@ -1385,7 +1365,7 @@ fun PlayerScreen(
             val rate = (target as? ExoPlayer)?.videoFormat?.frameRate
                 ?: snapshot?.let { firstFormat(it, C.TRACK_TYPE_VIDEO) }?.frameRate
                 ?: 0f
-            FrameRateMatching.apply(activity, rate, live = isLive)
+            FrameRateMatching.apply(activity, rate)
         }
         // A retained live engine carries the previous channel's overrides, so
         // the preferred language and the saved picks are scoped to the item,
@@ -1416,8 +1396,8 @@ fun PlayerScreen(
                     // countdown so a binge never stalls.
                     val slot = nextSlotLatest.value
                     if (!isLive && slot != null) {
-                        countdown.total = NEXT_UP_SECONDS
-                        countdown.seconds = NEXT_UP_SECONDS
+                        nextUpTotal = NEXT_UP_SECONDS
+                        nextUpSeconds = NEXT_UP_SECONDS
                         nextUpDueAtMs = null
                         nextUpSlot = slot
                     } else if (isLive) {
@@ -2107,13 +2087,13 @@ fun PlayerScreen(
             val target = playerOrNull ?: break
             if (!isScrubbing) {
                 val live = target.currentPosition.coerceAtLeast(0)
-                telemetry.positionMs = live
+                positionMs = live
                 if (live > 0) lastKnownPositionMs = live
-                telemetry.bufferedMs = target.bufferedPosition.coerceAtLeast(0)
+                bufferedMs = target.bufferedPosition.coerceAtLeast(0)
             }
             val duration = target.duration
             if (duration > 0) durationMs = duration
-            if (isLive) telemetry.liveNowMs = System.currentTimeMillis()
+            if (isLive) liveNowMs = System.currentTimeMillis()
             delay(1_000)
         }
     }
@@ -2127,30 +2107,19 @@ fun PlayerScreen(
     }
 
     val liveChannel = channels.getOrNull(liveIndex)
-    // A guide-window lookup whose answer only changes at programme boundaries,
-    // so it is polled off the 1 Hz clock instead of recomputed per frame.
-    var liveProgramNow by remember { mutableStateOf<LiveProgramInfo?>(null) }
-    LaunchedEffect(isLive, liveChannel, liveGuide) {
-        if (!isLive || liveChannel == null) {
-            liveProgramNow = null
-            return@LaunchedEffect
+    val liveProgram: LiveProgramInfo? = if (isLive && liveChannel != null) {
+        liveGuide.nowNext(liveChannel.epgId, liveChannel.name, liveNowMs)?.let { nowNext ->
+            val now = nowNext.now
+            LiveProgramInfo(
+                title = now?.title.orEmpty(),
+                startMs = now?.startMs ?: 0L,
+                stopMs = now?.stopMs ?: 0L,
+                nextTitle = nowNext.next?.title,
+                nextStartMs = nowNext.next?.startMs
+            )
         }
-        while (isActive) {
-            val program = liveGuide
-                .nowNext(liveChannel.epgId, liveChannel.name, telemetry.liveNowMs)
-                ?.let { nowNext ->
-                    val now = nowNext.now
-                    LiveProgramInfo(
-                        title = now?.title.orEmpty(),
-                        startMs = now?.startMs ?: 0L,
-                        stopMs = now?.stopMs ?: 0L,
-                        nextTitle = nowNext.next?.title,
-                        nextStartMs = nowNext.next?.startMs
-                    )
-                }
-            if (program != liveProgramNow) liveProgramNow = program
-            delay(1_000L)
-        }
+    } else {
+        null
     }
 
     // A progress write serializes the whole library state, so a 4 s cadence
@@ -2262,23 +2231,7 @@ fun PlayerScreen(
     val rootFocus = remember { FocusRequester() }
     val unlockFocus = remember { FocusRequester() }
 
-    // The seek bar is the only VOD timeline control; live draws a read-only
-    // programme row instead. Excluding live here keeps UP from the dock from
-    // aiming at a requester that was never composed.
-    val seekEnabled = !isLive && durationMs > 0 && !locked && gesturesEnabled
-
-    fun focusZone(zone: OsdFocus) {
-        osdFocusTarget = zone
-        interaction++
-        runCatching {
-            when (zone) {
-                OsdFocus.PLAY -> playFocus.requestFocus()
-                OsdFocus.TIMELINE -> seekFocus.requestFocus()
-                OsdFocus.SKIP -> skipFocus.requestFocus()
-                OsdFocus.BACK -> backFocus.requestFocus()
-            }
-        }
-    }
+    val seekEnabled = durationMs > 0 && !locked && gesturesEnabled
 
     LaunchedEffect(osdVisible, osdFocusTarget, locked, current != null) {
         // Locked is checked before OSD visibility: the unlock pill is composed even
@@ -2296,22 +2249,19 @@ fun PlayerScreen(
             runCatching { rootFocus.requestFocus() }
             return@LaunchedEffect
         }
-        val (requester, target) = when {
-            osdFocusTarget == OsdFocus.TIMELINE && seekEnabled -> seekFocus to OsdFocus.TIMELINE
-            osdFocusTarget == OsdFocus.SKIP -> skipFocus to OsdFocus.SKIP
-            osdFocusTarget == OsdFocus.BACK -> backFocus to OsdFocus.BACK
-            else -> playFocus to OsdFocus.PLAY
+        val requester = when {
+            osdFocusTarget == OsdFocus.TIMELINE && seekEnabled -> seekFocus
+            osdFocusTarget == OsdFocus.SKIP -> skipFocus
+            osdFocusTarget == OsdFocus.BACK -> backFocus
+            else -> playFocus
         }
         // The OSD is composed on demand and animated in; on a slow TV box the
-        // first requests can land before the control is focusable, so keep
-        // asking — until the target itself reports focus, or another key moved
-        // the remote. The interaction guard is what stops a late retry from
-        // yanking focus back while the viewer is already walking the OSD.
-        val startedAt = interaction
+        // first requests can land before the button is focusable, so keep asking
+        // until an OSD control reports focus (or the user moves focus elsewhere).
         repeat(FOCUS_ATTEMPTS) {
-            if (osdZone == target || interaction != startedAt) return@LaunchedEffect
             runCatching { requester.requestFocus() }
             delay(FOCUS_RETRY_MS)
+            if (dockFocused || timelineFocused || skipFocused || backFocused) return@LaunchedEffect
         }
     }
 
@@ -2322,7 +2272,7 @@ fun PlayerScreen(
         // Seeking never pauses or rebuilds the player: the picture keeps
         // rendering from the new position so the jump can be judged live.
         active.seekTo(target)
-        telemetry.positionMs = target
+        positionMs = target
         notePlayhead(target)
         interaction++
     }
@@ -2373,63 +2323,71 @@ fun PlayerScreen(
         }
     }
 
-    // The offer window and both boundary flags are derived inside a flow: they
-    // flip a couple of times per episode, so a 1 Hz playhead update must not
-    // invalidate the screen that mounts the video surface.
-    var skipOffer by remember { mutableStateOf<SkipOffer?>(null) }
-    var fallbackIntroActive by remember { mutableStateOf(false) }
-    var nextHighlight by remember { mutableStateOf(false) }
-    LaunchedEffect(
-        telemetry, skipSegments, durationMs, isLive, creditsStartMs, nextSlot, fallbackIntroEndMs
-    ) {
-        snapshotFlow {
-            val pos = telemetry.positionMs
-            Triple(
-                if (isLive) null else skipSegments?.offerAt(pos, durationMs),
-                skipSegments == null && fallbackIntroEndMs > 0 &&
-                    pos >= 12_000L && pos < fallbackIntroEndMs,
-                !isLive && nextSlot != null && durationMs > 0 &&
-                    (creditsStartMs?.let { pos >= it } == true || (durationMs - pos) <= 90_000L)
-            )
-        }.distinctUntilChanged().collect { (offer, intro, highlight) ->
-            skipOffer = offer
-            fallbackIntroActive = intro
-            nextHighlight = highlight
+    // Precise boundaries come from TheIntroDB. The duration heuristic is only
+    // a stand-in for episodes the database has nothing on (offline, unknown
+    // title); a titled episode with no intro segment is a cold open, so the
+    // fallback stays off once an answer arrives.
+    val skipOffer = remember(skipSegments, positionMs, durationMs, isLive) {
+        if (isLive) null else skipSegments?.offerAt(positionMs, durationMs)
+    }
+    val fallbackIntroEndMs = remember(item?.key, segmentsResolved, durationMs, isLive) {
+        when {
+            isLive || item == null || !segmentsResolved || durationMs <= 0 -> 0L
+            durationMs >= 12 * 60_000L -> 90_000L
+            durationMs >= 6 * 60_000L -> 75_000L
+            else -> 0L
         }
     }
+    val fallbackIntroActive = skipSegments == null && fallbackIntroEndMs > 0 &&
+        positionMs >= 12_000L && positionMs < fallbackIntroEndMs
     // While the next-up card is on screen the credits are already accounted for.
-    val offer = skipOffer
     val skipLabel = when {
         nextUpSlot != null -> null
-        offer != null -> offer.kind.short
+        skipOffer != null -> skipOffer.kind.short
         fallbackIntroActive -> SkipKind.INTRO.short
         else -> null
     }
     val skipHint = when {
         nextUpSlot != null -> ""
-        offer != null -> offer.kind.label
+        skipOffer != null -> skipOffer.kind.label
         fallbackIntroActive -> SkipKind.INTRO.label
         else -> ""
     }
-    val skipTargetMs = offer?.targetMs ?: fallbackIntroEndMs
+    val skipTargetMs = skipOffer?.targetMs ?: fallbackIntroEndMs
+    val nextHighlight = !isLive && nextSlot != null && durationMs > 0 &&
+        (creditsStartMs?.let { positionMs >= it } == true ||
+            (durationMs - positionMs) <= 90_000L)
 
     fun applySkip() {
         val target = skipTargetMs
         if (target > 0) {
             playerOrNull?.seekTo(target)
-            telemetry.positionMs = target
+            positionMs = target
             notePlayhead(target)
         }
         // The offer disappears once the playhead passes it, so hand focus back
         // to the transport before that happens.
-        focusZone(OsdFocus.PLAY)
+        skipFocused = false
+        dockFocused = true
+        osdFocusTarget = OsdFocus.PLAY
+        runCatching { playFocus.requestFocus() }
+        interaction++
     }
 
     // The offer expires on its own once the playhead leaves the segment; drop
     // focus back to the bar instead of leaving the remote on a hidden node.
-    LaunchedEffect(skipLabel, osdZone) {
-        if (skipLabel != null || osdZone != OsdFocus.SKIP) return@LaunchedEffect
-        focusZone(OsdFocus.TIMELINE)
+    LaunchedEffect(skipLabel, skipFocused) {
+        if (skipLabel != null || !skipFocused) return@LaunchedEffect
+        skipFocused = false
+        timelineFocused = true
+        osdFocusTarget = OsdFocus.TIMELINE
+        runCatching { seekFocus.requestFocus() }
+    }
+
+    val displayPosition = if (isScrubbing && durationMs > 0) {
+        (scrubFraction * durationMs).toLong()
+    } else {
+        positionMs
     }
 
     val anyDialog = panel != null || showPicker || openWithOpen
@@ -2853,72 +2811,77 @@ fun PlayerScreen(
                         }
                     }
                 } else {
-                    // Explicit zones: header (top), skip pill / timeline, dock
-                    // (bottom). The zone mirrors whichever control holds focus;
-                    // UP and DOWN always cross to the neighbouring zone, so a
-                    // remote never dead-ends or wanders into a diagonal control.
-                    // A null zone means nothing in the OSD is focused (first key
-                    // after a tap, or focus still on the clean surface).
-                    val zone = osdZone
+                    // Explicit zones: header (top), timeline, dock (bottom). Whatever the
+                    // focused control is, UP and DOWN always move toward the neighbouring
+                    // zone, so a remote never gets trapped inside the dock.
                     when (keyCode) {
                         KeyEvent.KEYCODE_DPAD_DOWN -> {
-                            when (zone) {
-                                OsdFocus.PLAY -> hideOsd()
+                            when {
+                                dockFocused -> hideOsd()
                                 // The skip pill floats over the timeline, so DOWN
-                                // belongs back on the bar rather than the dock.
-                                OsdFocus.SKIP -> focusZone(
-                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.PLAY
-                                )
-                                else -> focusZone(OsdFocus.PLAY)
+                                // belongs back on the bar rather than the transport row.
+                                skipFocused -> {
+                                    skipFocused = false
+                                    timelineFocused = true
+                                    osdFocusTarget = OsdFocus.TIMELINE
+                                    runCatching { seekFocus.requestFocus() }
+                                }
+                                else -> {
+                                    dockFocused = true
+                                    timelineFocused = false
+                                    osdFocusTarget = OsdFocus.PLAY
+                                    runCatching { playFocus.requestFocus() }
+                                }
                             }
+                            interaction++
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_UP -> {
-                            when (zone) {
-                                OsdFocus.PLAY -> focusZone(
-                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.BACK
-                                )
-                                OsdFocus.TIMELINE -> focusZone(
-                                    if (skipLabel != null) OsdFocus.SKIP else OsdFocus.BACK
-                                )
-                                // The pill is the top of its column, and BACK is
-                                // the top of the screen: both stay put instead of
-                                // handing focus to a control that is not there.
-                                OsdFocus.SKIP, OsdFocus.BACK -> interaction++
-                                null -> focusZone(
-                                    if (seekEnabled) OsdFocus.TIMELINE else OsdFocus.BACK
-                                )
+                            when {
+                                dockFocused -> {
+                                    dockFocused = false
+                                    if (seekEnabled) {
+                                        osdFocusTarget = OsdFocus.TIMELINE
+                                        runCatching { seekFocus.requestFocus() }
+                                    } else {
+                                        osdFocusTarget = OsdFocus.BACK
+                                        runCatching { backFocus.requestFocus() }
+                                    }
+                                }
+                                timelineFocused && skipLabel != null -> {
+                                    skipFocused = false
+                                    timelineFocused = false
+                                    osdFocusTarget = OsdFocus.SKIP
+                                    runCatching { skipFocus.requestFocus() }
+                                }
+                                skipFocused -> Unit
+                                !backFocused -> {
+                                    osdFocusTarget = OsdFocus.BACK
+                                    runCatching { backFocus.requestFocus() }
+                                }
                             }
+                            interaction++
                             true
                         }
                         else -> {
-                            when {
-                                zone == OsdFocus.SKIP &&
-                                    (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                                        keyCode == KeyEvent.KEYCODE_ENTER) -> {
-                                    applySkip()
-                                    true
-                                }
-                                // Touch wakes the OSD without handing focus to it
-                                // (touch mode refuses programmatic focus), so the
-                                // first remote key after a tap takes the dock.
-                                // Before the player exists the transport is
-                                // disabled and unfocusable, so let the focus
-                                // system pick an enabled control (sources,
-                                // display) instead of pinning PLAY.
-                                zone == null -> {
-                                    if (playerOrNull != null) {
-                                        focusZone(OsdFocus.PLAY)
-                                        true
-                                    } else {
-                                        interaction++
-                                        false
-                                    }
-                                }
-                                else -> {
-                                    interaction++
-                                    false
-                                }
+                            if (skipFocused &&
+                                (keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                                    keyCode == KeyEvent.KEYCODE_ENTER)
+                            ) {
+                                applySkip()
+                                interaction++
+                                true
+                            } else if (!dockFocused && !timelineFocused && !skipFocused && !backFocused) {
+                                // Touch wakes the OSD without handing focus to it (touch
+                                // mode refuses programmatic focus), so the first remote
+                                // key after a tap lands on the transport row.
+                                osdFocusTarget = OsdFocus.PLAY
+                                runCatching { playFocus.requestFocus() }
+                                interaction++
+                                true
+                            } else {
+                                interaction++
+                                false
                             }
                         }
                     }
@@ -3073,7 +3036,8 @@ fun PlayerScreen(
             nextUpSlot?.let { slot ->
                 NextUpCard(
                     slot = slot,
-                    countdown = countdown,
+                    seconds = nextUpSeconds,
+                    total = nextUpTotal,
                     onPlayNow = { playSlot(slot) },
                     onDismiss = { dismissNextUp() },
                     modifier = Modifier
@@ -3204,22 +3168,7 @@ fun PlayerScreen(
             exit = fadeOut(tween(160)),
             modifier = Modifier.fillMaxSize()
         ) {
-            // Single source of truth for "a control in the OSD holds focus":
-            // hasFocus covers the whole subtree, so it also clears the zone
-            // when a panel dialog takes the window, when a tap drops focus to
-            // touch mode, and when the controls animate away.
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .onFocusChanged { state ->
-                        // hasFocus covers the whole subtree, so this also
-                        // clears the zone when a panel dialog takes the window
-                        // or a tap drops focus to touch mode. Ignore the
-                        // exit-animation teardown: a button can report focus
-                        // while the controls are animating away.
-                        if (osdVisible && !state.hasFocus) osdZone = null
-                    }
-            ) {
+            Box(Modifier.fillMaxSize()) {
                 Box(
                     Modifier
                         .fillMaxSize()
@@ -3247,19 +3196,21 @@ fun PlayerScreen(
                         ?: searchStatus.takeIf { current != null },
                     clock = clockText,
                     backFocus = backFocus,
-                    downTarget = playFocus,
                     onBack = onExit,
                     onBackFocusChange = { focused ->
+                        backFocused = focused
                         if (focused) {
-                            osdZone = OsdFocus.BACK
-                            interaction++
+                            dockFocused = false
+                            timelineFocused = false
                         }
+                        interaction++
                     },
                     modifier = Modifier.align(Alignment.TopCenter)
                 )
 
                 PlayerDock(
-                    telemetry = telemetry,
+                    positionMs = displayPosition,
+                    bufferedMs = bufferedMs,
                     durationMs = durationMs,
                     isPlaying = isPlaying,
                     controlsEnabled = playerOrNull != null,
@@ -3280,18 +3231,28 @@ fun PlayerScreen(
                     playFocus = playFocus,
                     seekFocus = seekFocus,
                     skipFocus = skipFocus,
-                    backFocus = backFocus,
                     onSeekFocusChange = { focused ->
-                        if (focused) osdZone = OsdFocus.TIMELINE
+                        timelineFocused = focused
+                        if (focused) {
+                            dockFocused = false
+                            skipFocused = false
+                            backFocused = false
+                        }
                     },
                     onSkipFocusChange = { focused ->
-                        if (focused) osdZone = OsdFocus.SKIP
-                    },
-                    onDockFocusChange = { focused ->
+                        skipFocused = focused
                         if (focused) {
-                            osdZone = OsdFocus.PLAY
-                            interaction++
+                            dockFocused = false
+                            timelineFocused = false
+                            backFocused = false
                         }
+                    },
+                    onDockFocusChange = {
+                        dockFocused = true
+                        backFocused = false
+                        skipFocused = false
+                        timelineFocused = false
+                        interaction++
                     },
                     onScrubStart = {
                         wasPlayingBeforeScrub = playerOrNull?.isPlaying == true
@@ -3312,7 +3273,7 @@ fun PlayerScreen(
                             if (now - lastScrubSeekAt >= SCRUB_PREVIEW_INTERVAL_MS) {
                                 lastScrubSeekAt = now
                                 active.seekTo(target)
-                                telemetry.positionMs = target
+                                positionMs = target
                                 notePlayhead(target)
                             }
                         }
@@ -3323,7 +3284,7 @@ fun PlayerScreen(
                         if (active != null && duration > 0) {
                             val target = (fraction * duration).toLong()
                             active.seekTo(target)
-                            telemetry.positionMs = target
+                            positionMs = target
                             notePlayhead(target)
                         }
                         isScrubbing = false
@@ -3360,9 +3321,9 @@ fun PlayerScreen(
                     onExternal = { openOpenWith() },
                     onOverflow = { panel = OsdPanel.OVERFLOW },
                     isLive = isLive,
-                    liveProgram = liveProgramNow,
+                    liveProgram = liveProgram,
                     liveChannelName = liveChannel?.name.orEmpty(),
-                    scrubFraction = scrubFraction.takeIf { isScrubbing && durationMs > 0 },
+                    nowMs = liveNowMs,
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
@@ -3435,10 +3396,7 @@ fun PlayerScreen(
             },
             onDismiss = {
                 panel = null
-                // Hand the remote back to a real control whether the OSD was
-                // hidden behind the sheet or still up; the pump keeps whatever
-                // control the dialog itself restores focus to.
-                wake(OsdFocus.PLAY)
+                if (!osdVisible) wake(OsdFocus.PLAY)
             },
             sideSheet = activePanel == OsdPanel.OVERFLOW,
             initialFocus = when (activePanel) {
@@ -4268,18 +4226,9 @@ private fun OsdPanelDialog(
     content: @Composable () -> Unit
 ) {
     val closeFocus = remember { FocusRequester() }
-    // Whether any control in the panel holds focus. The dialog is its own
-    // window, so this is also how the pump knows its first request landed:
-    // requesting before the rows are attached used to leave the remote on the
-    // window with nothing selected.
-    var panelFocused by remember { mutableStateOf(false) }
-    LaunchedEffect(initialFocus, panelFocused) {
-        if (panelFocused) return@LaunchedEffect
-        val target = initialFocus ?: closeFocus
-        repeat(FOCUS_ATTEMPTS) { attempt ->
-            delay(if (attempt == 0) 120L else FOCUS_RETRY_MS)
-            runCatching { target.requestFocus() }
-        }
+    LaunchedEffect(initialFocus) {
+        delay(140)
+        runCatching { (initialFocus ?: closeFocus).requestFocus() }
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -4342,7 +4291,6 @@ private fun OsdPanelDialog(
                     )
                     .padding(if (sideSheet) 12.dp else 22.dp)
                     .verticalScroll(rememberScrollState())
-                    .onFocusChanged { panelFocused = it.hasFocus }
                     .pointerInput(Unit) {
                         detectTapGestures { }
                     },
@@ -5214,13 +5162,13 @@ private const val NEXT_UP_SECONDS = 8
 @Composable
 private fun NextUpCard(
     slot: EpisodeSlot,
-    countdown: NextUpCountdown,
+    seconds: Int,
+    total: Int,
     onPlayNow: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val seconds = countdown.seconds
-    val fraction = (seconds.toFloat() / countdown.total.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val fraction = (seconds.toFloat() / total.coerceAtLeast(1)).coerceIn(0f, 1f)
     Column(
         modifier
             .width(240.dp)

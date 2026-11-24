@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,7 +75,6 @@ internal fun PlayerTopHeader(
     status: String?,
     clock: String,
     backFocus: FocusRequester,
-    downTarget: FocusRequester,
     onBack: () -> Unit,
     onBackFocusChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
@@ -89,7 +87,6 @@ internal fun PlayerTopHeader(
     ) {
         BackButton(
             focusRequester = backFocus,
-            downTarget = downTarget,
             onFocusChange = onBackFocusChange,
             onClick = onBack
         )
@@ -138,7 +135,6 @@ internal fun PlayerTopHeader(
 @Composable
 private fun BackButton(
     focusRequester: FocusRequester,
-    downTarget: FocusRequester,
     onFocusChange: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -147,15 +143,6 @@ private fun BackButton(
         modifier = Modifier
             .size(46.dp)
             .focusRequester(focusRequester)
-            .focusProperties {
-                // The header is the top of the OSD: only DOWN has somewhere
-                // to go. Cancel keeps the other directions from hunting for a
-                // neighbouring control on the far side of the screen.
-                up = FocusRequester.Cancel
-                left = FocusRequester.Cancel
-                right = FocusRequester.Cancel
-                down = downTarget
-            }
             .glassSurface(
                 shape = CircleShape,
                 focused = focused,
@@ -197,7 +184,8 @@ internal data class LiveProgramInfo(
 
 @Composable
 internal fun PlayerDock(
-    telemetry: PlaybackTelemetry,
+    positionMs: Long,
+    bufferedMs: Long,
     durationMs: Long,
     isPlaying: Boolean,
     controlsEnabled: Boolean,
@@ -218,10 +206,9 @@ internal fun PlayerDock(
     playFocus: FocusRequester,
     seekFocus: FocusRequester,
     skipFocus: FocusRequester,
-    backFocus: FocusRequester,
     onSeekFocusChange: (Boolean) -> Unit,
     onSkipFocusChange: (Boolean) -> Unit = {},
-    onDockFocusChange: (Boolean) -> Unit = {},
+    onDockFocusChange: () -> Unit = {},
     onScrubStart: () -> Unit,
     onScrub: (Float) -> Unit,
     onScrubEnd: (Float) -> Unit,
@@ -242,14 +229,9 @@ internal fun PlayerDock(
     isLive: Boolean = false,
     liveProgram: LiveProgramInfo? = null,
     liveChannelName: String = "",
-    scrubFraction: Float? = null,
+    nowMs: Long = System.currentTimeMillis(),
     modifier: Modifier = Modifier
 ) {
-    // The dock is the only reader of the 1 Hz counters, which keeps the
-    // position tick from recomposing the screen that mounts the video surface.
-    // A scrubbed target is previewed until the ticker catches up.
-    val positionMs = scrubFraction?.let { (it * durationMs).toLong() } ?: telemetry.positionMs
-    val bufferedMs = telemetry.bufferedMs
     val previousFocus = remember { FocusRequester() }
     val rewindFocus = remember { FocusRequester() }
     val forwardFocus = remember { FocusRequester() }
@@ -269,7 +251,7 @@ internal fun PlayerDock(
     fun hintFor(label: String, focused: Boolean) {
         if (focused) {
             hint = label
-            onDockFocusChange(true)
+            onDockFocusChange()
         } else if (hint == label) {
             hint = null
         }
@@ -297,7 +279,7 @@ internal fun PlayerDock(
             LiveProgramRow(
                 program = liveProgram,
                 channelName = liveChannelName,
-                nowMs = telemetry.liveNowMs
+                nowMs = nowMs
             )
         } else {
             Box(Modifier.fillMaxWidth()) {
@@ -315,8 +297,6 @@ internal fun PlayerDock(
                         durationMs = durationMs,
                         enabled = seekEnabled,
                         focusRequester = seekFocus,
-                        upTarget = if (skipLabel != null) skipFocus else backFocus,
-                        downTarget = playFocus,
                         onFocusChange = { focused ->
                             onSeekFocusChange(focused)
                             if (focused) {
@@ -542,11 +522,6 @@ private fun DockButton(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
-    // Play/pause swaps its label while focused; without this the hint strip
-    // keeps naming the old action until focus moves away.
-    LaunchedEffect(label, focused) {
-        if (focused) onFocusHint(label, true)
-    }
     val diameter = if (primary) 66.dp else 52.dp
     val tint = if (active) Cinema.Gold else Cinema.TextPrimary
     Box(
@@ -555,10 +530,6 @@ private fun DockButton(
             .size(diameter)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusProperties {
-                // The transport row is the bottom of the OSD. DOWN is owned by
-                // the screen's zone routing (it hides the controls); Cancel
-                // keeps stray traversal from leaving the row sideways.
-                down = FocusRequester.Cancel
                 upTarget?.let { up = it }
                 leftTarget?.let { left = it }
                 rightTarget?.let { right = it }
@@ -672,8 +643,6 @@ internal fun PlayerSeekBar(
     onScrub: (Float) -> Unit,
     onScrubEnd: (Float) -> Unit,
     onSeekRelative: (Long) -> Unit,
-    upTarget: FocusRequester? = null,
-    downTarget: FocusRequester? = null,
     bufferedMs: Long = 0L,
     modifier: Modifier = Modifier
 ) {
@@ -695,15 +664,6 @@ internal fun PlayerSeekBar(
             .fillMaxWidth()
             .height(38.dp)
             .focusRequester(focusRequester)
-            .focusProperties {
-                // UP leaves for the skip pill (when offered) or the header,
-                // DOWN returns to the transport row. LEFT/RIGHT are the bar's
-                // own seek gestures, so they never traverse away.
-                up = upTarget ?: FocusRequester.Cancel
-                down = downTarget ?: FocusRequester.Cancel
-                left = FocusRequester.Cancel
-                right = FocusRequester.Cancel
-            }
             .onFocusChanged {
                 focused = it.isFocused
                 onFocusChange(it.isFocused)

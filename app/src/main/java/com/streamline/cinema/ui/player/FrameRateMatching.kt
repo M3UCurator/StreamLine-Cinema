@@ -37,27 +37,6 @@ internal fun chooseDisplayMode(
 }
 
 /**
- * A Live session pins the panel at the first channel it tunes. Every mode set
- * is an HDMI re-sync on Amlogic boxes, so a zap between a 50 Hz and a 60 Hz
- * channel must not switch the display again; the first tune decides for the
- * session. VOD is never pinned: one film, one rate.
- */
-internal class FrameRateGate {
-    private var livePinned = false
-
-    fun allows(live: Boolean): Boolean {
-        if (!live) return true
-        if (livePinned) return false
-        livePinned = true
-        return true
-    }
-
-    fun reset() {
-        livePinned = false
-    }
-}
-
-/**
  * App-level auto frame rate matching. Media3 only hints the surface; boxes
  * with the system "match content" switch off keep their panel refresh, which
  * turns 23.976 material into 3:2 pull-down judder. The preferred display mode
@@ -67,15 +46,10 @@ internal object FrameRateMatching {
     private const val TAG = "StreamLine:afr"
     private var originalModeId = 0
     private var appliedModeId = 0
-    private val gate = FrameRateGate()
 
-    fun apply(activity: Activity?, frameRate: Float, live: Boolean = false) {
+    fun apply(activity: Activity?, frameRate: Float) {
         val activity = activity ?: return
         if (frameRate <= 0f) return
-        if (!gate.allows(live)) {
-            Log.d(TAG, "%.2f Hz source · live session keeps the pinned mode".format(frameRate))
-            return
-        }
         val display = displayOf(activity) ?: return
         val current = runCatching { display.mode }.getOrNull() ?: return
         val modes = runCatching { display.supportedModes?.map { it.toOption() } }
@@ -109,7 +83,6 @@ internal object FrameRateMatching {
 
     fun restore(activity: Activity?) {
         val activity = activity ?: return
-        gate.reset()
         val restoreId = originalModeId
         originalModeId = 0
         appliedModeId = 0

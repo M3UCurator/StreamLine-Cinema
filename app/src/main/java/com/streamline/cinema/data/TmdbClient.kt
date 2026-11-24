@@ -225,10 +225,11 @@ class TmdbClient(private val settingsStore: SettingsStore) {
     private suspend fun execute(request: Request): JSONObject {
         var attempt = 0
         while (true) {
-            val response = Http.client.await(request)
-            val code = response.code
-            val body = response.bodyStringCapped(256 * 1024)
-            response.close()
+            // Plain data: the reply body is read and the response closed on the
+            // OkHttp callback thread, never on the caller's dispatcher.
+            val reply = Http.client.awaitText(request, 256 * 1024)
+            val code = reply.code
+            val body = reply.body
             if (code == 429 && attempt < 2) {
                 attempt++
                 delay(1_200L * attempt)

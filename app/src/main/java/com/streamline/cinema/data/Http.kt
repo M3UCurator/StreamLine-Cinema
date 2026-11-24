@@ -5,6 +5,7 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.Headers
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -114,6 +115,51 @@ suspend fun OkHttpClient.await(request: Request): Response = suspendCancellableC
 
         override fun onResponse(call: Call, response: Response) {
             if (continuation.isActive) continuation.resume(response) else response.close()
+        }
+    })
+}
+
+/**
+ * Status, headers and capped body of one response, with the [Response] already
+ * closed. Nothing for the caller's dispatcher to read or release.
+ */
+class TextResponse(
+    val code: Int,
+    val headers: Headers,
+    val body: String
+) {
+    val isSuccessful: Boolean get() = code in 200..299
+    fun header(name: String): String? = headers[name]
+}
+
+/**
+ * Fetches a whole document and hands back plain data. The body is read and the
+ * response closed on the OkHttp callback thread, so a Response never follows the
+ * coroutine to main: cancelling the caller cancels the call, and a late reply is
+ * closed inside [Callback.onResponse] instead of being resumed.
+ */
+suspend fun OkHttpClient.awaitText(
+    request: Request,
+    maxBytes: Int = DEFAULT_TEXT_BODY_LIMIT
+): TextResponse = suspendCancellableCoroutine { continuation ->
+    val call = newCall(request)
+    continuation.invokeOnCancellation { runCatching { call.cancel() } }
+    call.enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) {
+            if (continuation.isActive) continuation.resumeWithException(e)
+        }
+
+        override fun onResponse(call: Call, response: Response) {
+            val result = runCatching {
+                TextResponse(response.code, response.headers, response.bodyStringCapped(maxBytes))
+            }
+            response.close()
+            if (continuation.isActive) {
+                result.fold(
+                    onSuccess = { continuation.resume(it) },
+                    onFailure = { continuation.resumeWithException(it) }
+                )
+            }
         }
     })
 }

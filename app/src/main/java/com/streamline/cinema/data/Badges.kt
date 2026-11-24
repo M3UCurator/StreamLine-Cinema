@@ -245,23 +245,23 @@ class StreamBadgeStore(context: Context) {
             .header("Accept", "application/json")
             .header("User-Agent", Http.BROWSER_USER_AGENT)
             .build()
-        Http.client.await(request).use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Badge source answered HTTP ${response.code}")
-            }
-            val text = response.bodyStringCapped(2 * 1024 * 1024)
-            val document = runCatching { JSONObject(text) }.getOrElse {
-                throw IOException("Badge source is not a JSON document")
-            }
-            val catalog = StreamBadgeCatalog.parse(
-                filters = document.optJSONArray("filters"),
-                groups = document.optJSONArray("groups"),
-                sourceUrl = url,
-                updatedAt = System.currentTimeMillis()
-            )
-            if (catalog.isEmpty) throw IOException("No enabled badges in that document")
-            return catalog
+        // The timeout above cancels the call; the reply is read and closed on the
+        // OkHttp callback thread, so a slow source leaves nothing to clean up here.
+        val reply = Http.client.awaitText(request, 2 * 1024 * 1024)
+        if (!reply.isSuccessful) {
+            throw IOException("Badge source answered HTTP ${reply.code}")
         }
+        val document = runCatching { JSONObject(reply.body) }.getOrElse {
+            throw IOException("Badge source is not a JSON document")
+        }
+        val catalog = StreamBadgeCatalog.parse(
+            filters = document.optJSONArray("filters"),
+            groups = document.optJSONArray("groups"),
+            sourceUrl = url,
+            updatedAt = System.currentTimeMillis()
+        )
+        if (catalog.isEmpty) throw IOException("No enabled badges in that document")
+        return catalog
     }
 
     companion object {

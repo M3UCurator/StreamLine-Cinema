@@ -161,7 +161,7 @@ import com.streamline.cinema.data.StreamUrls
 import com.streamline.cinema.data.StremioAddons
 import com.streamline.cinema.data.TransportVerdict
 import com.streamline.cinema.data.WatchProgress
-import com.streamline.cinema.data.await
+import com.streamline.cinema.data.awaitText
 import com.streamline.cinema.data.rankSources
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
@@ -5399,9 +5399,10 @@ private suspend fun loadStreamInfo(
         rows += "URL" to (if (url.length > 76) url.take(76) + "…" else url)
         val contentLength = withTimeoutOrNull(2_500L) {
             runCatching {
-                Http.client.await(Request.Builder().url(url).head().build()).use { response ->
-                    response.header("Content-Length")?.toLongOrNull()
-                }
+                // A HEAD reply carries no body; awaitText still closes it on the
+                // OkHttp thread when the 2.5 s bound gives up on the call.
+                Http.client.awaitText(Request.Builder().url(url).head().build(), maxBytes = 0)
+                    .header("Content-Length")?.toLongOrNull()
             }.getOrNull()
         }
         contentLength?.takeIf { it > 0 }?.let { rows += "Size" to formatBytes(it) }

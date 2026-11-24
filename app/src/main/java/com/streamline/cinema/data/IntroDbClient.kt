@@ -1,8 +1,10 @@
 package com.streamline.cinema.data
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
@@ -46,46 +48,50 @@ class IntroDbClient(cacheRoot: File) {
     suspend fun segments(tmdbId: Int, season: Int, episode: Int): SkipSegments? {
         if (tmdbId <= 0 || season <= 0 || episode <= 0) return null
         val key = "$tmdbId-$season-$episode"
-        return gate.withLock {
-            if (memory.containsKey(key)) return@withLock memory[key]
+        // The cache file and the reply are both touched inside IO: this is called
+        // from a composition effect, and a timeout must cancel the call without
+        // leaving a body to close on main.
+        return withContext(Dispatchers.IO) {
+            gate.withLock {
+                if (memory.containsKey(key)) return@withLock memory[key]
 
-            val now = System.currentTimeMillis()
-            val cached = readCache(key)
-            val ttl = if (cached?.segments == null) NEGATIVE_TTL_MS else CACHE_TTL_MS
-            if (cached != null && now - cached.savedAtMs <= ttl) {
-                memory[key] = cached.segments
-                return@withLock cached.segments
-            }
-            if (now < blockedUntilMs) return@withLock cached?.segments
+                val now = System.currentTimeMillis()
+                val cached = readCache(key)
+                val ttl = if (cached?.segments == null) NEGATIVE_TTL_MS else CACHE_TTL_MS
+                if (cached != null && now - cached.savedAtMs <= ttl) {
+                    memory[key] = cached.segments
+                    return@withLock cached.segments
+                }
+                if (now < blockedUntilMs) return@withLock cached?.segments
 
-            var completed = false
-            var parsed: SkipSegments? = null
-            try {
-                http.await(request(tmdbId, season, episode)).use { response ->
+                var completed = false
+                var parsed: SkipSegments? = null
+                try {
+                    val reply = http.awaitText(request(tmdbId, season, episode), MAX_BODY_BYTES)
                     when {
-                        response.code == 429 -> {
-                            blockedUntilMs = now + rateLimitCooldownMs(response.header("X-RateLimit-Reset"))
+                        reply.code == 429 -> {
+                            blockedUntilMs = now + rateLimitCooldownMs(reply.header("X-RateLimit-Reset"))
                             Log.i(TAG, "IntroDB rate limited until +${blockedUntilMs - now} ms")
                         }
-                        response.code == 404 -> completed = true
-                        response.isSuccessful -> {
-                            parsed = SkipSegments.parse(response.bodyStringCapped(MAX_BODY_BYTES))
+                        reply.code == 404 -> completed = true
+                        reply.isSuccessful -> {
+                            parsed = SkipSegments.parse(reply.body)
                             completed = true
                         }
                     }
+                } catch (failure: IOException) {
+                    Log.i(TAG, "IntroDB $tmdbId S$season E$episode failed: ${failure.message}")
                 }
-            } catch (failure: IOException) {
-                Log.i(TAG, "IntroDB $tmdbId S$season E$episode failed: ${failure.message}")
-            }
 
-            if (completed) {
-                memory[key] = parsed
-                writeCache(key, parsed)
-                parsed
-            } else {
-                // A transient failure keeps an older copy in service rather than
-                // dropping skip data mid-episode.
-                cached?.segments
+                if (completed) {
+                    memory[key] = parsed
+                    writeCache(key, parsed)
+                    parsed
+                } else {
+                    // A transient failure keeps an older copy in service rather than
+                    // dropping skip data mid-episode.
+                    cached?.segments
+                }
             }
         }
     }

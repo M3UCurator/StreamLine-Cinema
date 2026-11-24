@@ -1,4 +1,49 @@
-# StreamLine Cinema v12.117
+# StreamLine Cinema v12.130
+
+Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
+
+## New in 12.130 — network bodies owned by the callback thread, and CH+/CH- surfing
+
+Two long-standing rough edges are fixed at the source: the HTTP layer no longer hands an OkHttp response back to the caller, and a TV remote's channel keys now work in the live player.
+
+- **A response never leaves the OkHttp callback thread.** `Http.awaitText` enqueues the call, reads the capped body and closes the response inside `onResponse`, then resumes the coroutine with plain data — status, headers and body (`TextResponse`). Cancelling the caller cancels the call; a reply that lands after cancellation is closed instead of resumed. `IntroDbClient.segments` runs its cache read, HTTP call and cache write inside `Dispatchers.IO`; `TmdbClient.execute`, the badge source fetch and the player's 2.5 s stats HEAD probe take the same path. Nothing on main has a body left to read or close.
+- **CH+ / CH- surf live channels.** The channel keys tune the live playlist exactly like LEFT/RIGHT — one channel per press, dismissing the next-up card — and outside live they are consumed so channel keys cannot wake the OSD.
+- **The search scan settles once.** The live-channel match no longer runs on the main thread per keystroke: it waits for the 350 ms debounce and runs on `Dispatchers.Default`, and a stale query's result is dropped instead of overwriting the newer one. Local results show immediately, and the offline notice waits for the scan before concluding the search is empty.
+
+## Verified on 12.130
+
+- `:app:testDebugUnitTest` — 338 tests, 336 passing. The two failures are the long-standing live Hyper-addon provider checks (`expected an adaptive manifest`, `expected several options`), which fail whenever the public inventory stops advertising an adaptive entry — the same environmental pair recorded for earlier releases, not a regression.
+- With the change installed on emulator-5554: TMDB movie/TV searches through the mock proxy (multi/movie/tv 200s, the 401 banner and the empty state), VOD and series playback, live catalog and EPG parsing with live playback, and a real IntroDB call that wrote and re-read its segment cache. No FATAL entries and an empty crash buffer.
+- Both release builds `BUILD SUCCESSFUL`; `aapt dump badging` reports `versionCode 120130` / `versionName 12.130`; the 32-bit file lists `armeabi-v7a` only, the all-ABI file all four ABIs; both verify against the same `CN=Android Debug` certificate. Dex check: `DebugPlayActivity` 0 in both files, `awaitText` present in the shipped dex.
+- The all-ABI release installed over the previous build with app data kept; `dumpsys package` reports `versionName 12.130`, `DebugPlayActivity` resolves to no activity, and the crash buffer is empty.
+
+## Assets
+
+| File | ABI | Size | SHA-256 |
+| --- | --- | --- | --- |
+| `Cinema241126v12.130.apk` | `armeabi-v7a` (TV boxes) | 77,315,399 bytes | `027a01ceb5cdeabafe042f429a9364e4b0622ea1f5373410d7a94dfb6905b715` |
+| `Cinema241126v12.130-allabis.apk` | all ABIs (armeabi-v7a, arm64-v8a, x86, x86_64) | 330,514,056 bytes | `a21e01ee18b8f0c007ff99348045c5718a2da84947336b7bb124d0590583a427` |
+
+Install the `armeabi-v7a` build on Android TV boxes. The all-ABI build is for emulators and 64-bit devices that cannot install the 32-bit package. The in-app updater picks the matching file automatically.
+
+## Install and update
+
+```bash
+adb connect <tv-box-ip>:5555
+adb install -r Cinema241126v12.130.apk
+```
+
+To update, install the newer APK from Releases over the existing app, or use **Settings → About → DOWNLOAD & INSTALL** on 12.77 and later. Settings, library, profiles, playlists and watch progress are kept. Builds are signed with the Android debug key, so always update from this repository's releases; a build signed with a different key cannot install over this one.
+
+## Requirements
+
+- Android 6.0 (API 23) or newer, landscape TV or touchscreen device
+- D-pad remote supported everywhere; no touchscreen required
+- A TMDB key/bearer token or proxy, or your own catalogs/addons/playlists — the app ships no content sources
+
+---
+
+# StreamLine Cinema v12.117 (previous)
 
 Leanback Android TV client for TMDB discovery, Stremio addons and IPTV playlists, built for 32-bit TV boxes.
 

@@ -14,13 +14,11 @@ import com.streamline.cinema.data.DnsMode
 import com.streamline.cinema.data.EpgGuide
 import com.streamline.cinema.data.EpgProgramHit
 import com.streamline.cinema.data.Episode
+import com.streamline.cinema.data.BROWSE_GENRES
 import com.streamline.cinema.data.ExternalIntents
 import com.streamline.cinema.data.ExternalPlayerInfo
-import com.streamline.cinema.data.Genre
-import com.streamline.cinema.data.GenreCatalog
 import com.streamline.cinema.data.ChannelHealth
 import com.streamline.cinema.data.GenreSort
-import com.streamline.cinema.data.Genres
 import com.streamline.cinema.data.ImportSource
 import com.streamline.cinema.data.IptvSource
 import com.streamline.cinema.data.LanguageRule
@@ -45,9 +43,12 @@ import com.streamline.cinema.data.UpdateUiState
 import com.streamline.cinema.data.WatchProgress
 import com.streamline.cinema.data.allowedFor
 import com.streamline.cinema.data.filterKnownOtherLanguages
+import com.streamline.cinema.data.localNames
+import com.streamline.cinema.data.tmdbLanguageTag
 import com.streamline.cinema.data.isNewerVersion
 import com.streamline.cinema.data.rankByLanguage
 import com.streamline.cinema.data.rankingLanguage
+import com.streamline.cinema.data.effectiveRankingLanguage
 import com.streamline.cinema.data.todayStamp
 import com.streamline.cinema.data.visibleTo
 import com.streamline.cinema.data.watchedEpisodesFor
@@ -126,17 +127,9 @@ data class SearchUiState(
     val programs: List<EpgProgramHit> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
-    /** Non-empty means the Playroom is browsing discover results for these TMDB genre ids. */
-    val genreIds: Set<Int> = emptySet(),
-    val genreSort: GenreSort = GenreSort.NEWEST,
-    /** A–Z strip selection; filters the hall alphabetically while the query is empty. */
-    val letter: String? = null
-)
-
-data class GenreUiState(
-    val catalog: GenreCatalog = GenreCatalog(),
-    val loading: Boolean = false,
-    val error: String? = null
+    /** Non-empty means the Playroom is browsing discover results for these genre chips. */
+    val browseGenres: Set<String> = emptySet(),
+    val genreSort: GenreSort = GenreSort.NEWEST
 )
 
 data class QuickImportState(
@@ -268,8 +261,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private val _search = MutableStateFlow(SearchUiState())
     val search: StateFlow<SearchUiState> = _search.asStateFlow()
 
-    private val _genres = MutableStateFlow(GenreUiState())
-    val genres: StateFlow<GenreUiState> = _genres.asStateFlow()
 
     private val _importState = MutableStateFlow(ImportUiState())
     val importState: StateFlow<ImportUiState> = _importState.asStateFlow()
@@ -316,7 +307,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     private var searchJob: Job? = null
     private var epgSearchJob: Job? = null
     private var genresJob: Job? = null
-    private var genresLoadedFromApi = false
+    private var genresLoadedFor: String? = null
     private var quickImportDismissJob: Job? = null
     private var homeLoaded = false
     private var railsJob: Job? = null
@@ -339,7 +330,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             container.profileStore.active.drop(1).collect { profile ->
                 container.libraryStore.setActiveProfile(profile.id)
                 refreshRecommendations(force = true)
-                if (_search.value.query.isBlank() && _search.value.genreIds.isEmpty()) {
+                if (_search.value.query.isBlank() && _search.value.browseGenres.isEmpty()) {
                     loadPlayroomDefault()
                 }
             }
@@ -543,7 +534,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onTmdbSettingsChanged() {
         homeLoaded = false
-        genresLoadedFromApi = false
         refreshHome(force = true)
         loadGenres(force = true)
         search(_search.value.query, _search.value.filter, settings.value.includeAdult)
@@ -555,7 +545,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         homeLoaded = false
         refreshHome(force = true)
         loadGenres(force = true)
-        if (_search.value.query.isBlank() && _search.value.genreIds.isEmpty()) {
+        if (_search.value.query.isBlank() && _search.value.browseGenres.isEmpty()) {
             loadPlayroomDefault()
         } else {
             search(_search.value.query, _search.value.filter, settings.value.includeAdult)
@@ -571,15 +561,13 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         val typed = query.isNotBlank()
         _search.update { current ->
             // Typing switches the Playroom back to text search; a blank query
-            // keeps the genre selection, pruned to the selected media type.
-            val kept = if (typed) emptySet() else pruneGenres(filter, current.genreIds)
+            // keeps the genre selection.
             current.copy(
                 query = query,
                 filter = filter,
-                genreIds = kept,
+                browseGenres = if (typed) emptySet() else current.browseGenres,
                 channels = if (typed) current.channels else emptyList(),
-                programs = if (typed) emptyList() else current.programs,
-                letter = if (typed) null else current.letter
+                programs = if (typed) emptyList() else current.programs
             )
         }
         searchJob?.cancel()
@@ -599,8 +587,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             _search.update { it.copy(programs = emptyList()) }
         }
         if (query.isBlank()) {
-            val letter = _search.value.letter
-            if (letter != null) browseLetter(letter) else loadPlayroomDefault()
+            loadPlayroomDefault()
             return
         }
         val local = localMatches(query, filter)
@@ -642,17 +629,40 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             }
             try {
                 val remote = repository.search(query, filter, adult)
+                // Keywords supplement text search: TMDB has no Biography or
+                // Sport genre, so those words only resolve this way. A miss
+                // never fails the text search.
+                val keywordHits = if (query.trim().length >= 2) {
+                    try {
+                        repository.keywordTitles(query, filter, adult)
+                    } catch (t: CancellationException) {
+                        throw t
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                } else {
+                    emptyList()
+                }
                 val language = settings.value.rankingLanguage()
-                val visible = if (!ignoreLanguageRule && settings.value.languageRule == LanguageRule.ONLY) {
+                val ranking = settings.value.effectiveRankingLanguage()
+                val restrictLanguage =
+                    !ignoreLanguageRule && settings.value.languageRule == LanguageRule.ONLY
+                val visible = if (restrictLanguage) {
                     filterKnownOtherLanguages(remote, language)
                 } else {
                     remote
                 }
+                val keywordVisible = if (restrictLanguage) {
+                    filterKnownOtherLanguages(keywordHits, language)
+                } else {
+                    keywordHits
+                }
+                val combined = (visible + keywordVisible).distinctBy { it.key }
                 _search.update {
                     it.copy(
                         query = query,
                         filter = filter,
-                        results = mergeWithLibrary(rankByLanguage(visible, language), query, filter),
+                        results = mergeWithLibrary(rankByLanguage(combined, ranking), query, filter),
                         loading = false,
                         error = null
                     )
@@ -678,8 +688,8 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     fun loadPlayroomDefault() {
         searchJob?.cancel()
         val state = _search.value
-        if (state.genreIds.isNotEmpty()) {
-            loadGenreResults(state.filter, state.genreIds)
+        if (state.browseGenres.isNotEmpty()) {
+            loadGenreResults(state.filter, state.browseGenres)
             return
         }
         // The type pills must also narrow the default page, not just text searches.
@@ -700,7 +710,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         searchJob = viewModelScope.launch {
-            _search.update { it.copy(query = "", channels = emptyList(), letter = null, loading = true, error = null) }
+            _search.update { it.copy(query = "", channels = emptyList(), loading = true, error = null) }
             try {
                 val remote = when (filter) {
                     MediaType.MOVIE -> repository.topMovies()
@@ -722,35 +732,6 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
             }
-        }
-    }
-
-    /** Alphabetical browse of the Cinema Hall, independent of TMDB availability. */
-    fun browseLetter(letter: String?) {
-        searchJob?.cancel()
-        val state = _search.value
-        if (letter == null) {
-            _search.update { it.copy(letter = null, query = "") }
-            loadPlayroomDefault()
-            return
-        }
-        val matches = playroomResults(library.value)
-            .filter { state.filter == null || it.type == state.filter }
-            .filter { item ->
-                val first = item.title.trim().firstOrNull()?.uppercaseChar()
-                if (letter == "#") first == null || !first.isLetter() else first == letter.first()
-            }
-            .sortedBy { it.title.lowercase() }
-        _search.update {
-            it.copy(
-                query = "",
-                letter = letter,
-                genreIds = emptySet(),
-                channels = emptyList(),
-                results = matches,
-                loading = false,
-                error = null
-            )
         }
     }
 
@@ -815,78 +796,32 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * Loads the TMDB genre lists that back the Playroom chips. The bundled
-     * [Genres] tables are only a fallback while the API is unreachable.
+     * Warms the TMDB genre table so discover results carry localised genre
+     * names. The Playroom chips themselves are the fixed [BROWSE_GENRES] bar.
      */
     fun loadGenres(force: Boolean = false) {
+        if (!settings.value.hasTmdbAccess) return
+        val language = settings.value.tmdbLanguageTag()
         if (force) genresJob?.cancel()
-        else if (genresJob?.isActive == true) return
-        if (!force && genresLoadedFromApi) return
-        if (!settings.value.hasTmdbAccess) {
-            if (_genres.value.catalog.movie.isEmpty() && _genres.value.catalog.tv.isEmpty()) {
-                _genres.value = GenreUiState(catalog = fallbackGenres())
-            }
-            return
-        }
+        else if (genresJob?.isActive == true || genresLoadedFor == language) return
         genresJob = viewModelScope.launch {
-            _genres.update { it.copy(loading = true, error = null) }
             runCatching { repository.genres(force) }
-                .onSuccess { catalog ->
-                    if (catalog.movie.isNotEmpty() || catalog.tv.isNotEmpty()) {
-                        genresLoadedFromApi = true
-                        _genres.value = GenreUiState(catalog = catalog, loading = false)
-                    } else {
-                        _genres.value = GenreUiState(
-                            catalog = currentGenresOrFallback(),
-                            loading = false,
-                            error = "TMDB returned an empty genre list"
-                        )
-                    }
-                }
-                .onFailure { t ->
-                    if (t is CancellationException) throw t
-                    _genres.value = GenreUiState(
-                        catalog = currentGenresOrFallback(),
-                        loading = false,
-                        error = t.message ?: "Could not load genres"
-                    )
-                }
+                .onSuccess { genresLoadedFor = language }
+                .onFailure { t -> if (t is CancellationException) throw t }
         }
     }
 
-    private fun currentGenresOrFallback(): GenreCatalog {
-        val current = _genres.value.catalog
-        return if (current.movie.isEmpty() && current.tv.isEmpty()) fallbackGenres() else current
-    }
-
-    private fun fallbackGenres(): GenreCatalog = GenreCatalog(
-        movie = Genres.movie.map { Genre(it.key, it.value) }.sortedBy { it.name },
-        tv = Genres.tv.map { Genre(it.key, it.value) }.sortedBy { it.name }
-    )
-
-    fun toggleGenre(id: Int) {
+    fun toggleGenre(name: String) {
         val state = _search.value
-        val next = if (id in state.genreIds) state.genreIds - id else state.genreIds + id
-        _search.update { it.copy(genreIds = next, query = "", channels = emptyList(), letter = null) }
+        val next = if (name in state.browseGenres) state.browseGenres - name else state.browseGenres + name
+        _search.update { it.copy(browseGenres = next, query = "", channels = emptyList()) }
         if (next.isEmpty()) loadPlayroomDefault() else loadGenreResults(state.filter, next)
     }
 
     fun clearGenres() {
-        if (_search.value.genreIds.isEmpty()) return
-        _search.update { it.copy(genreIds = emptySet(), query = "", channels = emptyList(), letter = null) }
+        if (_search.value.browseGenres.isEmpty()) return
+        _search.update { it.copy(browseGenres = emptySet(), query = "", channels = emptyList()) }
         loadPlayroomDefault()
-    }
-
-    /** Replaces the genre selection outright, used by the mood shortcuts. */
-    fun setGenres(ids: Set<Int>) {
-        val filter = _search.value.filter
-        val next = pruneGenres(filter, ids)
-        if (next == _search.value.genreIds) {
-            clearGenres()
-            return
-        }
-        _search.update { it.copy(genreIds = next, query = "", channels = emptyList(), letter = null) }
-        if (next.isEmpty()) loadPlayroomDefault() else loadGenreResults(filter, next)
     }
 
     /** Genre results default to newest-first; popularity is the alternate order. */
@@ -894,23 +829,23 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         if (_search.value.genreSort == sort) return
         _search.update { it.copy(genreSort = sort) }
         val state = _search.value
-        if (state.genreIds.isNotEmpty()) loadGenreResults(state.filter, state.genreIds)
+        if (state.browseGenres.isNotEmpty()) loadGenreResults(state.filter, state.browseGenres)
     }
 
-    private fun loadGenreResults(filter: MediaType?, requested: Set<Int>) {
+    private fun loadGenreResults(filter: MediaType?, requested: Set<String>) {
         searchJob?.cancel()
-        val genreIds = pruneGenres(filter, requested)
-        if (genreIds.isEmpty()) {
-            _search.update { it.copy(genreIds = emptySet(), results = emptyList(), loading = false, error = null) }
+        val names = requested.filterTo(linkedSetOf()) { name -> BROWSE_GENRES.any { it.name == name } }
+        if (names.isEmpty()) {
+            _search.update { it.copy(browseGenres = emptySet(), results = emptyList(), loading = false, error = null) }
             loadPlayroomDefault()
             return
         }
-        if (genreIds != requested) _search.update { it.copy(genreIds = genreIds) }
+        if (names != requested) _search.update { it.copy(browseGenres = names) }
         if (!settings.value.hasTmdbAccess) {
             _search.update {
                 it.copy(
                     query = "",
-                    results = localGenreMatches(filter, genreIds),
+                    results = localGenreMatches(filter, names),
                     loading = false,
                     error = null
                 )
@@ -919,17 +854,17 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         }
         searchJob = viewModelScope.launch {
             val sort = _search.value.genreSort
-            _search.update { it.copy(query = "", channels = emptyList(), letter = null, loading = true, error = null) }
+            _search.update { it.copy(query = "", channels = emptyList(), loading = true, error = null) }
             try {
-                val remote = repository.discoverByGenres(
+                val remote = repository.discoverBrowse(
                     filter,
-                    genreIds,
+                    names,
                     settings.value.includeAdult,
                     sort
                 )
                 _search.update {
                     it.copy(
-                        results = playroomResults(rankByLanguage(remote, settings.value.rankingLanguage())),
+                        results = playroomResults(rankByLanguage(remote, settings.value.effectiveRankingLanguage())),
                         loading = false,
                         error = null
                     )
@@ -948,17 +883,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /** Drops ids that the selected media type does not publish. */
-    private fun pruneGenres(filter: MediaType?, ids: Set<Int>): Set<Int> {
-        if (ids.isEmpty()) return emptySet()
-        val allowed = _genres.value.catalog.forScope(filter)
-        if (allowed.isEmpty()) return ids
-        val allowedIds = allowed.mapTo(mutableSetOf()) { it.id }
-        return ids.filterTo(mutableSetOf()) { it in allowedIds }
-    }
-
-    private fun localGenreMatches(filter: MediaType?, ids: Set<Int>): List<CatalogItem> {
-        val names = ids.mapNotNull { _genres.value.catalog.nameFor(filter, it) }.toSet()
+    private fun localGenreMatches(filter: MediaType?, chips: Set<String>): List<CatalogItem> {
+        val names = chips.flatMapTo(mutableSetOf()) { chip ->
+            BROWSE_GENRES.firstOrNull { it.name == chip }?.localNames(filter).orEmpty()
+        }
         if (names.isEmpty()) return emptyList()
         return playroomResults(library.value.filter { item ->
             (filter == null || item.type == filter) && item.genres.any { it in names }
@@ -1865,7 +1793,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         val state = _search.value
         when {
             state.query.isNotBlank() -> search(state.query, state.filter, include)
-            state.genreIds.isNotEmpty() -> loadGenreResults(state.filter, state.genreIds)
+            state.browseGenres.isNotEmpty() -> loadGenreResults(state.filter, state.browseGenres)
             else -> loadPlayroomDefault()
         }
     }

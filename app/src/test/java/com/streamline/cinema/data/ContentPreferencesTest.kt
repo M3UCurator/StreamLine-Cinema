@@ -101,6 +101,13 @@ class ContentPreferencesTest {
     }
 
     @Test
+    fun rankingTargetsTheChosenLanguageOrEnglishWhenNoneIsSet() {
+        assertEquals("en", AppSettings().effectiveRankingLanguage())
+        assertEquals("hi", AppSettings().copy(contentLanguage = "hi").effectiveRankingLanguage())
+        assertEquals("en", AppSettings().copy(contentCountry = "IN").effectiveRankingLanguage())
+    }
+
+    @Test
     fun discoverLanguageFilterOnlyAppliesToTheOnlyRule() {
         val prefer = AppSettings().copy(contentLanguage = "hi")
         val only = prefer.copy(languageRule = LanguageRule.ONLY)

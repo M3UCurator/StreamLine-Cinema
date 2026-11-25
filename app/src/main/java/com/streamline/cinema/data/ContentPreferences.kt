@@ -24,6 +24,10 @@ internal fun AppSettings.discoverCountryFilter(): String? =
 /** Language used for ranking; blank means the feature is off. */
 internal fun AppSettings.rankingLanguage(): String = contentLanguage
 
+/** Ranking target: the chosen content language, or English when none is set. */
+internal fun AppSettings.effectiveRankingLanguage(): String =
+    rankingLanguage().ifBlank { "en" }
+
 /**
  * Stable partition of a TMDB-ordered list: preferred-language titles first,
  * then records with no language, then everything known to be another

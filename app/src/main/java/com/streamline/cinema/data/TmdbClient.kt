@@ -19,8 +19,8 @@ class TmdbClient(private val settingsStore: SettingsStore) {
     private val settings get() = settingsStore.settings.value
 
     private companion object {
-        // Search fans out over the first few pages; TMDB serves 20 titles per page.
-        const val SEARCH_PAGES = 5
+        // Search fans out over the first ten pages; TMDB serves 20 titles per page.
+        const val SEARCH_PAGES = 10
         const val TMDB_PAGE_SIZE = 20
     }
 

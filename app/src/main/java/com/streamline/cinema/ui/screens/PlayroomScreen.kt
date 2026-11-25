@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.streamline.cinema.CinemaViewModel
+import com.streamline.cinema.data.BROWSE_GENRES
 import com.streamline.cinema.data.CatalogItem
 import com.streamline.cinema.data.ContentLanguage
 import com.streamline.cinema.data.EpgProgramHit
@@ -98,7 +99,6 @@ fun PlayroomScreen(
     val settings by vm.settings.collectAsState()
     val search by vm.search.collectAsState()
     val live by vm.live.collectAsState()
-    val genreState by vm.genres.collectAsState()
     val quickImport by vm.quickImport.collectAsState()
     val posterStyle = LocalPosterStyle.current
     val focusMemory = LocalFocusMemory.current
@@ -147,7 +147,7 @@ fun PlayroomScreen(
                         style = CinemaType.Kicker
                     )
                     Spacer(Modifier.weight(1f))
-                    if (search.genreIds.isNotEmpty()) {
+                    if (search.browseGenres.isNotEmpty()) {
                         Text(
                             "SORT",
                             color = Cinema.TextMuted,
@@ -173,10 +173,10 @@ fun PlayroomScreen(
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            if (search.genreIds.isEmpty()) {
+                            if (search.browseGenres.isEmpty()) {
                                 "${search.results.size} titles"
                             } else {
-                                val count = search.genreIds.size
+                                val count = search.browseGenres.size
                                 "${search.results.size} titles · $count genre${if (count == 1) "" else "s"}"
                             },
                             color = Cinema.TextMuted,
@@ -248,39 +248,6 @@ fun PlayroomScreen(
                                     .background(Color.White.copy(alpha = 0.10f))
                             )
                         }
-                        item(key = "mood-label") {
-                            Text(
-                                "MOOD",
-                                color = Cinema.TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.6.sp,
-                                modifier = Modifier.padding(start = 4.dp, end = 2.dp)
-                            )
-                        }
-                        items(moodsFor(search.filter), key = { "mood-${it.label}" }) { mood ->
-                            Chip(
-                                label = mood.label,
-                                selected = mood.ids.isNotEmpty() &&
-                                    mood.ids.all { it in search.genreIds },
-                                onClick = {
-                                    if (mood.ids.all { it in search.genreIds }) {
-                                        vm.clearGenres()
-                                    } else {
-                                        vm.setGenres(mood.ids)
-                                    }
-                                }
-                            )
-                        }
-                        item(key = "divider-2") {
-                            Box(
-                                Modifier
-                                    .padding(horizontal = 6.dp)
-                                    .width(1.dp)
-                                    .height(24.dp)
-                                    .background(Color.White.copy(alpha = 0.10f))
-                            )
-                        }
                         item(key = "genre-label") {
                             Text(
                                 "GENRE",
@@ -291,102 +258,11 @@ fun PlayroomScreen(
                                 modifier = Modifier.padding(start = 4.dp, end = 2.dp)
                             )
                         }
-                        items(
-                            genreState.catalog.forScope(search.filter),
-                            key = { "genre-${it.id}" }
-                        ) { genre ->
+                        items(BROWSE_GENRES, key = { "genre-${it.name}" }) { genre ->
                             Chip(
                                 label = genre.name,
-                                selected = genre.id in search.genreIds,
-                                onClick = { vm.toggleGenre(genre.id) }
-                            )
-                        }
-                        if (genreState.loading) {
-                            item(key = "genres-loading") {
-                                Text(
-                                    "Loading genres…",
-                                    color = Cinema.TextMuted,
-                                    fontSize = 10.sp,
-                                    modifier = Modifier.padding(horizontal = 4.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-                genreState.error?.let { error ->
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Genre list fallback · $error",
-                        color = Cinema.Offline,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                if (search.query.isBlank() && settings.recentSearches.isNotEmpty()) {
-                    Spacer(Modifier.height(12.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "RECENT",
-                            color = Cinema.TextMuted,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.6.sp
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        LazyRow(
-                            state = rememberScreenListState("playroom.recent"),
-                            modifier = Modifier.weight(1f),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            items(settings.recentSearches, key = { "recent-$it" }) { term ->
-                                Chip(
-                                    label = term,
-                                    selected = false,
-                                    compact = true,
-                                    onClick = {
-                                        vm.search(term, search.filter, settings.includeAdult)
-                                        vm.rememberSearch(term)
-                                    }
-                                )
-                            }
-                            item(key = "recent-clear") {
-                                Chip(
-                                    label = "CLEAR",
-                                    selected = false,
-                                    compact = true,
-                                    onClick = { vm.clearRecentSearches() }
-                                )
-                            }
-                        }
-                    }
-                }
-                if (search.query.isBlank() && search.genreIds.isEmpty()) {
-                    Spacer(Modifier.height(10.dp))
-                    LazyRow(
-                        state = rememberScreenListState("playroom.az"),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        item(key = "az-label") {
-                            Text(
-                                "A–Z",
-                                color = Cinema.TextMuted,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.2.sp,
-                                modifier = Modifier.padding(end = 10.dp)
-                            )
-                        }
-                        items(azLetters, key = { "az-$it" }) { letter ->
-                            Chip(
-                                label = letter,
-                                selected = search.letter == letter,
-                                compact = true,
-                                onClick = {
-                                    vm.browseLetter(if (search.letter == letter) null else letter)
-                                }
+                                selected = genre.name in search.browseGenres,
+                                onClick = { vm.toggleGenre(genre.name) }
                             )
                         }
                     }
@@ -441,7 +317,7 @@ fun PlayroomScreen(
                     key = "playroom-empty",
                     span = { GridItemSpan(maxLineSpan) }
                 ) {
-                    val browsingGenres = search.genreIds.isNotEmpty()
+                    val browsingGenres = search.browseGenres.isNotEmpty()
                     val strictLanguage = !browsingGenres && search.query.isNotBlank() &&
                         settings.languageRule == LanguageRule.ONLY &&
                         settings.contentLanguage.isNotBlank()
@@ -1116,26 +992,6 @@ private fun programmeTimeRange(startMs: Long, stopMs: Long): String {
     val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
     return "${formatter.format(Date(startMs))}–${formatter.format(Date(stopMs))}"
 }
-
-private data class MoodShortcut(val label: String, val ids: Set<Int>)
-private fun moodsFor(filter: MediaType?): List<MoodShortcut> =
-    if (filter == MediaType.TV) {
-        listOf(
-            MoodShortcut("Edge of seat", setOf(9648, 10765)),
-            MoodShortcut("Feel-good", setOf(35, 10751)),
-            MoodShortcut("Binge drama", setOf(18)),
-            MoodShortcut("Real world", setOf(99, 10763))
-        )
-    } else {
-        listOf(
-            MoodShortcut("Edge of seat", setOf(53, 27)),
-            MoodShortcut("Feel-good", setOf(35, 10751)),
-            MoodShortcut("Epic", setOf(12, 14)),
-            MoodShortcut("True story", setOf(99, 36))
-        )
-    }
-
-private val azLetters: List<String> = listOf("#") + ('A'..'Z').map { it.toString() }
 
 @Composable
 private fun EpisodePreviewRow(episode: Episode, onClick: () -> Unit) {

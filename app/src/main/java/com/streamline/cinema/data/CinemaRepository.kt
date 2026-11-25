@@ -233,12 +233,15 @@ class CinemaRepository(
 
     suspend fun genres(force: Boolean = false): GenreCatalog = tmdbApi.genres(force)
 
-    suspend fun discoverByGenres(
+    suspend fun discoverBrowse(
         filter: MediaType?,
-        genreIds: Set<Int>,
+        genres: Set<String>,
         adult: Boolean,
         sort: GenreSort
-    ): List<CatalogItem> = tmdbApi.discover(filter, genreIds, adult, sort)
+    ): List<CatalogItem> = tmdbApi.discoverBrowse(filter, genres, adult, sort)
+
+    suspend fun keywordTitles(query: String, filter: MediaType?, adult: Boolean): List<CatalogItem> =
+        tmdbApi.keywordTitles(query, filter, adult)
 
     suspend fun discover(presetCategory: String): List<CatalogItem> = tmdb.preset(presetCategory)
 

@@ -20,12 +20,13 @@ import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TMDB_API_BASE = "https://api.themoviedb.org/3/"
 
-// Genre and mood browsing reads several discover pages per media type (20
-// titles each) so a selection returns a browsable shelf, not one screen.
-private const val DISCOVER_PAGES = 5
+// Genre browsing reads several discover pages per media type (20 titles each)
+// so a selection returns a browsable shelf, not one screen.
+private const val DISCOVER_PAGES = 8
 
 data class Genre(val id: Int, val name: String)
 
@@ -64,6 +65,15 @@ data class TmdbGenreList(
     @SerializedName("genres") val genres: List<TmdbGenre>? = null
 )
 
+data class TmdbKeyword(
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("name") val name: String? = null
+)
+
+data class TmdbKeywordList(
+    @SerializedName("results") val results: List<TmdbKeyword>? = null
+)
+
 data class TmdbDiscoverItem(
     @SerializedName("id") val id: Int? = null,
     @SerializedName("title") val title: String? = null,
@@ -100,9 +110,16 @@ interface TmdbApi {
         @Query("language") language: String
     ): TmdbGenreList
 
+    @GET("search/keyword")
+    suspend fun searchKeywords(
+        @Query("query") query: String,
+        @Query("page") page: Int
+    ): TmdbKeywordList
+
     @GET("discover/movie")
     suspend fun discoverMovies(
-        @Query("with_genres") withGenres: String,
+        @Query("with_genres") withGenres: String?,
+        @Query("with_keywords") withKeywords: String?,
         @Query("include_adult") includeAdult: Boolean,
         @Query("sort_by") sortBy: String,
         @Query("primary_release_date.lte") releasedBy: String?,
@@ -114,7 +131,8 @@ interface TmdbApi {
 
     @GET("discover/tv")
     suspend fun discoverTv(
-        @Query("with_genres") withGenres: String,
+        @Query("with_genres") withGenres: String?,
+        @Query("with_keywords") withKeywords: String?,
         @Query("include_adult") includeAdult: Boolean,
         @Query("sort_by") sortBy: String,
         @Query("first_air_date.lte") airedBy: String?,
@@ -180,39 +198,86 @@ class TmdbApiService(private val settingsStore: SettingsStore) {
     }
 
     /**
-     * Discover titles by TMDB genre id. With no type filter both endpoints run
-     * and the popularity-sorted pages are merged.
+     * Discover titles by TMDB genre id, keyword id, or both (TMDB ANDs the two
+     * filters). With no type filter both endpoints run and the merged pages are
+     * re-sorted.
      */
     suspend fun discover(
         type: MediaType?,
         genreIds: Collection<Int>,
+        keywordIds: Collection<Int>,
         adult: Boolean,
-        sort: GenreSort = GenreSort.NEWEST
+        sort: GenreSort = GenreSort.NEWEST,
+        maxPages: Int = DISCOVER_PAGES
     ): List<CatalogItem> {
-        if (genreIds.isEmpty()) return emptyList()
-        val withGenres = genreIds.sorted().joinToString(",")
+        if (genreIds.isEmpty() && keywordIds.isEmpty()) return emptyList()
+        val filters = LinkedHashMap<MediaType, Pair<Set<Int>, Set<Int>>>()
+        typesFor(type).forEach { filters[it] = genreIds.toSet() to keywordIds.toSet() }
+        return discoverFiltered(filters, adult, sort, maxPages)
+    }
+
+    /**
+     * Discover the Playroom's fixed genre chips. Each chip resolves to the
+     * genre ids of the chosen scope, or to a keyword when the scope only
+     * indexes that label by keyword (Biography and Sport everywhere, several
+     * movie genres on TV). Every chip therefore returns a shelf instead of a
+     * filter TMDB silently ignores.
+     */
+    suspend fun discoverBrowse(
+        type: MediaType?,
+        names: Collection<String>,
+        adult: Boolean,
+        sort: GenreSort = GenreSort.NEWEST,
+        maxPages: Int = DISCOVER_PAGES
+    ): List<CatalogItem> {
+        if (names.isEmpty()) return emptyList()
+        val filters = LinkedHashMap<MediaType, Pair<Set<Int>, Set<Int>>>()
+        for (mediaType in typesFor(type)) {
+            val ids = browseGenreIds(names, mediaType)
+            val keywords = LinkedHashSet<Int>()
+            for (name in browseKeywordNames(names, mediaType)) {
+                keywords += keywordId(name)
+                    ?: throw IOException("No TMDB keyword match for \"$name\"")
+            }
+            if (ids.isEmpty() && keywords.isEmpty()) continue
+            filters[mediaType] = ids to keywords
+        }
+        if (filters.isEmpty()) return emptyList()
+        return discoverFiltered(filters, adult, sort, maxPages)
+    }
+
+    private fun typesFor(type: MediaType?): List<MediaType> = when (type) {
+        MediaType.MOVIE -> listOf(MediaType.MOVIE)
+        MediaType.TV -> listOf(MediaType.TV)
+        null -> listOf(MediaType.MOVIE, MediaType.TV)
+    }
+
+    private suspend fun discoverFiltered(
+        filters: Map<MediaType, Pair<Set<Int>, Set<Int>>>,
+        adult: Boolean,
+        sort: GenreSort,
+        maxPages: Int
+    ): List<CatalogItem> {
         val language = settings.tmdbLanguageTag()
         val onlyLanguage = settings.discoverLanguageFilter()
         val originCountry = settings.discoverCountryFilter()
-        val types = when (type) {
-            MediaType.MOVIE -> listOf(MediaType.MOVIE)
-            MediaType.TV -> listOf(MediaType.TV)
-            null -> listOf(MediaType.MOVIE, MediaType.TV)
-        }
         fun call(mediaType: MediaType, page: Int): suspend (TmdbApi) -> TmdbDiscoverPage = { api ->
+            val (genres, keywords) = filters.getValue(mediaType)
+            val withGenres = genres.sorted().joinToString(",").takeIf { it.isNotEmpty() }
+            val withKeywords = keywords.sorted().joinToString(",").takeIf { it.isNotEmpty() }
             when (mediaType) {
                 MediaType.MOVIE -> api.discoverMovies(
-                    withGenres, adult, movieSort(sort), releasedBy(sort),
+                    withGenres, withKeywords, adult, movieSort(sort), releasedBy(sort),
                     language, onlyLanguage, originCountry, page
                 )
                 MediaType.TV -> api.discoverTv(
-                    withGenres, adult, tvSort(sort), releasedBy(sort),
+                    withGenres, withKeywords, adult, tvSort(sort), releasedBy(sort),
                     language, onlyLanguage, originCountry, page
                 )
             }
         }
         val firstPages = coroutineScope {
-            types.map { mediaType ->
+            filters.keys.toList().map { mediaType ->
                 async { mediaType to request(call(mediaType, 1)) }
             }.awaitAll()
         }
@@ -220,7 +285,7 @@ class TmdbApiService(private val settingsStore: SettingsStore) {
         // exist. They are best effort: a failed page keeps the rest of the shelf.
         val extraPages = coroutineScope {
             firstPages.flatMap { (mediaType, first) ->
-                val last = minOf(DISCOVER_PAGES, first.totalPages ?: 1)
+                val last = minOf(maxPages, first.totalPages ?: 1)
                 if (last <= 1) {
                     emptyList()
                 } else {
@@ -249,6 +314,36 @@ class TmdbApiService(private val settingsStore: SettingsStore) {
             GenreSort.POPULAR -> mapped
         }
         return ordered
+    }
+
+    /**
+     * Titles carrying the best keyword match for [query]. TMDB has no
+     * Biography or Sport genre, so the search bar resolves those words here.
+     * Two popular pages per type supplement the text results.
+     */
+    suspend fun keywordTitles(query: String, type: MediaType?, adult: Boolean): List<CatalogItem> {
+        val id = request { api -> api.searchKeywords(query, 1) }
+            .results.orEmpty()
+            .firstOrNull { (it.id ?: 0) > 0 && !it.name.isNullOrBlank() }
+            ?.id
+            ?: return emptyList()
+        return discover(type, emptySet(), setOf(id), adult, GenreSort.POPULAR, maxPages = 2)
+    }
+
+    /** Genre-bar keyword ids; each label is resolved once per session. */
+    private val keywordIdCache = ConcurrentHashMap<String, Int>()
+
+    private suspend fun keywordId(name: String): Int? {
+        keywordIdCache[name]?.let { return it }
+        val matches = request { api -> api.searchKeywords(name, 1) }
+            .results.orEmpty()
+            .filter { (it.id ?: 0) > 0 && !it.name.isNullOrBlank() }
+        val match = matches.firstOrNull { it.name.equals(name, ignoreCase = true) }
+            ?: matches.firstOrNull()
+            ?: return null
+        val id = match.id ?: return null
+        keywordIdCache[name] = id
+        return id
     }
 
     private fun movieSort(sort: GenreSort): String = when (sort) {

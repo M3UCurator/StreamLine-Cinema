@@ -148,6 +148,7 @@ import com.streamline.cinema.data.PlaybackLocks
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.PlayerUaPreset
+import com.streamline.cinema.data.SessionUrlMemory
 import com.streamline.cinema.data.SkipKind
 import com.streamline.cinema.data.SkipSegments
 import com.streamline.cinema.data.SourceResolution
@@ -616,6 +617,11 @@ fun PlayerScreen(
     val qualityLabel = if (liveQualityChoices.isNotEmpty()) qualityCapLabel ?: "AUTO" else currentQuality
     val qualityVisible = qualityChoices.size >= 2 || liveQualityChoices.isNotEmpty()
     var onlineSubtitlesOn by remember(current?.url, item?.key) { mutableStateOf(false) }
+    // ON · auto is a standing request: a live tune (or a zap on the retained
+    // engine) can publish its text groups after the viewer pressed it, and a
+    // one-shot press would otherwise do nothing until they opened the panel
+    // again. Armed requests are bound to the first suitable track.
+    var autoCaptionsArmed by remember(current?.url, item?.key) { mutableStateOf(false) }
     // Which addon track the reload should mark as default; null means the
     // first English entry of the fetched list.
     var preferredAddonSubtitle by remember(current?.url, item?.key) { mutableStateOf<String?>(null) }
@@ -996,9 +1002,14 @@ fun PlayerScreen(
 
     fun attemptFailover(): Boolean {
         val pool = options.indices.filter {
-            it != optionIndex && it !in failedIndices && options[it].url.isNotBlank()
+            it != optionIndex && it !in failedIndices && options[it].url.isNotBlank() &&
+                !SessionUrlMemory.isUnavailable(options[it].url)
         }
-        val next = pool.minOrNull() ?: return false
+        // A parked token is only picked when nothing else is left; the 429
+        // wait ladder then runs against it instead of a source slot.
+        val next = pool.filterNot { SessionUrlMemory.isLimited(options[it].url) }.minOrNull()
+            ?: pool.minOrNull()
+            ?: return false
         // Live failover tunes to the new edge; a stale playhead would rewind
         // into the provider's window (or outside it) instead of continuing.
         val resumeMs = if (!isLive) resumePosition().takeIf { it > 5_000 } else null
@@ -1463,6 +1474,29 @@ fun PlayerScreen(
                     reloadToken++
                     return
                 }
+                // A 429 is the provider refusing new sessions for this exact
+                // token. When the list still has a mirror that is not parked,
+                // switching beats spending the wait on the throttled one; the
+                // URL is remembered so neither a search nor the proxy re-probes
+                // it inside its backoff. With no fresh mirror the ladder below
+                // waits the provider's Retry-After out.
+                if (error.httpStatus() == 429) {
+                    options.getOrNull(optionIndex)?.url
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { SessionUrlMemory.markLimited(it, error.providerRetryAfterMs()) }
+                    val fresh = options.indices.any {
+                        it != optionIndex && it !in failedIndices &&
+                            options[it].url.isNotBlank() &&
+                            !SessionUrlMemory.isUnavailable(options[it].url) &&
+                            !SessionUrlMemory.isLimited(options[it].url)
+                    }
+                    if (fresh && attemptFailover()) {
+                        nativeError = null
+                        reconnectNotice = null
+                        retryPlanMs = null
+                        return
+                    }
+                }
                 // Flussonic-style token protection answers 401/403/429 when the
                 // account's session limit is hit. Reconnecting straight away (or
                 // bypassing the proxy) only adds sessions and refreshes the
@@ -1539,6 +1573,17 @@ fun PlayerScreen(
                     return
                 }
                 val failure = classifyPlaybackError(error)
+                // 404/410 name a dead link rather than a bad route. Remembering
+                // it keeps the URL out of failover picks and out of later
+                // searches for the rest of the session.
+                val status = error.httpStatus()
+                if (status == 404 || status == 410 ||
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
+                ) {
+                    options.getOrNull(optionIndex)?.url
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { SessionUrlMemory.markUnavailable(it) }
+                }
                 // Only a failure that survives the retries and says something
                 // about the channel may mark it dead; a reset, a timeout or a
                 // live-edge slip would otherwise make zapping skip a stream
@@ -1587,8 +1632,24 @@ fun PlayerScreen(
                 // captions off: re-applying it here would re-enable the text
                 // renderer behind an "Off" label.
                 if (!dropSubtitles) {
+                    var textPinned = false
                     textPick?.let { pick ->
                         savedTrackOverride(tracksSnapshot, C.TRACK_TYPE_TEXT, pick)?.let {
+                            explicit.setOverrideForType(it)
+                            hasExplicit = true
+                            textPinned = true
+                        }
+                    }
+                    // Auto captions follow a new item (a live zap or a rebuild):
+                    // with no saved pick to restore, bind this item's preferred
+                    // embedded track instead of leaving the renderer on with no
+                    // track selected.
+                    if (newItem && !textPinned && !onlineSubtitlesOn &&
+                        externalSubtitleUri == null
+                    ) {
+                        preferredTextOverride(
+                            tracksSnapshot, preferredSubtitleLanguage(activeProfile)
+                        )?.let {
                             explicit.setOverrideForType(it)
                             hasExplicit = true
                         }
@@ -2526,11 +2587,13 @@ fun PlayerScreen(
         val builder = target.trackSelectionParameters.buildUpon()
         if (choice == null) {
             textPick = null
+            autoCaptionsArmed = false
             builder.clearOverridesOfType(C.TRACK_TYPE_TEXT)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
             dropSubtitles = true
         } else {
             textPick = SavedTrackPick(choice.label, choice.language)
+            autoCaptionsArmed = false
             builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                 .setOverrideForType(TrackSelectionOverride(choice.group, choice.index))
             dropSubtitles = false
@@ -2540,9 +2603,18 @@ fun PlayerScreen(
         interaction++
     }
 
+    fun preferredTextChoice(embedded: List<TrackChoice>): TrackChoice? {
+        val wanted = preferredSubtitleLanguage(activeProfile)
+        return embedded.firstOrNull {
+            wanted?.let { tag -> it.language.startsWith(tag, ignoreCase = true) } == true
+        } ?: embedded.firstOrNull { it.language.startsWith("en", ignoreCase = true) }
+            ?: embedded.firstOrNull()
+    }
+
     fun loadOnlineSubtitles(pick: AddonSubtitle?) {
         onlineSubtitlesOn = true
         preferredAddonSubtitle = pick?.url
+        autoCaptionsArmed = false
         dropSubtitles = false
         pendingSeekMs = if (isLive) null else resumePosition().takeIf { it > 1_000 }
         reloadToken++
@@ -2553,15 +2625,13 @@ fun PlayerScreen(
     /**
      * The captions switch turns itself on in this order: an embedded (or VTT)
      * track the viewer can actually show, then the English addon list, then the
-     * file they loaded from disk. Only a stream with none of those stays off.
+     * file they loaded from disk. A stream that has not published its tracks
+     * yet arms the switch instead, so the preferred track is selected as soon
+     * as it appears; only a ready stream with no tracks at all stays off.
      */
     fun enableCaptions() {
         val embedded = textChoices
-        val preferred = embedded.firstOrNull {
-            preferredSubtitleLanguage(activeProfile)
-                ?.let { tag -> it.language.startsWith(tag, ignoreCase = true) } == true
-        } ?: embedded.firstOrNull { it.language.startsWith("en", ignoreCase = true) }
-            ?: embedded.firstOrNull()
+        val preferred = preferredTextChoice(embedded)
         if (preferred != null) {
             selectText(preferred)
             return
@@ -2576,6 +2646,35 @@ fun PlayerScreen(
             reloadToken++
             panel = null
             interaction++
+            return
+        }
+        if (tracks?.groups.isNullOrEmpty()) {
+            autoCaptionsArmed = true
+            dropSubtitles = false
+            panel = null
+            interaction++
+        }
+    }
+
+    // Fulfils an armed ON · auto request as soon as the stream exposes a
+    // suitable embedded track (or, on VOD, the addon list finishes loading).
+    LaunchedEffect(
+        playerOrNull, autoCaptionsArmed, tracks, addonSubtitles, dropSubtitles,
+        onlineSubtitlesOn
+    ) {
+        if (!autoCaptionsArmed) return@LaunchedEffect
+        if (dropSubtitles) {
+            autoCaptionsArmed = false
+            return@LaunchedEffect
+        }
+        if (onlineSubtitlesOn || externalSubtitleUri != null) {
+            autoCaptionsArmed = false
+            return@LaunchedEffect
+        }
+        val preferred = preferredTextChoice(textChoices)
+        when {
+            preferred != null -> selectText(preferred)
+            addonSubtitles.isNotEmpty() && !isLive -> loadOnlineSubtitles(pick = null)
         }
     }
 
@@ -3508,7 +3607,11 @@ fun PlayerScreen(
                     }
                     if (textChoices.isEmpty() && externalSubtitleName == null && addonSubtitles.isEmpty()) {
                         Text(
-                            "This stream carries no embedded subtitle tracks. Load a local file to overlay subtitles.",
+                            if (tracks?.groups.isNullOrEmpty()) {
+                                "Reading this stream's subtitle tracks…"
+                            } else {
+                                "This stream carries no embedded subtitle tracks. Load a local file to overlay subtitles."
+                            },
                             color = Cinema.TextMuted,
                             fontSize = 12.sp
                         )
@@ -5342,6 +5445,26 @@ private fun trackOverride(tracks: Tracks, type: Int, languageCode: String): Trac
         }
     }
     return null
+}
+
+/** Preferred subtitle track: the profile's language, then English, then any. */
+private fun preferredTextOverride(tracks: Tracks, languageCode: String?): TrackSelectionOverride? {
+    val groups = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+    fun pick(matches: (String?) -> Boolean): TrackSelectionOverride? {
+        groups.forEach { group ->
+            for (index in 0 until group.length) {
+                if (!group.isTrackSupported(index)) continue
+                if (matches(group.getTrackFormat(index).language)) {
+                    return TrackSelectionOverride(group.mediaTrackGroup, index)
+                }
+            }
+        }
+        return null
+    }
+    return pick { language ->
+        languageCode != null && language?.startsWith(languageCode, ignoreCase = true) == true
+    } ?: pick { language -> language?.startsWith("en", ignoreCase = true) == true }
+        ?: pick { true }
 }
 
 private fun buildEpisodeSlots(item: CatalogItem): List<EpisodeSlot> =

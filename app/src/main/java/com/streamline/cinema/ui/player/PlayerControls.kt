@@ -27,6 +27,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -248,18 +249,29 @@ internal fun PlayerDock(
     val upFocus = if (isLive) playFocus else seekFocus
 
     var hint by remember { mutableStateOf<String?>(null) }
-    fun hintFor(label: String, focused: Boolean) {
+    // The hint is a text snapshot. A dock label that changes while focused
+    // (Subtitles · Off → On) must update it, and a late blur must not clear a
+    // newer control's hint, so dock buttons re-report through a token.
+    var hintToken by remember { mutableStateOf<Any?>(null) }
+    fun hintFor(token: Any, label: String, focused: Boolean) {
         if (focused) {
+            hintToken = token
             hint = label
             onDockFocusChange()
-        } else if (hint == label) {
+        } else if (hintToken === token) {
+            hintToken = null
             hint = null
         }
     }
     // The pill is its own zone above the timeline, so its focus must not read
     // as "inside the dock" or UP/DOWN would fight the caller's zone routing.
     fun pillHint(label: String, focused: Boolean) {
-        if (focused) hint = label else if (hint == label) hint = null
+        if (focused) {
+            hintToken = null
+            hint = label
+        } else if (hint == label) {
+            hint = null
+        }
     }
 
     Column(
@@ -300,6 +312,7 @@ internal fun PlayerDock(
                         onFocusChange = { focused ->
                             onSeekFocusChange(focused)
                             if (focused) {
+                                hintToken = null
                                 hint = "Seek · ←/→ skip 10 s"
                             } else if (hint == "Seek · ←/→ skip 10 s") {
                                 hint = null
@@ -518,10 +531,16 @@ private fun DockButton(
     upTarget: FocusRequester? = null,
     leftTarget: FocusRequester? = null,
     rightTarget: FocusRequester? = null,
-    onFocusHint: (String, Boolean) -> Unit = { _, _ -> },
+    onFocusHint: (Any, String, Boolean) -> Unit = { _, _, _ -> },
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    val hintToken = remember { Any() }
+    // Labels change under the focus (Subtitles · Off → On, Play → Pause), so
+    // the hint is re-reported whenever the text does instead of freezing.
+    LaunchedEffect(focused, label) {
+        if (focused) onFocusHint(hintToken, label, true)
+    }
     val diameter = if (primary) 66.dp else 52.dp
     val tint = if (active) Cinema.Gold else Cinema.TextPrimary
     Box(
@@ -544,7 +563,7 @@ private fun DockButton(
             )
             .onFocusChanged {
                 focused = it.isFocused
-                onFocusHint(label, it.isFocused)
+                onFocusHint(hintToken, label, it.isFocused)
             }
             .clickable(
                 enabled = enabled,

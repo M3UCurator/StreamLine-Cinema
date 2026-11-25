@@ -518,6 +518,24 @@ object NativeStreamProxy {
         // Browser defaults fill the gaps (Accept, Accept-Language). ByteDance-
         // backed CDNs deny anything that does not look like a page request.
         val targetUrl = target.toHttpUrlOrNull() ?: return writeText(output, 400, "Bad target URL")
+        // The engine re-requests the same URL on a retry and after a seek; a
+        // link the provider already refused is answered from session memory
+        // instead of being dialled again. The remaining 429 backoff rides back
+        // as Retry-After so the player waits the same window.
+        if (SessionUrlMemory.blockReason(target) != null) {
+            val gone = SessionUrlMemory.isUnavailable(target)
+            val waitMs = SessionUrlMemory.limitedFor(target)
+            return writeText(
+                output,
+                if (gone) 410 else 429,
+                if (gone) "Stream unavailable this session" else "Provider is limiting this stream",
+                if (gone) {
+                    emptyMap()
+                } else {
+                    mapOf("Retry-After" to "${(waitMs / 1_000L).coerceAtLeast(1L)}")
+                }
+            )
+        }
 
         var headWritten = false
         return try {
@@ -641,6 +659,16 @@ object NativeStreamProxy {
         response.use { response ->
             // Any answer proves the upstream is reachable, even a deny.
             noteUpstreamSuccess(id)
+            // The provider's verdict on this exact URL is remembered: a gone
+            // link is never dialled again this session, and a throttled token
+            // stays parked for its Retry-After window.
+            when (response.code) {
+                404, 410 -> SessionUrlMemory.markUnavailable(targetUrl.toString())
+                429 -> SessionUrlMemory.markLimited(
+                    targetUrl.toString(),
+                    parseRetryAfterMs(response.header("Retry-After"), System.currentTimeMillis())
+                )
+            }
             if (response.code !in 200..299) {
                 // Token/session limits surface here long before Media3 sees
                 // the status, so name the provider's own deny reason.
@@ -751,7 +779,10 @@ object NativeStreamProxy {
             "ETag",
             "Last-Modified",
             "Cache-Control",
-            "Expires"
+            "Expires",
+            // The provider's own 429 hint must reach Media3, whose retry
+            // scheduling reads it instead of guessing a backoff.
+            "Retry-After"
         ).forEach { name ->
             response.header(name)?.let { headers[name] = it }
         }
@@ -905,7 +936,12 @@ object NativeStreamProxy {
         return LocalRequest(parts[0].uppercase(Locale.US), target, headers)
     }
 
-    private fun writeText(output: OutputStream, code: Int, message: String): Boolean {
+    private fun writeText(
+        output: OutputStream,
+        code: Int,
+        message: String,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): Boolean {
         val body = message.toByteArray(Charsets.UTF_8)
         return writeResponse(
             output,
@@ -913,7 +949,7 @@ object NativeStreamProxy {
             mapOf(
                 "Content-Type" to "text/plain; charset=utf-8",
                 "Content-Length" to body.size.toString()
-            ),
+            ) + extraHeaders,
             body
         )
     }
@@ -957,7 +993,9 @@ object NativeStreamProxy {
         403 -> "Forbidden"
         404 -> "Not Found"
         405 -> "Method Not Allowed"
+        410 -> "Gone"
         416 -> "Range Not Satisfiable"
+        429 -> "Too Many Requests"
         502 -> "Bad Gateway"
         else -> "OK"
     }

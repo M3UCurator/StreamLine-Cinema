@@ -656,7 +656,10 @@ class CinemaRepository(
                                         } else {
                                             option
                                         }
-                                    }
+                                    // A link this session already saw answer
+                                    // 404/410 stays out of the picker; the loop
+                                    // moves on to the next id and addon instead.
+                                    }.filterNot { SessionUrlMemory.isUnavailable(it.url) }
                                     if (playable.isNotEmpty()) break
                                 }
                             } catch (c: CancellationException) {

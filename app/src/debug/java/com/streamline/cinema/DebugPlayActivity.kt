@@ -5,6 +5,7 @@ import android.os.Bundle
 import com.streamline.cinema.data.AddonSource
 import com.streamline.cinema.data.CatalogItem
 import com.streamline.cinema.data.DrmConfig
+import com.streamline.cinema.data.LiveChannel
 import org.json.JSONObject
 
 class DebugPlayActivity : Activity() {
@@ -51,7 +52,46 @@ class DebugPlayActivity : Activity() {
         val drm = intent.getStringExtra("drm")?.let { raw ->
             DrmConfig.fromJson(JSONObject(raw))
         }
-        PlayerActivity.launchUrl(this, url, title, drm = drm)
+        // `--ez live true` opens the same URL on the Live path (channel OSD,
+        // retained engine, no addon subtitles) so embedded-track behaviour can
+        // be checked without a playlist source. `--es alt` adds a second
+        // channel with a different subtitle set for zap testing.
+        val live = intent.getBooleanExtra("live", false)
+        val alt = intent.getStringExtra("alt")
+        val channels = if (live) {
+            buildList {
+                add(
+                    LiveChannel(
+                        id = "debug-live",
+                        name = title,
+                        type = "tv",
+                        addonUrl = "debug://live",
+                        streamUrl = url
+                    )
+                )
+                alt?.takeIf { it.isNotBlank() }?.let { alternate ->
+                    add(
+                        LiveChannel(
+                            id = "debug-live-alt",
+                            name = "Subs LIVE B",
+                            type = "tv",
+                            addonUrl = "debug://live",
+                            streamUrl = alternate
+                        )
+                    )
+                }
+            }
+        } else {
+            emptyList()
+        }
+        PlayerActivity.launchUrl(
+            this,
+            url,
+            title,
+            drm = drm,
+            channels = channels,
+            channelIndex = if (live) 0 else -1
+        )
         finish()
     }
 }

@@ -2,15 +2,13 @@ package com.streamline.cinema.ui.player
 
 import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.HttpDataSource
+import com.streamline.cinema.data.parseRetryAfterMs
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 import javax.net.ssl.SSLException
 
 internal enum class FailureKind { NETWORK, PROVIDER, SOURCE, FORMAT, DRM, UNKNOWN }
@@ -251,14 +249,8 @@ internal fun PlaybackException.providerRetryAfterMs(
 internal fun retryAfterMs(headers: Map<String, List<String>>?, nowMs: Long): Long? {
     val raw = headers
         ?.entries?.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }
-        ?.value?.firstOrNull()?.trim()
-        ?.takeIf { it.isNotEmpty() }
-        ?: return null
-    val waitMs = raw.toLongOrNull()?.times(1_000L) ?: runCatching {
-        SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US)
-            .apply { timeZone = TimeZone.getTimeZone("GMT") }
-            .parse(raw)!!.time - nowMs
-    }.getOrNull() ?: return null
+        ?.value?.firstOrNull()
+    val waitMs = parseRetryAfterMs(raw, nowMs) ?: return null
     return waitMs.coerceIn(5_000L, 180_000L)
 }
 

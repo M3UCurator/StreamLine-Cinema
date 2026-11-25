@@ -1234,6 +1234,17 @@ object StremioAddons {
         withContext(Dispatchers.IO) {
             val httpUrl = url.toHttpUrlOrNull()
                 ?: return@withContext StreamProbe(url, "invalid stream URL")
+            // Nothing is re-probed inside its refusal window: a gone link is
+            // reported as gone (so the caller skips to the next mirror) and a
+            // rate-limited one as 429 without touching the provider again.
+            SessionUrlMemory.blockReason(url)?.let { reason ->
+                val gone = SessionUrlMemory.isUnavailable(url)
+                return@withContext StreamProbe(
+                    url,
+                    "link $reason",
+                    if (gone) 410 else 429
+                )
+            }
             // The probe must look like the player: providers that whitelist an
             // app UA answer 403 to a browser UA, which used to read as a dead
             // link and blocked the tune before playback could even try. The
@@ -1252,6 +1263,14 @@ object StremioAddons {
                 probeClient.awaitRedirects(request(httpUrl)).use { resolved ->
                     val response = resolved.response
                     if (response.code !in 200..299) {
+                        if (response.code == 404 || response.code == 410) {
+                            SessionUrlMemory.markUnavailable(url)
+                        } else if (response.code == 429) {
+                            SessionUrlMemory.markLimited(
+                                url,
+                                parseRetryAfterMs(response.header("Retry-After"), System.currentTimeMillis())
+                            )
+                        }
                         return@withContext StreamProbe(
                             url,
                             "server replied HTTP ${response.code}",
@@ -1297,6 +1316,17 @@ object StremioAddons {
                         ?: return@withContext StreamProbe(finalUrl, manifest = body, kind = kind)
                     probeClient.awaitRedirects(request(variantUrl)).use { copy ->
                         if (copy.code !in 200..299) {
+                            if (copy.code == 404 || copy.code == 410) {
+                                SessionUrlMemory.markUnavailable(variantUrl.toString())
+                            } else if (copy.code == 429) {
+                                SessionUrlMemory.markLimited(
+                                    variantUrl.toString(),
+                                    parseRetryAfterMs(
+                                        copy.response.header("Retry-After"),
+                                        System.currentTimeMillis()
+                                    )
+                                )
+                            }
                             StreamProbe(url, "link expired (HTTP ${copy.code})", copy.code, kind = kind)
                         } else {
                             // Some packagers put SAMPLE-AES KEY tags only in the
@@ -1343,6 +1373,7 @@ object StremioAddons {
         withContext(Dispatchers.IO) {
             val httpUrl = url.toHttpUrlOrNull()
                 ?: return@withContext SourceResolution(url)
+            if (SessionUrlMemory.blockReason(url) != null) return@withContext SourceResolution(url)
             val requestHeaders = StreamUrls.mergeHeaders(
                 mapOf("User-Agent" to userAgent.ifBlank { Http.BROWSER_USER_AGENT }),
                 headers
@@ -1354,6 +1385,17 @@ object StremioAddons {
                 .build()
             runCatching {
                 probeClient.awaitRedirects(request).use { resolved ->
+                    if (resolved.code == 404 || resolved.code == 410) {
+                        SessionUrlMemory.markUnavailable(url)
+                    } else if (resolved.code == 429) {
+                        SessionUrlMemory.markLimited(
+                            url,
+                            parseRetryAfterMs(
+                                resolved.response.header("Retry-After"),
+                                System.currentTimeMillis()
+                            )
+                        )
+                    }
                     val contentType = resolved.contentType
                     var kind = StreamUrls.kindOf(resolved.finalUrl, contentType)
                     if (kind == null && resolved.code in 200..299) {
@@ -1378,6 +1420,9 @@ object StremioAddons {
         maxBytes: Int,
         accept: String = "application/json,text/plain,*/*"
     ): String = withContext(Dispatchers.IO) {
+        // A resource this session already saw 404 or 429 is skipped instead of
+        // being dialled again; the search reports it and the next source runs.
+        SessionUrlMemory.blockReason(url)?.let { throw IOException("addon skipped · $it") }
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", Http.BROWSER_USER_AGENT)
@@ -1386,6 +1431,14 @@ object StremioAddons {
         Http.client.await(request).use { response ->
             val body = response.body
             if (response.code !in 200..299) {
+                if (response.code == 404 || response.code == 410) {
+                    SessionUrlMemory.markUnavailable(url)
+                } else if (response.code == 429) {
+                    SessionUrlMemory.markLimited(
+                        url,
+                        parseRetryAfterMs(response.header("Retry-After"), System.currentTimeMillis())
+                    )
+                }
                 // Only read a small slice of the error page for a readable message.
                 val snippet = body?.byteStream()?.readLimited(MAX_ERROR_BODY_BYTES) ?: ""
                 throw IOException("HTTP ${response.code} from addon" + if (snippet.isNotBlank()) ": $snippet" else "")

@@ -1220,6 +1220,7 @@ class CinemaRepository(
     private suspend fun resolveLiveStream(channel: LiveChannel): LiveStreamResult =
         withContext(Dispatchers.IO) {
         val userAgent = settingsStore.settings.value.userAgentString
+        val playbackEngine = settingsStore.settings.value.playbackEngine
         val (liveProvider, liveProviderLogo) = liveAddonIdentity(channel.addonUrl)
         // IPTV playlist entries already point at the stream; no addon lookup.
         channel.streamUrl?.takeIf { it.isNotBlank() }?.let { raw ->
@@ -1251,8 +1252,21 @@ class CinemaRepository(
                     )
                 )
             } else {
-                // udp://, rtp://, rtsp:// have no Media3 data source.
-                LiveStreamResult(externalUrl = parsed.url, externalOnly = true)
+                // udp:// and rtp:// are raw IP transport: libVLC joins the
+                // group itself, so they play in-app unless the engine is
+                // explicitly External. rtsp/rtmp/mms still need a hand-off.
+                if (Multicast.engineFor(parsed.url, playbackEngine) != null) {
+                    Log.i("StreamLine:live", "${channel.name} is UDP · VLC route")
+                    LiveStreamResult(
+                        option = PlaybackOption(
+                            name = channel.name,
+                            url = parsed.url,
+                            headers = parsed.headers
+                        )
+                    )
+                } else {
+                    LiveStreamResult(externalUrl = parsed.url, externalOnly = true)
+                }
             }
         }
         val streams = try {
@@ -1424,11 +1438,15 @@ class CinemaRepository(
         // re-sends every request with the addon's pipe headers.
         val gated = headers.isNotEmpty() || settings.playerUserAgent != PlayerUaPreset.DEFAULT
         val relay = if (gated && streamKind != StreamKind.DASH && streamKind != StreamKind.SMOOTH) {
-            NativeStreamProxy.proxyStream(url, settings.userAgentString, headers)?.url
+            NativeStreamProxy.proxyStream(url, settings.userAgentString, headers)?.url?.also {
+                // The relay is answered by this process; a foreground service
+                // keeps Android from freezing it once the other app is in front.
+                RelayService.start(appContext)
+            }
         } else {
             null
         }
-        return ExternalIntents.launchIn(
+        val launched = ExternalIntents.launchIn(
             context = appContext,
             packageName = null,
             url = relay ?: url,
@@ -1437,6 +1455,8 @@ class CinemaRepository(
             userAgent = settings.userAgentString,
             kind = streamKind
         )
+        if (!launched && relay != null) RelayService.stop(appContext)
+        return launched
     }
 
     fun recordProgress(progress: WatchProgress) = libraryStore.saveProgress(progress)

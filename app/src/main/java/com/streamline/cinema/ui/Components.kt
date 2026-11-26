@@ -1269,6 +1269,7 @@ fun PosterRow(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Chip(
     label: String,
@@ -1276,7 +1277,8 @@ fun Chip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
-    compact: Boolean = false
+    compact: Boolean = false,
+    onLongClick: (() -> Unit)? = null
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
@@ -1299,10 +1301,25 @@ fun Chip(
                 role = Role.RadioButton
                 this.selected = selected
             }
-            .clickable {
-                sounds.select()
-                onClick()
-            }
+            .then(
+                if (onLongClick != null) {
+                    Modifier.combinedClickable(
+                        onClick = {
+                            sounds.select()
+                            onClick()
+                        },
+                        onLongClick = {
+                            sounds.select()
+                            onLongClick()
+                        }
+                    )
+                } else {
+                    Modifier.clickable {
+                        sounds.select()
+                        onClick()
+                    }
+                }
+            )
             .padding(
                 horizontal = if (compact) 12.dp else 18.dp,
                 vertical = if (compact) 6.dp else 9.dp

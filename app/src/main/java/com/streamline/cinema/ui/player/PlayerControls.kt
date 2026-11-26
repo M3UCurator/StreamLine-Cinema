@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -43,7 +42,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
@@ -51,6 +49,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -438,7 +437,7 @@ internal fun PlayerDock(
             Spacer(Modifier.weight(1f))
             Spacer(Modifier.width(10.dp))
             DockButton(
-                glyph = PlayerGlyph.DISPLAY,
+                frameText = aspectLabel,
                 label = "Display · $aspectLabel",
                 active = aspectActive,
                 focusRequester = aspectFocus,
@@ -523,6 +522,7 @@ internal fun PlayerDock(
 private fun DockButton(
     glyph: PlayerGlyph? = null,
     text: String? = null,
+    frameText: String? = null,
     label: String,
     enabled: Boolean = true,
     active: Boolean = false,
@@ -573,7 +573,22 @@ private fun DockButton(
             ),
         contentAlignment = Alignment.Center
     ) {
-        if (text != null) {
+        if (frameText != null) {
+            // Live aspect mode label; the size shrinks with the text length and
+            // compensates the device font scale so every mode (Fit → Original)
+            // stays inside the round button face.
+            val face = diameter * 0.76f
+            val base = (face.value / (frameText.length * 0.52f)).coerceIn(7f, 11f)
+            val labelSize = (base / LocalDensity.current.fontScale).coerceAtLeast(5f).sp
+            Text(
+                text = frameText,
+                color = tint,
+                fontSize = labelSize,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false
+            )
+        } else if (text != null) {
             Text(
                 text = text,
                 color = tint,

@@ -5,7 +5,7 @@ import java.time.format.DateTimeFormatter
 // Release artifacts are named by build day and iteration (Cinema<ddMMyy>v<iteration>.apk)
 // so successive builds never overwrite each other. Bump -PcinemaIteration per release;
 // -PallAbis=true adds the emulator suffix and drops the 32-bit ABI filter for that build.
-val iteration = providers.gradleProperty("cinemaIteration").orElse("12.132").get()
+val iteration = providers.gradleProperty("cinemaIteration").orElse("12.134").get()
 val allAbis = providers.gradleProperty("allAbis").map(String::toBoolean).getOrElse(false)
 val buildDay = LocalDate.now().format(DateTimeFormatter.ofPattern("ddMMyy"))
 val artifactName = "Cinema${buildDay}v$iteration" + if (allAbis) "-allabis" else ""
@@ -119,6 +119,25 @@ val copyReleaseArtifact by tasks.registering {
 
 tasks.matching { it.name == "assembleRelease" }.configureEach {
     finalizedBy(copyReleaseArtifact)
+}
+
+// Live-network checks are named *LiveTest and stay out of the offline unit suite;
+// `integrationTest` runs exactly those against the real services on demand.
+tasks.withType<Test>().configureEach {
+    if (name.startsWith("test") && name.endsWith("UnitTest")) {
+        filter { excludeTestsMatching("*LiveTest") }
+    }
+}
+
+val integrationTest by tasks.registering(Test::class) {
+    description = "Runs *LiveTest checks against external services (excluded from the unit suite)."
+    group = "verification"
+    dependsOn("assembleDebugUnitTest")
+    val unitTest = tasks.named<Test>("testDebugUnitTest").get()
+    testClassesDirs = unitTest.testClassesDirs
+    classpath = unitTest.classpath
+    filter { includeTestsMatching("*LiveTest") }
+    outputs.upToDateWhen { false }
 }
 
 dependencies {

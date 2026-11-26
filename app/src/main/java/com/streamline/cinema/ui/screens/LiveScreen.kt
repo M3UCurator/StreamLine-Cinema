@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -71,6 +72,7 @@ import com.streamline.cinema.data.LiveCatalog
 import com.streamline.cinema.data.LiveChannel
 import com.streamline.cinema.data.LiveSourceKind
 import com.streamline.cinema.data.PlaybackOption
+import com.streamline.cinema.data.liveGroupId
 import com.streamline.cinema.ui.Chip
 import com.streamline.cinema.ui.Cinema
 import com.streamline.cinema.ui.CinemaDimens
@@ -111,7 +113,8 @@ private data class LiveSidebarEntry(
     val label: String = "",
     val selected: Boolean = false,
     val divider: Boolean = false,
-    val onClick: () -> Unit = {}
+    val onClick: () -> Unit = {},
+    val onLongClick: (() -> Unit)? = null
 )
 
 @Composable
@@ -135,10 +138,22 @@ fun LiveScreen(
     var searchTick by remember { mutableIntStateOf(0) }
     val searchFocus = remember { FocusRequester() }
     var arranging by remember { mutableStateOf(false) }
+    var showHidden by remember { mutableStateOf(false) }
+    var channelMenu by remember { mutableStateOf<LiveChannel?>(null) }
+    var groupMenu by remember { mutableStateOf<String?>(null) }
+    var catalogMenu by remember { mutableStateOf<LiveCatalog?>(null) }
+
+    // Hidden lists stay loaded but leave the rail, so favorites, order and the
+    // last selection survive a round trip through the HIDDEN panel.
+    val visibleCatalogs = remember(live.catalogs, livePrefs.hiddenCatalogs) {
+        live.catalogs.filterNot { it.key in livePrefs.hiddenCatalogs }
+    }
+    val hiddenTotal = livePrefs.hiddenCatalogs.size + livePrefs.hiddenChannels.size +
+        livePrefs.hiddenGroups.values.sumOf { it.size }
 
     // Addon manifests and IPTV playlists each become one source in the strip,
     // so a 190-catalog live addon cannot bury the rest of the lists.
-    val sources = remember(live.catalogs) { groupLiveSources(live.catalogs) }
+    val sources = remember(visibleCatalogs) { groupLiveSources(visibleCatalogs) }
     val activeSource = remember(sources, live.selected) {
         sources.firstOrNull { source -> source.catalogs.any { it.key == live.selected?.key } }
             ?: sources.firstOrNull()
@@ -158,7 +173,7 @@ fun LiveScreen(
     // The search runs over the loaded list, so it stays inside the active playlist.
     val channels = remember(
         live.channels, profile.isKids, approvedIds, favoritesOnly, livePrefs.favorites,
-        searching, channelQuery
+        livePrefs.hiddenChannels, searching, channelQuery
     ) {
         visibleLiveChannels(
             channels = live.channels,
@@ -166,6 +181,7 @@ fun LiveScreen(
             searching = searching,
             favoritesOnly = favoritesOnly,
             favorites = livePrefs.favorites,
+            hidden = livePrefs.hiddenChannels.keys,
             isKids = profile.isKids,
             approved = approvedIds
         )
@@ -281,11 +297,16 @@ fun LiveScreen(
     val sidebarEntries = buildList {
         val source = activeSource ?: return@buildList
         if (source.kind == LiveSourceKind.IPTV) {
-            val groups = source.catalogs.firstOrNull()
+            val catalog = source.catalogs.firstOrNull()
+            val hiddenGroups = catalog
+                ?.let { livePrefs.hiddenGroups[liveGroupId(it.key, "group-title")] }
+                .orEmpty()
+            val groups = catalog
                 ?.selectableExtras
                 ?.firstOrNull { it.name == "group-title" }
                 ?.options
                 .orEmpty()
+                .filterNot { it in hiddenGroups }
             add(
                 LiveSidebarEntry(
                     key = "all",
@@ -318,7 +339,8 @@ fun LiveScreen(
                             key = "group:$group",
                             label = group,
                             selected = !favoritesOnly && !searching && iptvGroup == group,
-                            onClick = { selectIptvGroup(group) }
+                            onClick = { selectIptvGroup(group) },
+                            onLongClick = { groupMenu = group }
                         )
                     )
                 }
@@ -356,7 +378,8 @@ fun LiveScreen(
                             if (live.selected?.key != catalog.key) {
                                 vm.selectLiveCatalog(catalog)
                             }
-                        }
+                        },
+                        onLongClick = { catalogMenu = catalog }
                     )
                 )
             }
@@ -486,11 +509,15 @@ fun LiveScreen(
                             modifier = Modifier.weight(1f)
                         ) {
                             items(sources, key = { it.key }) { source ->
+                                val singleCatalog = source.catalogs.singleOrNull()
                                 Chip(
                                     label = source.label,
                                     selected = source.key == activeSource?.key,
                                     onClick = { selectSource(source) },
-                                    compact = true
+                                    compact = true,
+                                    onLongClick = singleCatalog?.let { catalog ->
+                                        { catalogMenu = catalog }
+                                    }
                                 )
                             }
                         }
@@ -522,14 +549,28 @@ fun LiveScreen(
                     .padding(start = 48.dp, end = 48.dp)
             ) {
                 Column(Modifier.width(SIDEBAR_WIDTH).fillMaxHeight()) {
-                    Text(
-                        text = activeSource?.label?.uppercase(Locale.US) ?: "LISTS",
-                        color = Cinema.TextFaint,
-                        style = CinemaType.Overline,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = activeSource?.label?.uppercase(Locale.US) ?: "LISTS",
+                            color = Cinema.TextFaint,
+                            style = CinemaType.Overline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (hiddenTotal > 0) {
+                            TvButton(
+                                "HIDDEN ($hiddenTotal)",
+                                { showHidden = true },
+                                style = TvButtonStyle.GHOST,
+                                compact = true,
+                                glyph = "◌"
+                            )
+                        }
+                    }
                     LazyColumn(
                         state = rememberScreenListState("live.sidebar"),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -549,7 +590,8 @@ fun LiveScreen(
                                 LiveSidebarRow(
                                     label = entry.label,
                                     selected = entry.selected,
-                                    onClick = entry.onClick
+                                    onClick = entry.onClick,
+                                    onLongClick = entry.onLongClick
                                 )
                             }
                         }
@@ -575,6 +617,14 @@ fun LiveScreen(
                             // and focus bringIntoView keeps the action reachable.
                             val emptyModifier = Modifier.verticalScroll(rememberScrollState())
                             when {
+                                visibleCatalogs.isEmpty() && live.catalogs.isNotEmpty() -> EmptyState(
+                                    title = "Every live list is hidden",
+                                    message = "Long-press a list on the SOURCE strip and choose Hide list. " +
+                                        "Everything hidden can be brought back from the HIDDEN panel.",
+                                    modifier = emptyModifier,
+                                    actionLabel = "UNHIDE",
+                                    onAction = { showHidden = true }
+                                )
                                 live.loading && channels.isEmpty() -> LiveSkeletonRows()
                                 channels.isEmpty() && live.message != null -> EmptyState(
                                     title = "Live feed unavailable",
@@ -606,6 +656,15 @@ fun LiveScreen(
                                     modifier = emptyModifier,
                                     actionLabel = "SHOW ALL",
                                     onAction = { favoritesOnly = false }
+                                )
+                                channels.isEmpty() &&
+                                    live.channels.any { it.key in livePrefs.hiddenChannels } -> EmptyState(
+                                    title = "Every channel here is hidden",
+                                    message = "Long-press a channel row and choose Hide channel. " +
+                                        "Hidden channels keep their stars and order.",
+                                    modifier = emptyModifier,
+                                    actionLabel = "UNHIDE",
+                                    onAction = { showHidden = true }
                                 )
                                 channels.isEmpty() -> EmptyState(
                                     title = "No live channels yet",
@@ -641,7 +700,7 @@ fun LiveScreen(
                                                 nowMs = nowMs,
                                                 favorite = channel.key in livePrefs.favorites,
                                                 arranging = arranging,
-                                                onToggleFavorite = { vm.toggleLiveFavorite(channel) },
+                                                onShowActions = { channelMenu = channel },
                                                 onMove = { delta -> vm.moveLiveChannel(channel, delta) },
                                                 onClick = {
                                                     vm.resolveLive(channel) { option ->
@@ -700,13 +759,93 @@ fun LiveScreen(
                 onClose = { showGuideStatus = false }
             )
         }
+
+        if (showHidden) {
+            val hiddenEntries = buildList {
+                livePrefs.hiddenCatalogs.forEach { (key, label) ->
+                    add(
+                        HiddenLiveEntry(
+                            key = "list:$key",
+                            kind = "LIVE LIST",
+                            label = label
+                        ) { vm.unhideLiveCatalog(key) }
+                    )
+                }
+                livePrefs.hiddenGroups.forEach { (id, groups) ->
+                    val catalogKey = id.removeSuffix("|group-title")
+                    val listName = live.catalogs.firstOrNull { it.key == catalogKey }?.name.orEmpty()
+                    groups.forEach { group ->
+                        add(
+                            HiddenLiveEntry(
+                                key = "group:$id|$group",
+                                kind = "GROUP · ${listName.ifBlank { "IPTV" }}",
+                                label = group
+                            ) { vm.unhideLiveGroup(catalogKey, group) }
+                        )
+                    }
+                }
+                livePrefs.hiddenChannels.forEach { (key, label) ->
+                    add(
+                        HiddenLiveEntry(
+                            key = "channel:$key",
+                            kind = "CHANNEL",
+                            label = label
+                        ) { vm.unhideLiveChannel(key) }
+                    )
+                }
+            }
+            HiddenLiveDialog(entries = hiddenEntries, onClose = { showHidden = false })
+        }
+
+        channelMenu?.let { channel ->
+            LiveContextMenu(
+                title = channel.name,
+                subtitle = "Star this channel or take it off the Live rail. " +
+                    "Hidden channels keep their stars and order.",
+                actions = listOf(
+                    if (channel.key in livePrefs.favorites) {
+                        LiveMenuAction("REMOVE STAR", "☆") { vm.toggleLiveFavorite(channel) }
+                    } else {
+                        LiveMenuAction("STAR CHANNEL", "★") { vm.toggleLiveFavorite(channel) }
+                    },
+                    LiveMenuAction("HIDE CHANNEL", "◌") { vm.toggleLiveChannelHidden(channel) },
+                    LiveMenuAction("CLOSE", "✕") {}
+                ),
+                onClose = { channelMenu = null }
+            )
+        }
+
+        groupMenu?.let { group ->
+            LiveContextMenu(
+                title = group,
+                subtitle = "Hides this IPTV group from the rail. The playlist keeps its " +
+                    "other groups and the guide.",
+                actions = listOf(
+                    LiveMenuAction("HIDE GROUP", "◌") { vm.toggleLiveGroupHidden(group) },
+                    LiveMenuAction("CLOSE", "✕") {}
+                ),
+                onClose = { groupMenu = null }
+            )
+        }
+
+        catalogMenu?.let { catalog ->
+            LiveContextMenu(
+                title = catalog.name.ifBlank { catalog.addonName.ifBlank { "Live list" } },
+                subtitle = "Hides this list from the rail. Channels, stars and order are kept.",
+                actions = listOf(
+                    LiveMenuAction("HIDE LIST", "◌") { vm.toggleLiveCatalogHidden(catalog) },
+                    LiveMenuAction("CLOSE", "✕") {}
+                ),
+                onClose = { catalogMenu = null }
+            )
+        }
     }
 }
 
 /**
- * The rows the table shows: Kids approval, then Favorites, then the name search.
- * The search only ever sees the loaded catalog, which is what keeps it scoped
- * to the active playlist.
+ * The rows the table shows: hidden channels drop out, then Kids approval,
+ * Favorites and the name search. The search only ever sees the loaded catalog,
+ * which is what keeps it scoped to the active playlist.
  */
 internal fun visibleLiveChannels(
     channels: List<LiveChannel>,
@@ -715,10 +854,12 @@ internal fun visibleLiveChannels(
     favoritesOnly: Boolean,
     favorites: Set<String>,
     isKids: Boolean,
-    approved: Set<String>
+    approved: Set<String>,
+    hidden: Set<String> = emptySet()
 ): List<LiveChannel> {
     val needle = query.trim()
     return channels
+        .filter { it.key !in hidden }
         .filter { !isKids || it.key in approved }
         .filter { !favoritesOnly || it.key in favorites }
         .filter { !searching || needle.isEmpty() || it.name.contains(needle, ignoreCase = true) }
@@ -750,11 +891,191 @@ private fun groupLiveSources(catalogs: List<LiveCatalog>): List<LiveSource> {
     return sources
 }
 
+private class LiveMenuAction(
+    val label: String,
+    val glyph: String,
+    val onRun: () -> Unit
+)
+
+private data class HiddenLiveEntry(
+    val key: String,
+    val kind: String,
+    val label: String,
+    val onUnhide: () -> Unit
+)
+
+/** The long-press sheet shared by channel rows, IPTV groups and live lists. */
+@Composable
+private fun LiveContextMenu(
+    title: String,
+    subtitle: String,
+    actions: List<LiveMenuAction>,
+    onClose: () -> Unit
+) {
+    BackHandler(onBack = onClose)
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(140)
+        runCatching { firstFocus.requestFocus() }
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .widthIn(max = 460.dp)
+                .fillMaxWidth(0.86f)
+                .glassSurface(
+                    shape = RoundedCornerShape(CinemaDimens.CardRadius),
+                    base = Glass.Sheet
+                )
+                .padding(24.dp)
+        ) {
+            Text(
+                title,
+                color = Cinema.TextPrimary,
+                style = CinemaType.SectionTitle,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                subtitle,
+                color = Cinema.TextMuted,
+                style = CinemaType.BodySmall
+            )
+            Spacer(Modifier.height(16.dp))
+            actions.forEachIndexed { index, action ->
+                TvButton(
+                    action.label,
+                    {
+                        action.onRun()
+                        onClose()
+                    },
+                    style = if (index == actions.lastIndex) {
+                        TvButtonStyle.GHOST
+                    } else {
+                        TvButtonStyle.SECONDARY
+                    },
+                    glyph = action.glyph,
+                    focusRequester = if (index == 0) firstFocus else null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (index != actions.lastIndex) Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+/** One panel that brings hidden lists, groups and channels back onto the rail. */
+@Composable
+private fun HiddenLiveDialog(
+    entries: List<HiddenLiveEntry>,
+    onClose: () -> Unit
+) {
+    BackHandler(onBack = onClose)
+    val closeFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        delay(160)
+        runCatching { closeFocus.requestFocus() }
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .widthIn(max = 720.dp)
+                .fillMaxWidth(0.92f)
+                .glassSurface(
+                    shape = RoundedCornerShape(CinemaDimens.CardRadius),
+                    base = Glass.Sheet
+                )
+                .padding(24.dp)
+        ) {
+            Text(
+                "Hidden",
+                color = Cinema.TextPrimary,
+                style = CinemaType.SectionTitle
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Hold OK on a list, group or channel row and choose Hide. " +
+                    "Unhiding puts it back with its stars and order intact.",
+                color = Cinema.TextMuted,
+                style = CinemaType.BodySmall
+            )
+            Spacer(Modifier.height(14.dp))
+            if (entries.isEmpty()) {
+                Text(
+                    "Nothing is hidden.",
+                    color = Cinema.TextSecondary,
+                    fontSize = 12.sp
+                )
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.heightIn(max = 430.dp)
+                ) {
+                    items(entries, key = { it.key }) { entry ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text(
+                                    entry.kind,
+                                    color = Cinema.TextFaint,
+                                    style = CinemaType.Overline,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    entry.label,
+                                    color = Cinema.TextPrimary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            TvButton(
+                                "UNHIDE",
+                                {
+                                    entry.onUnhide()
+                                    onClose()
+                                },
+                                style = TvButtonStyle.SECONDARY,
+                                compact = true,
+                                glyph = "↺"
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Row {
+                TvButton(
+                    "CLOSE",
+                    onClose,
+                    style = TvButtonStyle.SECONDARY,
+                    compact = true,
+                    glyph = "✕",
+                    focusRequester = closeFocus
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LiveSidebarRow(
     label: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     var focused by remember { mutableStateOf(false) }
     val sounds = LocalUiSounds.current
@@ -779,10 +1100,18 @@ private fun LiveSidebarRow(
                 this.selected = selected
                 contentDescription = label
             }
-            .clickable {
-                sounds.select()
-                onClick()
-            },
+            .combinedClickable(
+                onClick = {
+                    sounds.select()
+                    onClick()
+                },
+                onLongClick = onLongClick?.let {
+                    {
+                        sounds.select()
+                        it()
+                    }
+                }
+            ),
         contentAlignment = Alignment.CenterStart
     ) {
         Row(
@@ -881,7 +1210,7 @@ private fun LiveChannelRow(
     nowMs: Long,
     favorite: Boolean,
     arranging: Boolean,
-    onToggleFavorite: () -> Unit,
+    onShowActions: () -> Unit,
     onMove: (Int) -> Unit,
     onClick: () -> Unit
 ) {
@@ -930,6 +1259,7 @@ private fun LiveChannelRow(
                     if (favorite) append(", saved")
                     if (dead) append(", marked dead")
                     now?.let { append(", now ${it.title}") }
+                    append(", hold OK for actions")
                 }
             }
             .combinedClickable(
@@ -939,7 +1269,7 @@ private fun LiveChannelRow(
                 },
                 onLongClick = {
                     sounds.select()
-                    onToggleFavorite()
+                    onShowActions()
                 }
             )
             .glassSurface(

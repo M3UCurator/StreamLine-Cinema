@@ -37,10 +37,12 @@ internal fun chooseDisplayMode(
 }
 
 /**
- * App-level auto frame rate matching. Media3 only hints the surface; boxes
- * with the system "match content" switch off keep their panel refresh, which
- * turns 23.976 material into 3:2 pull-down judder. The preferred display mode
- * is set on the player window and restored when the player screen is disposed.
+ * Legacy app-level frame rate matching for platforms without the HDMI 2.1a
+ * seamless path (Android 11 and older). Pinning the display mode forces a
+ * full HDMI mode change, which blanks the screen; on Android 12+ the player
+ * instead asks the surface for [SeamlessFrameRate] so the switch goes through
+ * QMS or is declined. The preferred mode is set on the player window and
+ * restored when the player screen is disposed.
  */
 internal object FrameRateMatching {
     private const val TAG = "StreamLine:afr"

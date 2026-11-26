@@ -28,7 +28,8 @@ class PlaybackProfileTest {
         lowRam: Boolean = false,
         headers: Map<String, String> = this.headers,
         maxMemoryBytes: Long = ROOMY_HEAP_BYTES,
-        forceBuiltIn: Boolean = false
+        forceBuiltIn: Boolean = false,
+        forceEngine: PlaybackEngine? = null
     ) = playbackProfile(
         settings = settings.copy(playbackEngine = engine),
         decoder = decoder,
@@ -36,7 +37,8 @@ class PlaybackProfileTest {
         lowRam = lowRam,
         headers = headers,
         maxMemoryBytes = maxMemoryBytes,
-        forceBuiltIn = forceBuiltIn
+        forceBuiltIn = forceBuiltIn,
+        forceEngine = forceEngine
     )
 
     private companion object {
@@ -175,6 +177,24 @@ class PlaybackProfileTest {
         // fallback cannot rebuild a second time for the same settings.
         val builtIn = profile(engine = PlaybackEngine.BUILT_IN, forceBuiltIn = true)
         assertEquals(builtIn.rebuildKey, fallenBack.rebuildKey)
+    }
+
+    @Test
+    fun sourceEngineOverrideNamesTheEngineThatRuns() {
+        // A udp channel resolves to VLC while the saved engine stays AUTO.
+        val forced = profile(engine = PlaybackEngine.AUTO, forceEngine = PlaybackEngine.VLC)
+        assertEquals(PlaybackEngine.VLC, forced.engine)
+        // The rebuild key follows the engine that will actually run, so a zap
+        // between an HTTP channel and a UDP one rebuilds exactly once.
+        assertEquals(profile(engine = PlaybackEngine.VLC).rebuildKey, forced.rebuildKey)
+
+        // The native fallback still wins: a dead VLC must not be forced back.
+        val fallenBack = profile(
+            engine = PlaybackEngine.AUTO,
+            forceBuiltIn = true,
+            forceEngine = PlaybackEngine.VLC
+        )
+        assertEquals(PlaybackEngine.BUILT_IN, fallenBack.engine)
     }
 
     @Test

@@ -244,6 +244,16 @@ class StreamSourceTest {
         assertNull(StreamUrls.originOf(null))
     }
 
+    @Test
+    fun kindDiscoveryIsLimitedToHttpSources() {
+        // A UDP/RTP feed is typed by the player, and an HTTP probe would reject
+        // the scheme instead of returning a container.
+        assertFalse(StreamUrls.needsKindDiscovery("udp://@239.255.15.36:1234"))
+        assertFalse(StreamUrls.needsKindDiscovery("rtp://239.0.0.1:5000"))
+        // The same rule keeps an extensionless HTTP token endpoint discoverable.
+        assertTrue(StreamUrls.needsKindDiscovery("https://cdn.example/play/abc123"))
+    }
+
     private fun valueOf(pairs: Array<String>, name: String): String? =
         pairs.toList().chunked(2).firstOrNull { it[0].equals(name, true) }?.get(1)
 

@@ -25,7 +25,8 @@ class LiveChannelFilterTest {
         favoritesOnly: Boolean = false,
         favorites: Set<String> = emptySet(),
         isKids: Boolean = false,
-        approved: Set<String> = emptySet()
+        approved: Set<String> = emptySet(),
+        hidden: Set<String> = emptySet()
     ) = visibleLiveChannels(
         channels = channels,
         query = query,
@@ -33,7 +34,8 @@ class LiveChannelFilterTest {
         favoritesOnly = favoritesOnly,
         favorites = favorites,
         isKids = isKids,
-        approved = approved
+        approved = approved,
+        hidden = hidden
     ).map { it.name }
 
     @Test
@@ -88,5 +90,28 @@ class LiveChannelFilterTest {
     @Test
     fun `no match yields an empty list`() {
         assertEquals(emptyList<String>(), visible(query = "zzz", searching = true))
+    }
+
+    @Test
+    fun `hidden channels drop out of the plain list`() {
+        assertEquals(
+            listOf("BBC One HD", "Discovery Channel", "Sports News 24"),
+            visible(hidden = setOf(channels[1].key))
+        )
+    }
+
+    @Test
+    fun `hidden channels stay out of search and favorites`() {
+        val favourites = setOf(channels[1].key, channels[3].key)
+        val hidden = setOf(channels[3].key)
+        assertEquals(
+            listOf("Sky Sports F1"),
+            visible(searching = true, query = "s", favoritesOnly = true, favorites = favourites, hidden = hidden)
+        )
+    }
+
+    @Test
+    fun `hiding every channel yields an empty list`() {
+        assertEquals(emptyList<String>(), visible(hidden = channels.map { it.key }.toSet()))
     }
 }

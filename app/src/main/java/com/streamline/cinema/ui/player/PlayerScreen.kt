@@ -106,6 +106,7 @@ import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
@@ -142,12 +143,14 @@ import com.streamline.cinema.data.ExternalIntents
 import com.streamline.cinema.data.ExternalPlayerInfo
 import com.streamline.cinema.data.Http
 import com.streamline.cinema.data.LiveChannel
+import com.streamline.cinema.data.Multicast
 import com.streamline.cinema.data.NativeStreamProxy
 import com.streamline.cinema.data.PlaybackEngine
 import com.streamline.cinema.data.PlaybackLocks
 import com.streamline.cinema.data.PlaybackOption
 import com.streamline.cinema.data.PlaybackPlan
 import com.streamline.cinema.data.PlayerUaPreset
+import com.streamline.cinema.data.RelayService
 import com.streamline.cinema.data.SessionUrlMemory
 import com.streamline.cinema.data.SkipKind
 import com.streamline.cinema.data.SkipSegments
@@ -804,6 +807,13 @@ fun PlayerScreen(
     // Only HLS has a proxy alternative; a progressive MP4/Matroska link always
     // plays from the origin, so the route control is hidden for it.
     val proxyCapable = isHlsUrl(playbackUrl, playbackKind ?: discoveredSource?.kind)
+    // Raw IP transport (udp/rtp) has no Media3 data source: libVLC joins the
+    // group, so the profile engine is forced while the configured engine is
+    // not External. The group flag drives the Wi-Fi multicast lock below.
+    val forcedEngine = remember(playbackUrl, settings.playbackEngine) {
+        Multicast.engineFor(playbackUrl, settings.playbackEngine)
+    }
+    val multicastGroup = remember(playbackUrl) { Multicast.isGroup(playbackUrl) }
     // The verdict is per origin, not per link: every channel on a gated host
     // benefits from the one denial that taught it.
     val transportOrigin = remember(playbackUrl, discoveredSource) {
@@ -842,7 +852,8 @@ fun PlayerScreen(
         lowRamDevice,
         settledBuffer,
         playbackHeaders,
-        nativeFallback
+        nativeFallback,
+        forcedEngine
     ) {
         playbackProfile(
             settings = settings,
@@ -854,6 +865,7 @@ fun PlayerScreen(
             highCapacityVod = settledBuffer.highCapacity,
             headers = playbackHeaders,
             forceBuiltIn = nativeFallback,
+            forceEngine = forcedEngine,
             live = isLive
         )
     }
@@ -904,6 +916,18 @@ fun PlayerScreen(
             leaving?.release()
         }
     }
+    // A multicast group only reaches the app over Wi-Fi while the platform
+    // multicast lock is held. The lock follows the group across zaps and is
+    // released when a non-group source takes over or the player leaves.
+    DisposableEffect(multicastGroup) {
+        if (!multicastGroup) {
+            onDispose {}
+        } else {
+            val lock = MulticastLock(context)
+            lock.acquire()
+            onDispose { lock.release() }
+        }
+    }
     // A requested native engine can come back as the built-in player: its
     // library is missing, the API floor is not met, or construction threw.
     // Record the fallback so later rebuilds do not retry a dead engine on every
@@ -931,6 +955,18 @@ fun PlayerScreen(
     // launcher back its original rate instead of leaving it at 24 Hz.
     DisposableEffect(Unit) {
         onDispose { FrameRateMatching.restore(activity) }
+    }
+
+    // Android 12+ can retime the HDMI link without blanking (HDMI 2.1a QMS),
+    // but only when the request goes through the strategy-aware frame-rate
+    // call on the surface that carries the video. Media3's own hint uses the
+    // strategy-less overload, so with AFR on this app owns the request and
+    // Media3's hint is switched off below.
+    val seamlessRate = remember { SeamlessFrameRateController() }
+    LaunchedEffect(playerOrNull, settings.frameRateMatching) {
+        val exo = playerOrNull as? ExoPlayer ?: return@LaunchedEffect
+        exo.ownFrameRateRequests(settings.frameRateMatching && SeamlessFrameRate.supported)
+        if (!settings.frameRateMatching) seamlessRate.request(0f)
     }
 
     // Media3 keeps the counters (dropped frames, bandwidth, underruns) that the
@@ -1376,7 +1412,17 @@ fun PlayerScreen(
             val rate = (target as? ExoPlayer)?.videoFormat?.frameRate
                 ?: snapshot?.let { firstFormat(it, C.TRACK_TYPE_VIDEO) }?.frameRate
                 ?: 0f
-            FrameRateMatching.apply(activity, rate)
+            // A track swap passes through states with no known rate; they must
+            // not release the current request and bounce the display.
+            if (rate <= 0f) return
+            if (SeamlessFrameRate.supported) {
+                // The seamless request never blanks the panel: the platform
+                // takes the rate through QMS when the TV/link can do it and
+                // otherwise leaves the display alone.
+                seamlessRate.request(seamlessRequestRate(rate, target.playbackParameters.speed))
+            } else {
+                FrameRateMatching.apply(activity, rate)
+            }
         }
         // A retained live engine carries the previous channel's overrides, so
         // the preferred language and the saved picks are scoped to the item,
@@ -1687,6 +1733,12 @@ fun PlayerScreen(
                 // which is often after the ES-selected Tracks update.
                 syncFrameRate()
             }
+
+            override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+                // The seamless request carries the rendered rate, which moves
+                // with the playback speed.
+                syncFrameRate()
+            }
         }
         target.addListener(listener)
         onDispose { target.removeListener(listener) }
@@ -1728,6 +1780,9 @@ fun PlayerScreen(
                     }
                 }
                 Lifecycle.Event.ON_START -> {
+                    // The external player is gone (or never arrived): the relay
+                    // that kept this process alive for it has done its job.
+                    RelayService.stop(context)
                     if (resumeOnStart) {
                         if (target.playbackState == Player.STATE_IDLE) {
                             runCatching { target.prepare() }
@@ -1967,7 +2022,10 @@ fun PlayerScreen(
     // A native engine can decode audio while never creating a video output,
     // which leaves sound over a black screen. Rebuild the same source on the
     // built-in player, which owns its decoder surface, and keep the playhead.
+    // Raw udp/rtp has no Media3 data source, so that fallback would only trade
+    // a silent video for a guaranteed open failure; leave it on the engine.
     LaunchedEffect(playerOrNull, playbackUrl) {
+        if (Multicast.isTransport(playbackUrl)) return@LaunchedEffect
         val target = playerOrNull as? NativeEnginePlayer ?: return@LaunchedEffect
         while (isActive) {
             delay(1_000)
@@ -2736,7 +2794,11 @@ fun PlayerScreen(
                 url = sourceUrl,
                 userAgent = settings.userAgentString,
                 headers = target.headers
-            )?.url
+            )?.url?.also {
+                // The relay answers from this process, which Android would
+                // otherwise freeze once the external player covers the screen.
+                RelayService.start(context)
+            }
         } else {
             null
         }
@@ -2752,12 +2814,17 @@ fun PlayerScreen(
             openWithError =
                 "Nothing on this device accepted the stream. Install a video player or copy the URL."
             externalMessage = "External hand-off unavailable · using built-in player"
+            if (relayUrl != null) RelayService.stop(context)
             return false
         }
         openWithOpen = false
         openWithError = null
         handoffLabel = label
         handoffAtMs = SystemClock.elapsedRealtime()
+        // The automatic VOD hand-off never opens the picker, so the return path
+        // has no other chance to learn that the local player was running. The
+        // dialog already recorded this when it paused; keep that answer too.
+        if (playerOrNull?.playWhenReady == true) resumeAfterOpenWith = true
         playerOrNull?.pause()
         externalMessage = if (relayUrl != null) {
             "Handing off to $label · relayed with the stream headers…"
@@ -2781,12 +2848,13 @@ fun PlayerScreen(
         ) {
             return@LaunchedEffect
         }
-        vodHandoffDone = true
         // The picker normally fills this; the auto path needs the label too.
         if (openWithPlayers.none { it.packageName == packageName }) {
             openWithPlayers = repository?.installedExternalPlayers().orEmpty()
         }
-        handOffTo(target, packageName)
+        // Marked only once the launch landed: a refused hand-off keeps this URL
+        // retryable instead of parking the title for the whole session.
+        vodHandoffDone = handOffTo(target, packageName)
     }
 
     fun enterPip() {
@@ -3054,7 +3122,11 @@ fun PlayerScreen(
                         // would only cover them with a shutter.
                         key(nativeEngine) {
                             AndroidView(
-                                factory = { nativeEngine.renderView },
+                                factory = {
+                                    seamlessRate.attach(nativeEngine.videoView)
+                                    nativeEngine.renderView
+                                },
+                                onRelease = { seamlessRate.detach(nativeEngine.videoView) },
                                 modifier = Modifier
                                     .size(frame.width, frame.height)
                             )
@@ -3083,9 +3155,14 @@ fun PlayerScreen(
                                     setStyle(captionStyle)
                                     setFractionalTextSize(0.0533f * subtitleScale)
                                 }
+                                // PlayerView creates its SurfaceView in the
+                                // constructor, so the QMS request lands on the
+                                // surface the first frame will use.
+                                seamlessRate.attach(view.videoSurfaceView)
                             },
                             onRelease = { view ->
                                 view.player = null
+                                seamlessRate.detach(view.videoSurfaceView)
                             },
                             modifier = Modifier.size(frame.width, frame.height)
                         )

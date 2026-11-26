@@ -25,7 +25,7 @@ import kotlin.math.sin
 
 internal enum class PlayerGlyph {
     BACK, PLAY, PAUSE, PREVIOUS, NEXT, REWIND, FORWARD,
-    DISPLAY, SUBTITLES, DECODER, MORE,
+    SUBTITLES, DECODER, MORE,
     INFO, EXTERNAL, AUDIO, BOOST, STEREO, SOURCES, PIP, LOCK, RELOAD
 }
 
@@ -102,14 +102,6 @@ private fun DrawScope.drawGlyph(glyph: PlayerGlyph, tint: Color) {
         }
         PlayerGlyph.REWIND -> drawSkipArc(true, tint)
         PlayerGlyph.FORWARD -> drawSkipArc(false, tint)
-        PlayerGlyph.DISPLAY -> {
-            drawRoundRect(tint, at(0.1f, 0.22f), Size(w * 0.8f, h * 0.56f), CornerRadius(sw), style = stroke)
-            drawLine(tint, at(0.3f, 0.5f), at(0.7f, 0.5f), sw, StrokeCap.Round)
-            drawLine(tint, at(0.3f, 0.5f), at(0.42f, 0.38f), sw, StrokeCap.Round)
-            drawLine(tint, at(0.3f, 0.5f), at(0.42f, 0.62f), sw, StrokeCap.Round)
-            drawLine(tint, at(0.7f, 0.5f), at(0.58f, 0.38f), sw, StrokeCap.Round)
-            drawLine(tint, at(0.7f, 0.5f), at(0.58f, 0.62f), sw, StrokeCap.Round)
-        }
         PlayerGlyph.SUBTITLES -> {
             drawRoundRect(tint, at(0.1f, 0.24f), Size(w * 0.8f, h * 0.52f), CornerRadius(sw), style = stroke)
             drawLine(tint, at(0.26f, 0.58f), at(0.44f, 0.58f), sw * 0.85f, StrokeCap.Round)

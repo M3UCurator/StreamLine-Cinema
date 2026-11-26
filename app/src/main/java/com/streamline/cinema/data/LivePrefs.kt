@@ -9,10 +9,11 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Live-only preferences: starred channels and the order of catalogs, groups
- * and channels. These belong to the viewer, not to the playlist, so a roadmap
- * refresh never resets them. JSON keyed by stable channel/catalog keys keeps
- * reordering cheap and tolerant of channels disappearing from a provider.
+ * Live-only preferences: starred channels, the order of catalogs, groups and
+ * channels, and which of those are hidden. These belong to the viewer, not to
+ * the playlist, so a roadmap refresh never resets them. JSON keyed by stable
+ * channel/catalog keys keeps reordering cheap and tolerant of channels
+ * disappearing from a provider.
  */
 class LivePrefsStore(context: Context) {
 
@@ -21,7 +22,13 @@ class LivePrefsStore(context: Context) {
         val catalogOrder: List<String> = emptyList(),
         val channelOrder: Map<String, List<String>> = emptyMap(),
         /** `"$catalogKey|$extraName"` → ordered group labels. */
-        val groupOrder: Map<String, List<String>> = emptyMap()
+        val groupOrder: Map<String, List<String>> = emptyMap(),
+        /** Catalog key → the label to show while it is hidden. */
+        val hiddenCatalogs: Map<String, String> = emptyMap(),
+        /** Channel key → the label to show while it is hidden. */
+        val hiddenChannels: Map<String, String> = emptyMap(),
+        /** `"$catalogKey|$extraName"` → hidden group labels. */
+        val hiddenGroups: Map<String, List<String>> = emptyMap()
     )
 
     private val file = File(context.applicationContext.filesDir, "live_prefs.json")
@@ -94,7 +101,99 @@ class LivePrefsStore(context: Context) {
         return extra.copy(options = applyOrder(extra.options, order) { it })
     }
 
-    private fun groupId(catalogKey: String, extraName: String) = "$catalogKey|$extraName"
+    fun isCatalogHidden(catalogKey: String): Boolean = catalogKey in _prefs.value.hiddenCatalogs
+
+    fun isChannelHidden(channelKey: String): Boolean = channelKey in _prefs.value.hiddenChannels
+
+    fun isGroupHidden(catalogKey: String, extraName: String, group: String): Boolean =
+        group in _prefs.value.hiddenGroups[groupId(catalogKey, extraName)].orEmpty()
+
+    /** Returns true when the list is now hidden, false when it came back. */
+    fun toggleCatalogHidden(catalogKey: String, label: String): Boolean {
+        if (catalogKey.isBlank()) return false
+        return synchronized(lock) {
+            val current = _prefs.value
+            val wasHidden = catalogKey in current.hiddenCatalogs
+            val next = if (wasHidden) {
+                current.hiddenCatalogs - catalogKey
+            } else {
+                current.hiddenCatalogs + (catalogKey to label.ifBlank { "Live list" })
+            }
+            _prefs.value = current.copy(hiddenCatalogs = next)
+            persist()
+            !wasHidden
+        }
+    }
+
+    /** Returns true when the channel is now hidden, false when it came back. */
+    fun toggleChannelHidden(channelKey: String, label: String): Boolean {
+        if (channelKey.isBlank()) return false
+        return synchronized(lock) {
+            val current = _prefs.value
+            val wasHidden = channelKey in current.hiddenChannels
+            val next = if (wasHidden) {
+                current.hiddenChannels - channelKey
+            } else {
+                current.hiddenChannels + (channelKey to label.ifBlank { "Channel" })
+            }
+            _prefs.value = current.copy(hiddenChannels = next)
+            persist()
+            !wasHidden
+        }
+    }
+
+    /** Returns true when the group is now hidden, false when it came back. */
+    fun toggleGroupHidden(catalogKey: String, extraName: String, group: String): Boolean {
+        if (catalogKey.isBlank() || group.isBlank()) return false
+        return synchronized(lock) {
+            val id = groupId(catalogKey, extraName)
+            val current = _prefs.value.hiddenGroups
+            val labels = current[id].orEmpty()
+            val next = if (group in labels) labels - group else labels + group
+            val groups = current.toMutableMap().apply {
+                if (next.isEmpty()) remove(id) else put(id, next)
+            }
+            _prefs.value = _prefs.value.copy(hiddenGroups = groups)
+            persist()
+            group in next
+        }
+    }
+
+    fun unhideCatalog(catalogKey: String) {
+        synchronized(lock) {
+            if (catalogKey !in _prefs.value.hiddenCatalogs) return
+            _prefs.value = _prefs.value.copy(
+                hiddenCatalogs = _prefs.value.hiddenCatalogs - catalogKey
+            )
+            persist()
+        }
+    }
+
+    fun unhideChannel(channelKey: String) {
+        synchronized(lock) {
+            if (channelKey !in _prefs.value.hiddenChannels) return
+            _prefs.value = _prefs.value.copy(
+                hiddenChannels = _prefs.value.hiddenChannels - channelKey
+            )
+            persist()
+        }
+    }
+
+    fun unhideGroup(catalogKey: String, extraName: String, group: String) {
+        synchronized(lock) {
+            val id = groupId(catalogKey, extraName)
+            val labels = _prefs.value.hiddenGroups[id].orEmpty()
+            if (group !in labels) return
+            val next = labels - group
+            val groups = _prefs.value.hiddenGroups.toMutableMap().apply {
+                if (next.isEmpty()) remove(id) else put(id, next)
+            }
+            _prefs.value = _prefs.value.copy(hiddenGroups = groups)
+            persist()
+        }
+    }
+
+    private fun groupId(catalogKey: String, extraName: String) = liveGroupId(catalogKey, extraName)
 
     private fun <T> applyOrder(items: List<T>, order: List<String>, key: (T) -> String): List<T> {
         if (order.isEmpty() || items.isEmpty()) return items
@@ -117,6 +216,15 @@ class LivePrefsStore(context: Context) {
                 put("groupOrder", JSONObject().apply {
                     prefs.groupOrder.forEach { (id, groups) -> put(id, JSONArray(groups)) }
                 })
+                put("hiddenCatalogs", JSONObject().apply {
+                    prefs.hiddenCatalogs.forEach { (key, label) -> put(key, label) }
+                })
+                put("hiddenChannels", JSONObject().apply {
+                    prefs.hiddenChannels.forEach { (key, label) -> put(key, label) }
+                })
+                put("hiddenGroups", JSONObject().apply {
+                    prefs.hiddenGroups.forEach { (id, groups) -> put(id, JSONArray(groups)) }
+                })
             }
             AtomicStore.write(file, root.toString(), "live preferences")
         }
@@ -138,12 +246,24 @@ class LivePrefsStore(context: Context) {
                     stringList(objectValue.optJSONArray(key))
                 }.filterValues { it.isNotEmpty() }
             }
+            fun labelMap(value: Any?): Map<String, String> {
+                val objectValue = value as? JSONObject ?: return emptyMap()
+                return objectValue.keys().asSequence().mapNotNull { key ->
+                    objectValue.optString(key).takeIf { it.isNotBlank() }?.let { key to it }
+                }.toMap()
+            }
             _prefs.value = Prefs(
                 favorites = stringList(root.optJSONArray("favorites")).toSet(),
                 catalogOrder = stringList(root.optJSONArray("catalogOrder")),
                 channelOrder = orderMap(root.optJSONObject("channelOrder")),
-                groupOrder = orderMap(root.optJSONObject("groupOrder"))
+                groupOrder = orderMap(root.optJSONObject("groupOrder")),
+                hiddenCatalogs = labelMap(root.optJSONObject("hiddenCatalogs")),
+                hiddenChannels = labelMap(root.optJSONObject("hiddenChannels")),
+                hiddenGroups = orderMap(root.optJSONObject("hiddenGroups"))
             )
         }
     }
 }
+
+/** Stable id for one extra group of one catalog, shared by ordering and hiding. */
+internal fun liveGroupId(catalogKey: String, extraName: String) = "$catalogKey|$extraName"

@@ -454,7 +454,10 @@ data class LiveStreamResult(
     val option: PlaybackOption? = null,
     val externalUrl: String? = null,
     val error: String? = null,
-    /** UDP/RTP/RTSP feeds have no Media3 data source and need an external player. */
+    /**
+     * A source with no in-app route: rtsp/rtmp/mms feeds, or udp/rtp while the
+     * engine is set to External. UDP/RTP otherwise plays in-app on libVLC.
+     */
     val externalOnly: Boolean = false,
     /**
      * The feed is fine but this device has no MediaDrm module for its scheme, so

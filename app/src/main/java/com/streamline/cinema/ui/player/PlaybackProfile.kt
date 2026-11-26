@@ -103,6 +103,9 @@ private fun widthFor(height: Int): Int = when {
  * settled buffer selection while the Settings UI passes the live values.
  * [forceBuiltIn] covers the native-engine fallback: the profile then names the
  * engine that will actually run, so its rebuild key stays truthful.
+ * [forceEngine] is the source-class override (UDP/RTSP-style feeds that only
+ * libVLC can open); it applies only when the fallback is not already pinning
+ * the built-in player, and only when the configured engine is not External.
  * [live] only changes the adaptive fast-start window: live keeps the low-latency
  * gates, HLS/DASH VOD takes the file-class headroom.
  * [maxMemoryBytes] is injectable so tests resolve the same budget on any host.
@@ -117,10 +120,15 @@ internal fun playbackProfile(
     highCapacityVod: Boolean = settings.highCapacityBuffer,
     headers: Map<String, String> = emptyMap(),
     forceBuiltIn: Boolean = false,
+    forceEngine: PlaybackEngine? = null,
     maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
     live: Boolean = false
 ): PlaybackProfile = PlaybackProfile(
-    engine = if (forceBuiltIn) PlaybackEngine.BUILT_IN else settings.playbackEngine,
+    engine = when {
+        forceBuiltIn -> PlaybackEngine.BUILT_IN
+        forceEngine != null -> forceEngine
+        else -> settings.playbackEngine
+    },
     decoder = decoder,
     adaptive = adaptive,
     downmixStereo = settings.forceStereoDownmix,

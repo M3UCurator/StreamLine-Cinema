@@ -1343,6 +1343,7 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         const val MAX_SNIFF_CACHE = 64
         const val EPG_TTL_MS = 15 * 60 * 1000L
         const val SYNC_CHECK_INTERVAL_MS = 10 * 60 * 1000L
+        const val IPTV_GROUP_EXTRA = "group-title"
     }
 
     fun removeSource(source: ImportSource, deleteItems: Boolean = false): Int =
@@ -1362,8 +1363,12 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
         val state = _live.value
         if (state.loading && !force) return
         if (!force && state.catalogs.isNotEmpty()) {
-            val selected = state.selected ?: state.catalogs.first()
-            loadLiveCatalog(selected, state.filters, reload = false)
+            val selected = state.selected
+                ?.takeIf { !container.livePrefs.isCatalogHidden(it.key) }
+                ?: state.catalogs.firstOrNull { !container.livePrefs.isCatalogHidden(it.key) }
+            if (selected != null) {
+                loadLiveCatalog(selected, state.filters, reload = false)
+            }
             refreshEpg()
             return
         }
@@ -1373,9 +1378,10 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
             runCatching { repository.liveCatalogs(refreshIptv = refreshPlaylists) }
                 .onSuccess { load ->
                     val ordered = container.livePrefs.applyCatalogOrder(load.catalogs)
+                    val visible = ordered.filterNot { container.livePrefs.isCatalogHidden(it.key) }
                     val previous = _live.value
-                    val selected = ordered.firstOrNull { it.key == previous.selected?.key }
-                        ?: ordered.firstOrNull()
+                    val selected = visible.firstOrNull { it.key == previous.selected?.key }
+                        ?: visible.firstOrNull()
                     val keepFilters = selected?.key == previous.selected?.key
                     val filters = if (keepFilters) previous.filters else emptyMap()
                     _live.update {
@@ -1516,6 +1522,11 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectLiveCatalog(catalog: LiveCatalog, filters: Map<String, String> = emptyMap()) {
+        // Another surface (Kids curation) can pick a hidden list; reveal it so
+        // the Live rail and the channel table never disagree.
+        if (container.livePrefs.isCatalogHidden(catalog.key)) {
+            container.livePrefs.unhideCatalog(catalog.key)
+        }
         loadLiveCatalog(catalog, filters, reload = false)
     }
 
@@ -1598,6 +1609,49 @@ class CinemaViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleLiveFavorite(channel: LiveChannel): Boolean =
         container.livePrefs.toggleFavorite(channel.key)
+
+    /** Hides a channel from every Live view; stars and order survive a round trip. */
+    fun toggleLiveChannelHidden(channel: LiveChannel): Boolean =
+        container.livePrefs.toggleChannelHidden(channel.key, channel.name)
+
+    /** Hides one IPTV group; clearing the active filter keeps the rail consistent. */
+    fun toggleLiveGroupHidden(group: String): Boolean {
+        val catalog = _live.value.selected ?: return false
+        if (catalog.sourceKind != LiveSourceKind.IPTV) return false
+        val hidden = container.livePrefs.toggleGroupHidden(
+            catalog.key,
+            IPTV_GROUP_EXTRA,
+            group
+        )
+        if (hidden && _live.value.filters[IPTV_GROUP_EXTRA] == group) {
+            setLiveFilter(IPTV_GROUP_EXTRA, "")
+        }
+        return hidden
+    }
+
+    /** Hides a live list and moves the selection to the next list still on the rail. */
+    fun toggleLiveCatalogHidden(catalog: LiveCatalog): Boolean {
+        val label = catalog.name.ifBlank { catalog.addonName }.ifBlank { "Live list" }
+        val hidden = container.livePrefs.toggleCatalogHidden(catalog.key, label)
+        if (hidden && _live.value.selected?.key == catalog.key) {
+            val next = _live.value.catalogs.firstOrNull {
+                it.key != catalog.key && !container.livePrefs.isCatalogHidden(it.key)
+            }
+            if (next != null) {
+                loadLiveCatalog(next, emptyMap(), reload = false)
+            } else {
+                _live.update { it.copy(channels = emptyList(), loading = false, message = null) }
+            }
+        }
+        return hidden
+    }
+
+    fun unhideLiveCatalog(catalogKey: String) = container.livePrefs.unhideCatalog(catalogKey)
+
+    fun unhideLiveChannel(channelKey: String) = container.livePrefs.unhideChannel(channelKey)
+
+    fun unhideLiveGroup(catalogKey: String, group: String) =
+        container.livePrefs.unhideGroup(catalogKey, IPTV_GROUP_EXTRA, group)
 
     fun moveLiveChannel(channel: LiveChannel, delta: Int) {
         val state = _live.value

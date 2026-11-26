@@ -228,6 +228,9 @@ object StreamUrls {
      */
     fun needsKindDiscovery(raw: String): Boolean {
         val url = parse(raw).url
+        // Only an HTTP response can be walked; udp/rtp feeds are typed by the
+        // player, and a probe would reject the scheme outright.
+        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return false
         return kindOf(url) == null && !isDirectMedia(url)
     }
 

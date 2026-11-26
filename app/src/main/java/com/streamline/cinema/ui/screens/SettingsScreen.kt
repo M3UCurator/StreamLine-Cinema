@@ -1426,7 +1426,7 @@ fun SettingsScreen(
                             label = "Auto frame rate matching (AFR)",
                             checked = settings.frameRateMatching,
                             onChange = { vm.saveSettings { s -> s.copy(frameRateMatching = it) } },
-                            description = "Built-in, VLC and MPV match the display to the source rate (23.976 / 24 / 50 / 60 Hz)"
+                            description = "Built-in, VLC and MPV match the display to the source rate (23.976 / 24 / 50 / 60 Hz); Android 12+ switches seamlessly on QMS-capable TVs"
                         )
                         SettingsToggleRow(
                             label = "Unrestricted battery usage",

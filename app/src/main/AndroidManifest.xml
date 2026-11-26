@@ -8,7 +8,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- UDP multicast needs the IGMP join, and Android's Wi-Fi stack drops
+         group-addressed packets unless a MulticastLock is held. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The loopback relay keeps the process out of the cached state while an
+         external player streams from it; without a foreground service the OS
+         can freeze the process and cut the stream mid-play. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Player asks for the Doze exemption so background limits stop cutting
          sockets and buffers during playback. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -87,6 +95,19 @@
         <receiver
             android:name=".UpdateInstallReceiver"
             android:exported="false" />
+
+        <!-- Holds the process out of the cached state while an external player
+             reads the loopback relay. stopWithTask keeps it from outliving the
+             app when the task is swiped away. -->
+        <service
+            android:name=".data.RelayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="true">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Local loopback relay that serves an external video player during a hand-off" />
+        </service>
     </application>
 
 </manifest>
